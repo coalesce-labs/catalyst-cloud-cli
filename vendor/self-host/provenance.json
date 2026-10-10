@@ -1,6 +1,6 @@
 {
   "repository": "coalesce-labs/catalyst-cloud",
-  "commit": "f4d8e3a619449c261522a3642b1489955980463d",
+  "commit": "72e4e20f866e0c0885d1b40fc0e1a1026a2487a6",
   "sha256": {
     "deploy/self-host/compose.yaml": "0ffb7671c7ea49d8490d6e97093ada0afcb31da3b00092a8768150b090cca0bc",
     "deploy/self-host/compose.darwin-thoughts.yaml": "6269d66d6f487175ab8560d0648e65c8a0eccb86f69a8dc24daf41d8ae1dcf02",
