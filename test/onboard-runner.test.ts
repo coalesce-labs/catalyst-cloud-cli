@@ -1857,7 +1857,10 @@ describe("owner-managed preserving replacement through the existing CLI path", (
       capability: f.state.capability,
     });
     let present = true;
+    const cachedRuntime = { Id: `sha256:${"d".repeat(64)}`, RepoDigests: [old] };
+    let runtimeCacheAvailable = true;
     const row = {
+      Image: cachedRuntime.Id,
       Config: {
         Image: old,
         Env: [
@@ -1881,6 +1884,8 @@ describe("owner-managed preserving replacement through the existing CLI path", (
           return { code: 0, stdout: present ? "e".repeat(64) : "" };
         if (args[0] === "inspect")
           return { code: 0, stdout: JSON.stringify([row]) };
+        if (args[0] === "image" && args[1] === "inspect" && args[2] === old && runtimeCacheAvailable)
+          return { code: 0, stdout: JSON.stringify([cachedRuntime]) };
         return { code: 1, stdout: "" };
       },
     });
@@ -1909,6 +1914,8 @@ describe("owner-managed preserving replacement through the existing CLI path", (
       f,
       credential,
       row,
+      cachedRuntime,
+      setRuntimeCacheAvailable: (value: boolean) => { runtimeCacheAvailable = value; },
       removedOutsideCli: () => {
         present = false;
       },
@@ -1954,6 +1961,34 @@ describe("owner-managed preserving replacement through the existing CLI path", (
     expect(x.f.engine.calls.filter(call => call === "composeUp")).toHaveLength(1);
     expect(x.f.engine.files.get("CATALYST_HOST_CREDENTIAL_FILE")).toBe(x.credential);
     expect(x.f.state.mints).toEqual([]);
+  });
+  function interruptedIntent(x: ReturnType<typeof retained>) {
+    const middle = `ghcr.io/coalesce-labs/catalyst-supervisor@sha256:${"e".repeat(64)}`;
+    writeFileSync(join(x.f.dir, ".env"), readFileSync(join(x.f.dir, ".env"), "utf8").replace(/CATALYST_SUPERVISOR_IMAGE=[^\n]+/, `CATALYST_SUPERVISOR_IMAGE=${middle}`), { mode: 0o600 });
+  }
+  test("a cached old runtime upgrades after saved intent advanced to a different intermediate pin", async () => {
+    const x = retained();
+    interruptedIntent(x);
+    expect(await actOwned(x.f)).toEqual({ state: "done" });
+    expect(x.f.engine.calls.filter(call => call === "composeUp")).toHaveLength(1);
+    expect(x.f.engine.files.get("CATALYST_HOST_CREDENTIAL_FILE")).toBe(x.credential);
+    expect(x.f.state.mints).toEqual([]);
+    expect(readFileSync(join(x.f.dir, ".env"), "utf8")).toContain(`CATALYST_SUPERVISOR_IMAGE=${SUPERVISOR}`);
+  });
+  test.each(["cache unavailable", "cached identity differs", "configured digest absent", "runtime identity absent", "runtime identity unpinned"])("intermediate saved intent refuses %s before custody, enrollment or config writes", async kind => {
+    const x = retained();
+    interruptedIntent(x);
+    const before = readFileSync(join(x.f.dir, ".env"));
+    if (kind === "cache unavailable") x.setRuntimeCacheAvailable(false);
+    if (kind === "cached identity differs") x.cachedRuntime.Id = `sha256:${"f".repeat(64)}`;
+    if (kind === "configured digest absent") x.cachedRuntime.RepoDigests = [];
+    if (kind === "runtime identity absent") x.row.Image = "";
+    if (kind === "runtime identity unpinned") x.row.Image = "latest";
+    x.f.engine.nativeThoughtsCustody = async () => { throw Error("must not reach custody on an unverified runtime"); };
+    x.f.engine.enrollment = async () => { throw Error("must not reach enrollment on an unverified runtime"); };
+    expect((await actOwned(x.f)).reason).toBe("runner_installation_unverified");
+    expect(readFileSync(join(x.f.dir, ".env"))).toEqual(before);
+    expect(x.f.engine.calls).not.toContain("composeUp");
   });
   test("a custody refusal preserves the old pin and permits a supported retry", async () => {
     const x = retained();

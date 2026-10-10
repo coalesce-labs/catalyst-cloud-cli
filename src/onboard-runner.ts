@@ -329,17 +329,27 @@ export function dockerRunnerEngine(
         const hostName = names[0].slice("CATALYST_HOST_NAME=".length);
         const baseUrl = origins[0].slice("CATALYST_MIRROR_URL=".length);
         if (!HOST_NAME.test(hostName)) return "unverified";
-        // The saved intent is either this exact old pin or the exact requested replacement.
-        // The latter resumes an upgrade stopped after persisting intent but before activation.
-        // Both paths require an immutable runtime pin from the same repository and identity.
-        if (config.Image !== supervisorImage &&
-          (!saved || !IMAGE_REF.test(saved.CATALYST_SUPERVISOR_IMAGE ?? "") ||
+        // An interrupted update can leave saved intent ahead of the actual runtime.
+        // A later requested pin still requires the same publisher and installation identity.
+        if (config.Image !== supervisorImage) {
+          if (!saved || !IMAGE_REF.test(saved.CATALYST_SUPERVISOR_IMAGE ?? "") ||
             typeof config.Image !== "string" || !IMAGE_REF.test(config.Image) ||
-            (config.Image !== saved.CATALYST_SUPERVISOR_IMAGE && saved.CATALYST_SUPERVISOR_IMAGE !== supervisorImage) ||
             config.Image.split("@sha256:")[0] !== supervisorImage.split("@sha256:")[0] ||
             saved.CATALYST_SUPERVISOR_IMAGE.split("@sha256:")[0] !== supervisorImage.split("@sha256:")[0] ||
             saved.CATALYST_HOST_NAME !== hostName ||
-            normalizeBaseUrl(saved.CATALYST_MIRROR_URL ?? "") !== normalizeBaseUrl(baseUrl))) return "unverified";
+            normalizeBaseUrl(saved.CATALYST_MIRROR_URL ?? "") !== normalizeBaseUrl(baseUrl)) return "unverified";
+          if (config.Image !== saved.CATALYST_SUPERVISOR_IMAGE && saved.CATALYST_SUPERVISOR_IMAGE !== supervisorImage) {
+            // Prove the configured old digest names this exact cached runtime, without a pull.
+            const imageRead = await docker(["image", "inspect", config.Image], { signal });
+            if (imageRead.code !== 0 || signal?.aborted) return "unverified";
+            const cached = JSON.parse(imageRead.stdout);
+            const runtimeImage = rows[0]?.Image;
+            if (!Array.isArray(cached) || cached.length !== 1 ||
+              typeof runtimeImage !== "string" || !/^sha256:[a-f0-9]{64}$/.test(runtimeImage) ||
+              cached[0]?.Id !== runtimeImage || !Array.isArray(cached[0]?.RepoDigests) ||
+              !cached[0].RepoDigests.includes(config.Image)) return "unverified";
+          }
+        }
         return { dir, hostName, baseUrl: normalizeBaseUrl(baseUrl) };
       } catch { return "unverified"; }
     },
