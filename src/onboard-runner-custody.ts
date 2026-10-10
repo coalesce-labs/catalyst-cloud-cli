@@ -38,12 +38,14 @@ interface Artifacts {
 interface EngineInput extends Executables {
   readonly [key: string]: unknown;
   readonly principal: Principal; readonly supervisorImage: string;
+  readonly producerSupervisorImage?: string;
   readonly runnerImage: string; readonly deadlineMs: number;
   readonly signal?: AbortSignal;
 }
 interface EngineIdentity {
   readonly endpoint: string; readonly daemonId: string;
   readonly cachedSupervisor: boolean; readonly cachedRunner: boolean;
+  readonly cachedProducerSupervisor: boolean;
   readonly runnerCustodyVersion?: string;
 }
 interface BootstrapInput extends Executables {
@@ -235,6 +237,7 @@ function factory(ports: Ports) {
       const nodeHash = executable(executables.nodeExecutable, principal, roots);
       const dockerHash = executable(executables.dockerExecutable, principal, roots);
       let authority: Authority | undefined;
+      let producerSupervisorImage = input.supervisorImage;
       if (existing) {
         custody.walk(state, false, 0o700, true);
         const runtime = record(parse(custody.read(join(state, "runtime.json"), 4096)),
@@ -248,20 +251,28 @@ function factory(ports: Ports) {
             authority.nativeHome !== principal.home || authority.thoughtsRoot !== thoughtsRoot ||
             authority.locksRoot !== locksRoot || authority.requestsRoot !== requestsRoot ||
             authority.responsesRoot !== responsesRoot || row.privateKeyFile !== privateKeyFile ||
-            row.supervisorImage !== input.supervisorImage || row.dockerExecutable !== executables.dockerExecutable ||
+            row.dockerExecutable !== executables.dockerExecutable ||
             row.dockerExecutableSha256 !== dockerHash) fail("existing_authority_mismatch");
+        if (typeof row.supervisorImage !== "string") fail("existing_authority_mismatch");
+        image(row.supervisorImage);
+        if (row.supervisorImage.split("@sha256:")[0] !== input.supervisorImage.split("@sha256:")[0])
+          fail("existing_authority_mismatch");
         let key;
         try { key = createPrivateKey({ key: custody.read(privateKeyFile, 4096), type: "pkcs8", format: "der" }); }
         catch { return fail("private_key_custody_invalid"); }
         if (key.asymmetricKeyType !== "ed25519" || createPublicKey(key).export({ type: "spki", format: "der" }).toString("base64") !== authority.publicKey) fail("private_key_authority_mismatch");
+        // The enrolled producer attests its helper image. A runtime update does not re-enroll it.
+        producerSupervisorImage = row.supervisorImage;
       }
       custody.recheck();
       alive();
       const engine = await ports.engineIdentity({ ...executables, principal,
-        supervisorImage: input.supervisorImage, runnerImage: input.runnerImage, deadlineMs: input.deadlineMs, signal });
+        supervisorImage: input.supervisorImage, producerSupervisorImage,
+        runnerImage: input.runnerImage, deadlineMs: input.deadlineMs, signal });
       alive();
       if (!/^unix:\/\/\/[^,\0]+$/.test(engine.endpoint) || normalize(engine.endpoint.slice(7)) !== engine.endpoint.slice(7) ||
           !engine.cachedSupervisor || !engine.cachedRunner || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(engine.daemonId)) fail("engine_endpoint_or_cache_invalid");
+      if (engine.cachedProducerSupervisor !== true) fail("producer_helper_cache_unavailable");
       if (engine.runnerCustodyVersion !== "v1") fail("runner_custody_label_unqualified");
       if (authority && (authority.endpoint !== engine.endpoint || authority.daemonId !== engine.daemonId)) fail("engine_authority_mismatch");
       custody.recheck();
@@ -306,7 +317,7 @@ function factory(ports: Ports) {
       await ports.service({ ...executables, uid: principal.uid, serviceLabel: LABEL, plistPath, deadlineMs: input.deadlineMs, signal });
       alive();
       const receipt = await ports.receiveBootstrap({ ...executables, authority, configPath,
-        supervisorImage: input.supervisorImage, deadlineMs: input.deadlineMs, signal });
+        supervisorImage: producerSupervisorImage, deadlineMs: input.deadlineMs, signal });
       alive();
       if (ports.now() >= input.deadlineMs) fail("startup_proof_expired");
       // The canonical verifier compares these observations byte-for-byte with
@@ -413,6 +424,9 @@ async function actualEngine(input: EngineInput): Promise<EngineIdentity> {
     ["--config", config, "--host", selected, ...args], input.deadlineMs, 16384, input.signal);
   const daemon = await run(["info", "--format", "{{.ID}}"]);
   const supervisor = await run(["image", "inspect", "--format", "{{.Id}}", input.supervisorImage]);
+  const producerSupervisorImage = input.producerSupervisorImage ?? input.supervisorImage;
+  const producerSupervisor = producerSupervisorImage === input.supervisorImage ? supervisor :
+    await run(["image", "inspect", "--format", "{{.Id}}", producerSupervisorImage]);
   const runner = await run(["image", "inspect", "--format", "{{json .}}", input.runnerImage]);
   if (daemon.code !== 0) fail("engine_identity_unavailable");
   let runnerId: string | undefined;
@@ -436,6 +450,7 @@ async function actualEngine(input: EngineInput): Promise<EngineIdentity> {
   }
   return { endpoint: selected, daemonId: daemon.stdout,
     cachedSupervisor: supervisor.code === 0 && /^sha256:[a-f0-9]{64}$/.test(supervisor.stdout),
+    cachedProducerSupervisor: producerSupervisor.code === 0 && /^sha256:[a-f0-9]{64}$/.test(producerSupervisor.stdout),
     cachedRunner: runnerId !== undefined,
     ...(runnerCustodyVersion === undefined ? {} : { runnerCustodyVersion }) };
 }

@@ -19,7 +19,7 @@ describe("actual custody Engine selection through a fixed fake executable", () =
     if (oldHost === undefined) delete process.env.DOCKER_HOST; else process.env.DOCKER_HOST = oldHost;
     fs.rmSync(home, { recursive: true, force: true });
   });
-  function fixture(label: string | null = "v1") {
+  function fixture(label: string | null = "v1", missingImage?: string) {
     const log = join(home, "calls.jsonl");
     const executable = join(home, "fixed-docker");
     const source = "#!" + fs.realpathSync(process.execPath) + "\n" + [
@@ -27,7 +27,7 @@ describe("actual custody Engine selection through a fixed fake executable", () =
       "fs.appendFileSync(" + JSON.stringify(log) + ',JSON.stringify(args)+"\\n");',
       'if(args.includes("context")) console.log(args.includes("lane-selected")?"unix:///selected.sock":"unix:///default.sock");',
       'else if(args.includes("info")) console.log("selected-daemon");',
-      'else if(args.includes("image")) {if(args.some(arg=>arg.includes("json .")))console.log(JSON.stringify({Id:"sha256:"+"a".repeat(64),Config:{Labels:' +
+      'else if(args.includes("image")) {if(args.at(-1)===' + JSON.stringify(missingImage ?? null) + ')process.exit(1);if(args.some(arg=>arg.includes("json .")))console.log(JSON.stringify({Id:"sha256:"+"a".repeat(64),Config:{Labels:' +
         JSON.stringify(label === null ? {} : { "dev.catalystcloud.runner.darwin-thoughts-custody": label }) +
         '}}));else console.log("sha256:"+"a".repeat(64));}',
       'else process.exit(1);',
@@ -59,6 +59,29 @@ describe("actual custody Engine selection through a fixed fake executable", () =
     const calls = fs.readFileSync(f.log, "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
     expect(calls[0]).toContain("lane-selected");
     expect(calls.slice(1).every(call => call.includes("unix:///selected.sock"))).toBe(true);
+  });
+  it("receives the runtime and enrolled helper caches separately on the same selected Engine", async () => {
+    const f = fixture(); process.env.DOCKER_CONTEXT = "lane-selected";
+    const producerSupervisorImage = "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:" + "c".repeat(64);
+    expect(await inspectDarwinThoughtsEngineForTest({ ...f.input, producerSupervisorImage })).toMatchObject({
+      endpoint: "unix:///selected.sock", cachedSupervisor: true, cachedProducerSupervisor: true, cachedRunner: true,
+    });
+    const calls = fs.readFileSync(f.log, "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
+    expect(calls).toHaveLength(5);
+    expect(calls.filter(call => call.includes("image")).map(call => call.at(-1)))
+      .toEqual([f.input.supervisorImage, producerSupervisorImage, f.input.runnerImage]);
+    expect(calls.slice(1).every(call => call.includes("unix:///selected.sock"))).toBe(true);
+    expect(calls.every(call => !call.includes("pull"))).toBe(true);
+  });
+  it("does not substitute the cached runtime image for an uncached enrolled helper", async () => {
+    const producerSupervisorImage = "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:" + "c".repeat(64);
+    const f = fixture("v1", producerSupervisorImage);
+    expect(await inspectDarwinThoughtsEngineForTest({ ...f.input, producerSupervisorImage })).toMatchObject({
+      cachedSupervisor: true, cachedProducerSupervisor: false, cachedRunner: true,
+    });
+    const calls = fs.readFileSync(f.log, "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
+    expect(calls.some(call => call.includes("image") && call.at(-1) === producerSupervisorImage)).toBe(true);
+    expect(calls.every(call => !call.includes("pull"))).toBe(true);
   });
   it("refuses conflicting HOST/CONTEXT before any executable work", async () => {
     const f = fixture(); process.env.DOCKER_CONTEXT = "lane-selected"; process.env.DOCKER_HOST = "unix:///other.sock";

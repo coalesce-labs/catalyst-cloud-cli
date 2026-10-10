@@ -522,6 +522,19 @@ function checkAncestors(expected) {
     }
   }
 }
+function receiveStagingChannel(path, before, stagedFile, observedAncestors) {
+  const current = directory(path, true);
+  if (sameDirectoryAuthority(before, current))
+    return current;
+  if (before.dev !== current.dev || before.ino !== current.ino || before.mode !== current.mode || before.uid !== 0n || before.gid !== 0n || current.uid !== 10001n || current.gid !== 10001n || process.getuid?.() !== 10001 || process.geteuid?.() !== 10001 || process.getgid?.() !== 10001 || stagedFile.uid !== 10001n || stagedFile.gid !== 10001n)
+    throw failure("ancestor_identity");
+  const channel = observedAncestors.find((ancestor) => ancestor.path === path);
+  if (!channel || !sameDirectoryAuthority(channel.stat, before))
+    throw failure("ancestor_identity");
+  checkAncestors(observedAncestors.filter((ancestor) => ancestor.path !== path));
+  channel.stat = current;
+  return current;
+}
 function isMissing(error) {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
@@ -607,7 +620,7 @@ async function exchange(options, bootstrap) {
     issuedAtMs,
     expiresAtMs: options.deadlineMs
   }));
-  const requests = directory(options.requestDir, true);
+  let requests = directory(options.requestDir, true);
   const responses = directory(options.responseDir, true);
   const creationPaths = bootstrap ? bootstrapPaths(authority, options.tenant, options.repository) : [];
   if (bootstrap)
@@ -651,6 +664,7 @@ async function exchange(options, bootstrap) {
     } finally {
       fs.closeSync(fd);
     }
+    requests = receiveStagingChannel(options.requestDir, requests, owned, aliasAncestors);
     checkAncestors(aliasAncestors);
     if (!sameDirectoryAuthority(requests, directory(options.requestDir, true)))
       throw failure("channel_identity");
