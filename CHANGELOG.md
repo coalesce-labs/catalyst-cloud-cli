@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.9
+
+Setup on macOS now accepts Docker’s initial folder ownership mapping during the local storage check. Updating this computer keeps its verified file-access enrollment while installing the new service images.
+
 ## 0.16.8
 
 Setup can resume an update stopped by a local storage check. Failed access checks keep the earlier settings and report which check stopped setup.
