@@ -65,7 +65,7 @@ describe("native Darwin custody installer", () => {
           cachedProducerSupervisor, cachedRunner: cached, runnerCustodyVersion };
       },
       service: async (input: Record<string, unknown>) => { calls.push({ kind: "service", ...input }); },
-      receiveBootstrap: async (input: { configPath: string; authority: Record<string, any>; deadlineMs: number; supervisorImage: string }) => {
+      receiveBootstrap: async input => {
         calls.push({ kind: "bootstrap", supervisorImage: input.supervisorImage });
         const config = JSON.parse(fs.readFileSync(input.configPath, "utf8"));
         const authority = input.authority;
