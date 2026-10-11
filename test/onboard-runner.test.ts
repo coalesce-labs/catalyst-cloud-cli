@@ -550,12 +550,15 @@ describe("prerequisites", () => {
     expect(f.engine.calls).toEqual(["info"]);
   });
 
-  test("supported VM setup prepares missing images before receiving native custody", async () => {
-    const engine = fakeEngine();
+  test.each([
+    { name: "macOS Docker Desktop", arch: "arm64" as const, vm: true },
+    { name: "native Linux", arch: "amd64" as const, vm: false },
+  ])("supported $name setup prepares missing images before receiving native custody", async (info) => {
+    const engine = fakeEngine(info);
     engine.images.clear();
     engine.pull = async (ref) => {
       engine.calls.push(`pull ${ref}`);
-      engine.images.set(ref, "arm64");
+      engine.images.set(ref, info.arch);
       return true;
     };
     const f = fixture({ selected: true, runnerCloud: true, engine });
@@ -563,7 +566,7 @@ describe("prerequisites", () => {
       engine.calls.push("nativeThoughtsCustody");
       for (const ref of [SUPERVISOR, WATCHDOG, RUNNER]) {
         expect(engine.calls.filter(call => call === `pull ${ref}`)).toHaveLength(1);
-        expect(engine.images.get(ref)).toBe("arm64");
+        expect(engine.images.get(ref)).toBe(info.arch);
       }
       expect(engine.calls).toContain("vmCapabilities");
       expect(engine.calls).not.toContain("composeUp");
@@ -573,7 +576,9 @@ describe("prerequisites", () => {
       return nativeCustodyFixture(dir);
     };
     expect(await run(f)).toMatchObject({ state: "done" });
-    expect(engine.calls).toContain("nativeThoughtsCustody");
+    for (const ref of [SUPERVISOR, WATCHDOG, RUNNER])
+      expect(engine.calls.filter(call => call === `pull ${ref}`)).toHaveLength(1);
+    expect(engine.calls.includes("nativeThoughtsCustody")).toBe(info.vm);
     expect(engine.calls.filter(call => call === "composeUp")).toHaveLength(1);
   });
 
