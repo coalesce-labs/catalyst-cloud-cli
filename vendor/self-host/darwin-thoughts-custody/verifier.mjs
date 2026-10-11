@@ -514,13 +514,21 @@ function ancestors(paths, allowMissing = false) {
   }
   return Array.from(observed, ([path, stat]) => ({ path, stat }));
 }
-function checkAncestors(expected) {
+function checkAncestors(expected, projection) {
   for (const ancestor of expected) {
     const current = fs.lstatSync(ancestor.path, { bigint: true });
     if (!current.isDirectory() || current.isSymbolicLink() || !sameDirectoryAuthority(current, ancestor.stat)) {
+      if (projection?.paths.has(ancestor.path) && current.isDirectory() && !current.isSymbolicLink() && isBootstrapGuestOwnerProjection(ancestor.stat, current, projection.staged)) {
+        projection.authenticateIfPresent();
+        ancestor.stat = current;
+        continue;
+      }
       throw failure("ancestor_identity");
     }
   }
+}
+function isBootstrapGuestOwnerProjection(before, current, stagedFile) {
+  return isInitialGuestOwnerProjection(before, current, stagedFile) || before.dev === current.dev && before.ino === current.ino && before.mode === current.mode && before.uid === 10001n && before.gid === 10001n && current.uid === 0n && current.gid === 0n && process.getuid?.() === 10001 && process.geteuid?.() === 10001 && process.getgid?.() === 10001 && stagedFile.uid === 10001n && stagedFile.gid === 10001n;
 }
 function isInitialGuestOwnerProjection(before, current, stagedFile) {
   return before.dev === current.dev && before.ino === current.ino && before.mode === current.mode && before.uid === 0n && before.gid === 0n && current.uid === 10001n && current.gid === 10001n && process.getuid?.() === 10001 && process.geteuid?.() === 10001 && process.getgid?.() === 10001 && stagedFile.uid === 10001n && stagedFile.gid === 10001n;
@@ -538,7 +546,7 @@ function receiveStagingChannel(path, before, stagedFile, observedAncestors) {
   channel.stat = current;
   return current;
 }
-function receiveWaitingResponseChannel(path, before, stagedFile, observedAncestors, responsePath, bootstrapRoots) {
+function receiveWaitingResponseChannel(path, before, stagedFile, observedAncestors, responsePath, bootstrapRoots, authenticatePresentResponse, bootstrapProjection) {
   const maxPasses = bootstrapRoots ? 4 : 2;
   for (let pass = 0;pass < maxPasses; pass += 1) {
     const current = directory(path, true);
@@ -555,8 +563,9 @@ function receiveWaitingResponseChannel(path, before, stagedFile, observedAncesto
       });
     }
     const changed = projections.filter((projection) => !sameDirectoryAuthority(projection.before, projection.current));
+    const receiveProjection = bootstrapRoots ? isBootstrapGuestOwnerProjection : isInitialGuestOwnerProjection;
     for (const projection of changed) {
-      if (!isInitialGuestOwnerProjection(projection.before, projection.current, stagedFile))
+      if (!receiveProjection(projection.before, projection.current, stagedFile))
         throw failure("ancestor_identity");
       const captured = observedAncestors.find((ancestor) => ancestor.path === projection.path);
       if (!captured || !sameDirectoryAuthority(captured.stat, projection.before))
@@ -565,6 +574,10 @@ function receiveWaitingResponseChannel(path, before, stagedFile, observedAncesto
     const requireAbsentResponse = () => {
       try {
         fs.lstatSync(responsePath);
+        if (bootstrapRoots && authenticatePresentResponse) {
+          authenticatePresentResponse();
+          return;
+        }
         throw failure("ancestor_identity");
       } catch (error) {
         if (!isMissing(error))
@@ -573,13 +586,13 @@ function receiveWaitingResponseChannel(path, before, stagedFile, observedAncesto
     };
     if (changed.length > 0)
       requireAbsentResponse();
-    checkAncestors(observedAncestors.filter((ancestor) => !projections.some((projection) => projection.path === ancestor.path)));
+    checkAncestors(observedAncestors.filter((ancestor) => !projections.some((projection) => projection.path === ancestor.path)), bootstrapProjection);
     let resample = false;
     for (const projection of projections) {
       const next = directory(projection.path, projection.privateChannel);
       if (sameDirectoryAuthority(projection.current, next))
         continue;
-      if (!isInitialGuestOwnerProjection(projection.current, next, stagedFile))
+      if (!receiveProjection(projection.current, next, stagedFile))
         throw failure("ancestor_identity");
       resample = true;
     }
@@ -709,6 +722,54 @@ async function exchange(options, bootstrap) {
   const stagingPath = join(options.requestDir, `.${request.nonce}.tmp`);
   const responsePath = join(options.responseDir, `${request.nonce}.json`);
   let owned;
+  const projectedPaths = new Set;
+  for (const [root, leaf] of creationPaths) {
+    if (!root || !leaf)
+      throw failure("bootstrap_path");
+    let path = root;
+    projectedPaths.add(path);
+    for (const component of leaf.slice(root.length + 1).split("/")) {
+      path = join(path, component);
+      projectedPaths.add(path);
+    }
+  }
+  const bootstrapResponseOwner = () => {
+    const stat = fs.lstatSync(responsePath, { bigint: true });
+    if (!(stat.uid === 0n && stat.gid === 0n || stat.uid === 10001n && stat.gid === 10001n) || process.getuid?.() !== 10001 || process.geteuid?.() !== 10001 || process.getgid?.() !== 10001 || owned?.uid !== 10001n || owned.gid !== 10001n)
+      throw failure("file_owner");
+    return { uid: Number(stat.uid), gid: Number(stat.gid) };
+  };
+  const authenticatePresentResponse = () => {
+    const bytes = readDarwinThoughtsCustodyFile(responsePath, bootstrapResponseOwner());
+    const expectation = {
+      authority,
+      request,
+      nowMs: now(),
+      engineCheckout: currentIdentity(options.checkoutPath, targets.checkoutSource),
+      engineLock: currentIdentity(options.lockPath, targets.lockSource)
+    };
+    if (gitPresent(gitPath))
+      expectation.engineGit = currentIdentity(gitPath, join(targets.checkoutSource, ".git"));
+    verifyDarwinThoughtsCustodyResponse(bytes, expectation);
+  };
+  const projection = () => {
+    if (!bootstrap || !owned)
+      return;
+    return {
+      paths: projectedPaths,
+      staged: owned,
+      authenticateIfPresent() {
+        try {
+          fs.lstatSync(responsePath);
+        } catch (error) {
+          if (isMissing(error))
+            return;
+          throw error;
+        }
+        authenticatePresentResponse();
+      }
+    };
+  };
   let published = false;
   try {
     const fd = guarded(() => fs.openSync(stagingPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 384));
@@ -745,8 +806,14 @@ async function exchange(options, bootstrap) {
       if (!Number.isSafeInteger(nowMs) || nowMs < previousNow || nowMs >= options.deadlineMs)
         throw failure("deadline");
       previousNow = nowMs;
-      responses = receiveWaitingResponseChannel(options.responseDir, responses, owned, aliasAncestors, responsePath, bootstrap ? authority : undefined);
-      checkAncestors(aliasAncestors);
+      responses = receiveWaitingResponseChannel(options.responseDir, responses, owned, aliasAncestors, responsePath, bootstrap ? authority : undefined, bootstrap ? authenticatePresentResponse : undefined, projection());
+      checkAncestors(aliasAncestors, projection());
+      if (bootstrap) {
+        const receivedRequest = aliasAncestors.find((ancestor) => ancestor.path === options.requestDir);
+        if (!receivedRequest)
+          throw failure("ancestor_identity");
+        requests = receivedRequest.stat;
+      }
       for (const [path, expected] of [
         [options.requestDir, requests],
         [options.responseDir, responses]
@@ -769,10 +836,7 @@ async function exchange(options, bootstrap) {
         const receivedAncestors = bootstrap ? guarded(() => ancestors(creationPaths.map((paths) => paths[1]))) : [];
         const receivedGitPresent = options.gitPath !== undefined || gitPresent(gitPath);
         const receivedGitAncestors = receivedGitPresent ? guarded(() => ancestors([gitPath])) : [];
-        const bytes = readDarwinThoughtsCustodyFile(responsePath, {
-          uid: Number(responses.uid),
-          gid: Number(responses.gid)
-        });
+        const bytes = readDarwinThoughtsCustodyFile(responsePath, bootstrap && process.getuid?.() === 10001 && process.geteuid?.() === 10001 && process.getgid?.() === 10001 && owned.uid === 10001n && owned.gid === 10001n ? bootstrapResponseOwner() : { uid: Number(responses.uid), gid: Number(responses.gid) });
         const expectation = {
           authority,
           request,
@@ -782,16 +846,16 @@ async function exchange(options, bootstrap) {
         };
         if (receivedGitPresent)
           expectation.engineGit = currentIdentity(gitPath, join(targets.checkoutSource, ".git"));
-        checkAncestors(aliasAncestors);
-        checkAncestors(receivedGitAncestors);
+        checkAncestors(aliasAncestors, projection());
+        checkAncestors(receivedGitAncestors, projection());
         expectation.nowMs = now();
         if (!Number.isSafeInteger(expectation.nowMs) || expectation.nowMs < previousNow || expectation.nowMs >= options.deadlineMs)
           throw failure("deadline");
         const proof = verifyDarwinThoughtsCustodyResponse(bytes, expectation);
-        checkAncestors(receivedGitAncestors);
+        checkAncestors(receivedGitAncestors, projection());
         if (bootstrap) {
-          checkAncestors(receivedAncestors);
-          checkAncestors(aliasAncestors);
+          checkAncestors(receivedAncestors, projection());
+          checkAncestors(aliasAncestors, projection());
           checkBootstrapDirectories(creationPaths, false);
         }
         const finalNow = now();

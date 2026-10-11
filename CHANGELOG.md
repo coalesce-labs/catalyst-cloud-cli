@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.13
+
+Setup on macOS now verifies private file access when Docker changes a folder’s displayed owner in either direction. Signed access verification remains required. Re-run setup to update this computer.
+
 ## 0.16.12
 
 Setup on macOS now handles changing folder ownership during the local storage check. Signed file-access verification remains required. Re-run setup to update this computer.
