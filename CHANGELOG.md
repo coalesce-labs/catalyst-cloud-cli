@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.14
+
+Setup uses the updated macOS folder checks and verifies the required release image before starting work. Re-run setup to update this computer.
+
 ## 0.16.13
 
 Setup on macOS now verifies private file access when Docker changes a folder’s displayed owner in either direction. Signed access verification remains required. Re-run setup to update this computer.

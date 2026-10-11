@@ -628,14 +628,16 @@ export function onboardReasonText(
     const commands=nativeEgressInstallCommands();
     return "Native Linux needs a root-managed session egress producer before the runner can take work. Its elevated installation creates the isolated session network and private-range and host-isolation nftables rules. Review and authorize this separately; setup has not run it. It requires systemd, python3, Docker and nftables. " + (commands ? "Install the verified bundled artifacts, then run the same setup command:\n"+commands : "Setup could not verify its bundled artifacts. Reinstall the CLI before authorizing installation.");
   }
-  if (reason === "runner_images_unavailable") {
+  if (reason === "runner_images_unavailable" || reason === "runner_supervisor_image_unavailable") {
     const image = step.evidence?.image;
     const named =
       typeof image === "string" &&
       /^[a-z0-9][a-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}$/.test(image)
         ? ` ${image}`
         : "";
-    return `This machine does not have the Catalyst image${named}, and its pull did not complete. Check network access and run the same setup command to retry the anonymous pull.`;
+    return reason === "runner_supervisor_image_unavailable"
+      ? `Setup could not verify or download the supervisor image required by this CLI release${named}. It has not started new work. Check network access and run the same setup command again.`
+      : `This machine does not have the Catalyst image${named}, and its pull did not complete. Check network access and run the same setup command to retry the anonymous pull.`;
   }
   if (reason === "runner_org_key_missing") {
     const where = context.baseUrl
