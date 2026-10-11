@@ -2,7 +2,7 @@
 
 ## 0.16.14
 
-Setup uses the updated macOS folder checks and verifies the supervisor image required by this release before starting work. Re-run setup to update this computer.
+Setup uses the updated macOS folder checks and verifies the required release image before starting work. Re-run setup to update this computer.
 
 ## 0.16.13
 
