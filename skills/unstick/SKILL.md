@@ -4,7 +4,7 @@ description: >-
   Get a stuck Catalyst Cloud ticket moving again. Use when the person asks "why is this parked and can you release it?", "unpark this", "get things flowing again", "the outage is over, retry what failed", or hands you a ticket that is not moving. Reads why nothing runs and what holds the ticket through the catalyst CLI, decides whether the recorded cause is fixed, previews the release, releases every governor holding the ticket the right way (or one failure class across a team), and raises an ask only for what a person has to do. Never releases a cause it cannot show changed without saying so.
 allowed-tools: Bash(catalyst:*) Bash(npx -p @catalyst-cloud/cli catalyst:*)
 ---
-<!-- vendored-from: @catalyst-cloud/catalyst-skills@0.16.10 — written in this repository for customer accounts -->
+<!-- vendored-from: @catalyst-cloud/catalyst-skills@0.16.11 — written in this repository for customer accounts -->
 
 # Unstick
 

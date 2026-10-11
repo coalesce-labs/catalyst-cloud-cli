@@ -550,7 +550,39 @@ describe("prerequisites", () => {
     expect(f.engine.calls).toEqual(["info"]);
   });
 
-  test("missing cached VM images stop before custody, pulls, enrollment or Compose", async () => {
+  test.each([
+    { name: "macOS Docker Desktop", arch: "arm64" as const, vm: true },
+    { name: "native Linux", arch: "amd64" as const, vm: false },
+  ])("supported $name setup prepares missing images before receiving native custody", async (info) => {
+    const engine = fakeEngine(info);
+    engine.images.clear();
+    engine.pull = async (ref) => {
+      engine.calls.push(`pull ${ref}`);
+      engine.images.set(ref, info.arch);
+      return true;
+    };
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    engine.nativeThoughtsCustody = async ({ dir }) => {
+      engine.calls.push("nativeThoughtsCustody");
+      for (const ref of [SUPERVISOR, WATCHDOG, RUNNER]) {
+        expect(engine.calls.filter(call => call === `pull ${ref}`)).toHaveLength(1);
+        expect(engine.images.get(ref)).toBe(info.arch);
+      }
+      expect(engine.calls).toContain("vmCapabilities");
+      expect(engine.calls).not.toContain("composeUp");
+      expect(f.state.mints).toEqual([]);
+      expect(f.state.keyMints).toEqual([]);
+      expect(f.state.admissionWrites).toEqual([]);
+      return nativeCustodyFixture(dir);
+    };
+    expect(await run(f)).toMatchObject({ state: "done" });
+    for (const ref of [SUPERVISOR, WATCHDOG, RUNNER])
+      expect(engine.calls.filter(call => call === `pull ${ref}`)).toHaveLength(1);
+    expect(engine.calls.includes("nativeThoughtsCustody")).toBe(info.vm);
+    expect(engine.calls.filter(call => call === "composeUp")).toHaveLength(1);
+  });
+
+  test("unavailable VM images stop before custody, enrollment or Compose", async () => {
     const engine = fakeEngine();
     engine.images.delete(SUPERVISOR);
     const f = fixture({ selected: true, engine });
@@ -560,10 +592,63 @@ describe("prerequisites", () => {
       reason: "runner_images_unavailable",
       evidence: { selected: true, image: SUPERVISOR },
     });
-    expect(engine.calls.some(call => call.startsWith("pull "))).toBe(false);
+    expect(engine.calls.filter(call => call.startsWith("pull "))).toEqual([`pull ${SUPERVISOR}`]);
     expect(engine.calls).not.toContain("nativeThoughtsCustody");
     expect(f.state.mints).toEqual([]);
     expect(engine.calls).not.toContain("composeUp");
+  });
+
+  test.each([
+    ["pull refused", "runner_images_unavailable"],
+    ["image still absent", "runner_images_unavailable"],
+    ["emulated image", "runner_image_emulated"],
+    ["interrupted pull", "interrupted"],
+  ])("VM image preparation holds on %s before native or credential work", async (kind, reason) => {
+    const engine = fakeEngine();
+    engine.images.delete(SUPERVISOR);
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    const controller = new AbortController();
+    const enrollment = engine.enrollment;
+    engine.enrollment = async (...args) => {
+      engine.calls.push("credential-helper");
+      return enrollment(...args);
+    };
+    engine.pull = async (ref) => {
+      engine.calls.push(`pull ${ref}`);
+      if (kind === "emulated image") engine.images.set(ref, "amd64");
+      if (kind === "interrupted pull") controller.abort();
+      return kind !== "pull refused";
+    };
+    expect(await f.adapter.act!(f.ctx, f.journal, controller.signal)).toMatchObject({ state: "waiting", reason });
+    expect(engine.calls.filter(call => call.startsWith("pull "))).toEqual([`pull ${SUPERVISOR}`]);
+    for (const call of ["vmCapabilities", "nativeThoughtsCustody", "credential-helper", "composeUp"])
+      expect(engine.calls).not.toContain(call);
+    expect(f.state.mints).toEqual([]);
+    expect(f.state.keyMints).toEqual([]);
+    expect(f.state.admissionWrites).toEqual([]);
+  });
+
+  test("VM image preparation never substitutes for a fresh signed custody check", async () => {
+    const engine = fakeEngine();
+    engine.images.delete(SUPERVISOR);
+    engine.pull = async (ref) => {
+      engine.calls.push(`pull ${ref}`);
+      engine.images.set(ref, "arm64");
+      return true;
+    };
+    engine.nativeThoughtsCustody = async () => {
+      engine.calls.push("nativeThoughtsCustody");
+      throw new Error("darwin_thoughts_custody_install:foreign_owner");
+    };
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    expect(await run(f)).toMatchObject({ state: "waiting", reason: "runner_thoughts_custody_unavailable" });
+    expect(engine.calls).toContain(`pull ${SUPERVISOR}`);
+    expect(engine.calls).toContain("nativeThoughtsCustody");
+    expect(engine.calls).not.toContain("composeUp");
+    expect(engine.calls.some(call => call.startsWith("writeVolumeFile"))).toBe(false);
+    expect(f.state.mints).toEqual([]);
+    expect(f.state.keyMints).toEqual([]);
+    expect(f.state.admissionWrites).toEqual([]);
   });
 
   test("native custody refusal stops a VM before credential helpers, join, key mint, admission or Compose", async () => {
@@ -1597,15 +1682,43 @@ describe("the Docker engine", () => {
           expect(JSON.parse(readFileSync(join(pullConfig, "config.json"), "utf8"))).toEqual({ auths: {} });
           expect(opts.env.DOCKER_CONFIG).toBe(pullConfig);
           expect(opts.env.DOCKER_CONTEXT).toBeUndefined();
+          expect(opts.env.DOCKER_AUTH_CONFIG).toBeUndefined();
         }
         return r.exec(args, opts);
       },
-      env: { DOCKER_CONFIG: "/home/x/.docker", DOCKER_CONTEXT: "local" },
+      env: { DOCKER_CONFIG: "/home/x/.docker", DOCKER_CONTEXT: "local", DOCKER_AUTH_CONFIG: '{"auths":{"private.example":{}}}' },
     });
     expect(await engine.pull(SUPERVISOR)).toBe(true);
     expect(r.runs.at(-1)!.args).toEqual(["--host", "unix:///local/docker.sock", "--config", pullConfig, "pull", "--quiet", SUPERVISOR]);
     expect(existsSync(pullConfig)).toBe(false);
-  });});
+  });
+
+  test.each([
+    { DOCKER_HOST: "tcp://remote.example:2376" },
+    { DOCKER_HOST: "unix:///local/docker.sock", DOCKER_CONTEXT: "other" },
+  ])("image preparation refuses remote or conflicting engine selectors", async (env) => {
+    const r = recordingExec();
+    expect(await dockerRunnerEngine({ exec: r.exec, env }).pull(SUPERVISOR)).toBe(false);
+    expect(r.runs.some(run => run.args.includes("pull"))).toBe(false);
+  });
+
+  test("failed anonymous image preparation removes its private configuration", async () => {
+    let pullConfig = "";
+    const engine = dockerRunnerEngine({
+      env: { DOCKER_HOST: "unix:///local/docker.sock" },
+      exec: async (args, opts) => {
+        expect(args).toContain("pull");
+        pullConfig = args[args.indexOf("--config") + 1]!;
+        expect(JSON.parse(readFileSync(join(pullConfig, "config.json"), "utf8"))).toEqual({ auths: {} });
+        expect(opts.timeoutMs).toBe(900_000);
+        return { code: 1, stdout: "" };
+      },
+    });
+    expect(await engine.pull(SUPERVISOR)).toBe(false);
+    expect(pullConfig).not.toBe("");
+    expect(existsSync(pullConfig)).toBe(false);
+  });
+});
 
 test("the vendored Compose file matches its recorded provenance", () => {
   const root = join(__dirname, "..", "vendor", "self-host");
@@ -2066,8 +2179,8 @@ describe("owner-managed preserving replacement through the existing CLI path", (
       expect(x.f.state.keyMints).toEqual([]);
       expect(x.f.state.admissionWrites).toEqual([]);
       expect(x.f.engine.calls).not.toContain("composeUp");
-      expect(x.f.engine.calls.some((call) => call.startsWith("pull "))).toBe(
-        false,
+      expect(x.f.engine.calls.filter(call => call.startsWith("pull "))).toEqual(
+        kind === "uncached target" ? [`pull ${SUPERVISOR}`] : [],
       );
     },
   );
