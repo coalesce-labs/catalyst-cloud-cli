@@ -48,11 +48,11 @@ export const RUNNER_SESSION_NETWORK = "catalyst-session-v1";
  * Explicit environment values override these pins; a saved runner image is preserved. */
 export const RUNNER_HOST_IMAGES = {
   supervisor:
-    "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:c175a4176ffdca4ec6689217a2a1c4bcc83cc8e0e93443e3e1d6d449433068f5",
+    "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:5aa2e7ab67d85c837a81e272ee089c8438ae1ba5b886b05354515be4058d15f6",
   watchdog:
     "ghcr.io/coalesce-labs/catalyst-deadline-watchdog@sha256:a5999dbf229ac432b83c2ed3fe43fa251366baceb73af2f57590890a6a758f0d",
   runner:
-    "ghcr.io/coalesce-labs/catalyst-runner@sha256:29603376bfd88559f8aa13cccbec31f578be61e99eb8f65f1dcea9ea757c1391",
+    "ghcr.io/coalesce-labs/catalyst-runner@sha256:dc83c11d357f1f5fa1ec55c669d02e9ff6f5ec9633a9bdc6fc15fbe7497f9655",
 } as const;
 const IMAGE_REF = /^[a-z0-9][a-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}$/;
 const HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;

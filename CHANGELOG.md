@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.10
+
+Setup on macOS now accepts the initial ownership mapping of its private response folder during the local storage check. Signed file-access verification remains required. Re-run setup to update this computer.
+
 ## 0.16.9
 
 Setup on macOS now accepts Docker’s initial folder ownership mapping during the local storage check. Updating this computer keeps its verified file-access enrollment and can resume an interrupted update to a newer version.

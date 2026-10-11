@@ -4,7 +4,7 @@
   "inputs": {
     "packages/host-isolation/src/darwin-thoughts-producer.ts": "038fb63d8121fb1665ec31869f45604aedd96dd7d9b15a415d578fea9a0ad507",
     "packages/protocol/src/darwin-thoughts-custody.ts": "3515efc22b0a3cfb512ff1acaf649c6eafb978b894c724fabb01c325aea51075",
-    "packages/host-isolation/src/darwin-thoughts-custody.ts": "d75c21a5a64a3200f882f14d15c80eb365637e91d2d101cc6c20568f689ffe8d",
+    "packages/host-isolation/src/darwin-thoughts-custody.ts": "1042a0280b305d87fbf9300dfd04c632a58140c60714fa128a7b30003260fa03",
     "deploy/self-host/darwin-thoughts-custody/producer-entry.ts": "27c8ff591c8dc4d1a4c65dd154157df5191ead1fb0af673bfd7099d5226d37bc",
     "deploy/self-host/darwin-thoughts-custody/verifier-entry.ts": "80bc1e72943e43bc33d76ba205bd79751f58ca34d622e35f7e50e3b661f65464",
     "deploy/self-host/darwin-thoughts-custody/generate.ts": "bfe1bef175fa8243be0558e1ddee6ddbcfbd622922e3a5df850e8621f18e7b26",
@@ -13,6 +13,6 @@
     "deploy/self-host/darwin-thoughts-custody/service.plist.in": "66e9a2c175d2500b1f7130e7c04a5ed07f22bc7425661777f514fa3f2a816496"
   },
   "artifactSha256": "0e0f1bbdac23813e8ee57b6eb4ae3dfd24c3f1c51ebe0c3d119a1448734ea05e",
-  "verifierSha256": "64bc6251fbd7033067fab74d855293b901e05d3280a3f5fcb76811440dcbeb5d",
+  "verifierSha256": "d8aeac8fe6192ecafc024eec8a018a7589e2a885c5c7139f1b543a37413f3d7d",
   "verifierDeclarationsSha256": "624428ced2eb18b045b761b49e20b7f52c0fc6c3132689571103ece7b4a1083f"
 }

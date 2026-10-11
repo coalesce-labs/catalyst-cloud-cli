@@ -1,6 +1,6 @@
 {
   "name": "@catalyst-cloud/cli",
-  "version": "0.16.9",
+  "version": "0.16.10",
   "description": "Set up Catalyst Cloud, check your tickets and manage your account from the command line.",
   "license": "MIT",
   "type": "module",
