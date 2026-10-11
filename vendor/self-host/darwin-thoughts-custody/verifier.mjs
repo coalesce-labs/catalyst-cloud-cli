@@ -538,27 +538,64 @@ function receiveStagingChannel(path, before, stagedFile, observedAncestors) {
   channel.stat = current;
   return current;
 }
-function receiveWaitingResponseChannel(path, before, stagedFile, observedAncestors, responsePath) {
-  const current = directory(path, true);
-  if (sameDirectoryAuthority(before, current))
+function receiveWaitingResponseChannel(path, before, stagedFile, observedAncestors, responsePath, bootstrapRoots) {
+  const maxPasses = bootstrapRoots ? 4 : 2;
+  for (let pass = 0;pass < maxPasses; pass += 1) {
+    const current = directory(path, true);
+    const projections = [{ path, before, current, privateChannel: true }];
+    for (const root of bootstrapRoots ? [bootstrapRoots.thoughtsRoot, bootstrapRoots.locksRoot] : []) {
+      const captured = observedAncestors.find((ancestor) => ancestor.path === root);
+      if (!captured)
+        throw failure("ancestor_identity");
+      projections.push({
+        path: root,
+        before: captured.stat,
+        current: directory(root),
+        privateChannel: false
+      });
+    }
+    const changed = projections.filter((projection) => !sameDirectoryAuthority(projection.before, projection.current));
+    for (const projection of changed) {
+      if (!isInitialGuestOwnerProjection(projection.before, projection.current, stagedFile))
+        throw failure("ancestor_identity");
+      const captured = observedAncestors.find((ancestor) => ancestor.path === projection.path);
+      if (!captured || !sameDirectoryAuthority(captured.stat, projection.before))
+        throw failure("ancestor_identity");
+    }
+    const requireAbsentResponse = () => {
+      try {
+        fs.lstatSync(responsePath);
+        throw failure("ancestor_identity");
+      } catch (error) {
+        if (!isMissing(error))
+          throw error;
+      }
+    };
+    if (changed.length > 0)
+      requireAbsentResponse();
+    checkAncestors(observedAncestors.filter((ancestor) => !projections.some((projection) => projection.path === ancestor.path)));
+    let resample = false;
+    for (const projection of projections) {
+      const next = directory(projection.path, projection.privateChannel);
+      if (sameDirectoryAuthority(projection.current, next))
+        continue;
+      if (!isInitialGuestOwnerProjection(projection.current, next, stagedFile))
+        throw failure("ancestor_identity");
+      resample = true;
+    }
+    if (changed.length > 0 || resample)
+      requireAbsentResponse();
+    if (resample)
+      continue;
+    for (const projection of changed) {
+      const captured = observedAncestors.find((ancestor) => ancestor.path === projection.path);
+      if (!captured)
+        throw failure("ancestor_identity");
+      captured.stat = projection.current;
+    }
     return current;
-  if (!isInitialGuestOwnerProjection(before, current, stagedFile))
-    throw failure("ancestor_identity");
-  const channel = observedAncestors.find((ancestor) => ancestor.path === path);
-  if (!channel || !sameDirectoryAuthority(channel.stat, before))
-    throw failure("ancestor_identity");
-  checkAncestors(observedAncestors.filter((ancestor) => ancestor.path !== path));
-  try {
-    fs.lstatSync(responsePath);
-    throw failure("ancestor_identity");
-  } catch (error) {
-    if (!isMissing(error))
-      throw error;
   }
-  if (!sameDirectoryAuthority(current, directory(path, true)))
-    throw failure("ancestor_identity");
-  channel.stat = current;
-  return current;
+  throw failure("ancestor_identity");
 }
 function isMissing(error) {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
@@ -708,7 +745,7 @@ async function exchange(options, bootstrap) {
       if (!Number.isSafeInteger(nowMs) || nowMs < previousNow || nowMs >= options.deadlineMs)
         throw failure("deadline");
       previousNow = nowMs;
-      responses = receiveWaitingResponseChannel(options.responseDir, responses, owned, aliasAncestors, responsePath);
+      responses = receiveWaitingResponseChannel(options.responseDir, responses, owned, aliasAncestors, responsePath, bootstrap ? authority : undefined);
       checkAncestors(aliasAncestors);
       for (const [path, expected] of [
         [options.requestDir, requests],
