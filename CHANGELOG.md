@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.12
+
+Setup on macOS now handles changing folder ownership during the local storage check. Signed file-access verification remains required. Re-run setup to update this computer.
+
 ## 0.16.11
 
 Setup on macOS now downloads missing components before checking local storage access. Failed downloads leave setup waiting and preserve the existing enrollment. Re-run setup to update this computer.

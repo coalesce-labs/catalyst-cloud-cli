@@ -4,7 +4,7 @@ description: >-
   Own one Catalyst Cloud project end to end until it closes. Use when the person says "run this project for me", "own this until it ships", "keep this moving", or hands you a project id or a set of tickets to drive. Subscribes to the account's event stream for the scope through the catalyst CLI, reacts to each change in the same turn, makes tickets ready and moves them to dispatch, parks what should stop, chases stalls, escalates inward, and keeps one status summary current. Writes to Linear as the app actor; never polls.
 allowed-tools: Bash(catalyst:*) Bash(npx -p @catalyst-cloud/cli catalyst:*)
 ---
-<!-- vendored-from: @catalyst-cloud/catalyst-skills@0.16.11 — written in this repository for customer accounts -->
+<!-- vendored-from: @catalyst-cloud/catalyst-skills@0.16.12 — written in this repository for customer accounts -->
 
 # Run this project
 
