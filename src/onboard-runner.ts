@@ -37,7 +37,7 @@ import {
 
 // "Run Catalyst's work on this machine": the self-hosted host from catalyst-cloud's deploy/self-host
 // (a supervisor and a deadline watchdog under Compose), enrolled with the person's own owner or
-// admin login. Never the operator token. Native Linux pulls missing images anonymously with an
+// admin login. Never the operator token. Setup prepares missing pinned images anonymously with an
 // empty disposable Docker config; Darwin custody receives only already-cached pinned images.
 
 /** The Compose project name the vendored file declares. */
@@ -696,6 +696,29 @@ interface Prepared {
   images: { supervisor: string; watchdog: string; runner: string };
 }
 
+/** Setup's image-preparation boundary, also runnable before an installation is changed.
+ * Native custody receives these cached bytes independently and never pulls images itself. */
+export async function prepareRunnerImages(
+  engine: Pick<RunnerEngine, "imageArch" | "pull">,
+  images: readonly string[],
+  nativeArch: RunnerEngineInfo["arch"],
+  signal?: AbortSignal,
+): Promise<{ reason: "interrupted" | "runner_images_unavailable" | "runner_image_emulated"; image?: string } | null> {
+  for (const ref of images) {
+    if (signal?.aborted) return { reason: "interrupted" };
+    const cached = await engine.imageArch(ref, signal);
+    if (signal?.aborted) return { reason: "interrupted" };
+    if (!cached && !(await engine.pull(ref, signal)))
+      return signal?.aborted ? { reason: "interrupted" } : { reason: "runner_images_unavailable", image: ref };
+    if (signal?.aborted) return { reason: "interrupted" };
+    const arch = await engine.imageArch(ref, signal);
+    if (signal?.aborted) return { reason: "interrupted" };
+    if (!arch) return { reason: "runner_images_unavailable", image: ref };
+    if (arch !== nativeArch) return { reason: "runner_image_emulated", image: ref };
+  }
+  return null;
+}
+
 export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
 ): OnboardAdapter {
   const engine = input.engine ?? dockerRunnerEngine();
@@ -1102,14 +1125,9 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
           return false;
         }
       };
-      for (const ref of Object.values(p.images)) {
-        if (!(await engine.imageArch(ref, signal)) && !p.info.vm) {
-          await engine.pull(ref, signal);
-        }
-        const arch = await engine.imageArch(ref, signal);
-        if (!arch) return waiting("runner_images_unavailable", { ...selected, image: ref });
-        if (arch !== p.info.arch) return waiting("runner_image_emulated", { ...selected, image: ref });
-      }
+      const imagesRefused = await prepareRunnerImages(engine, Object.values(p.images), p.info.arch, signal);
+      if (imagesRefused) return waiting(imagesRefused.reason,
+        { ...selected, ...(imagesRefused.image ? { image: imagesRefused.image } : {}) });
       if (p.info.vm) {
         const capability = await engine.vmCapabilities(p.dir, p.images.supervisor, p.baseUrl, signal);
         if (capability !== "ready") return waiting(capability, selected);
