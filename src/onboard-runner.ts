@@ -37,7 +37,7 @@ import {
 
 // "Run Catalyst's work on this machine": the self-hosted host from catalyst-cloud's deploy/self-host
 // (a supervisor and a deadline watchdog under Compose), enrolled with the person's own owner or
-// admin login. Never the operator token. Native Linux pulls missing images anonymously with an
+// admin login. Never the operator token. Setup prepares missing pinned images anonymously with an
 // empty disposable Docker config; Darwin custody receives only already-cached pinned images.
 
 /** The Compose project name the vendored file declares. */
@@ -1103,9 +1103,14 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
         }
       };
       for (const ref of Object.values(p.images)) {
-        if (!(await engine.imageArch(ref, signal)) && !p.info.vm) {
-          await engine.pull(ref, signal);
+        if (signal?.aborted) return waiting("interrupted", selected);
+        if (!(await engine.imageArch(ref, signal))) {
+          if (!(await engine.pull(ref, signal))) {
+            if (signal?.aborted) return waiting("interrupted", selected);
+            return waiting("runner_images_unavailable", { ...selected, image: ref });
+          }
         }
+        if (signal?.aborted) return waiting("interrupted", selected);
         const arch = await engine.imageArch(ref, signal);
         if (!arch) return waiting("runner_images_unavailable", { ...selected, image: ref });
         if (arch !== p.info.arch) return waiting("runner_image_emulated", { ...selected, image: ref });
