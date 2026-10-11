@@ -522,16 +522,41 @@ function checkAncestors(expected) {
     }
   }
 }
+function isInitialGuestOwnerProjection(before, current, stagedFile) {
+  return before.dev === current.dev && before.ino === current.ino && before.mode === current.mode && before.uid === 0n && before.gid === 0n && current.uid === 10001n && current.gid === 10001n && process.getuid?.() === 10001 && process.geteuid?.() === 10001 && process.getgid?.() === 10001 && stagedFile.uid === 10001n && stagedFile.gid === 10001n;
+}
 function receiveStagingChannel(path, before, stagedFile, observedAncestors) {
   const current = directory(path, true);
   if (sameDirectoryAuthority(before, current))
     return current;
-  if (before.dev !== current.dev || before.ino !== current.ino || before.mode !== current.mode || before.uid !== 0n || before.gid !== 0n || current.uid !== 10001n || current.gid !== 10001n || process.getuid?.() !== 10001 || process.geteuid?.() !== 10001 || process.getgid?.() !== 10001 || stagedFile.uid !== 10001n || stagedFile.gid !== 10001n)
+  if (!isInitialGuestOwnerProjection(before, current, stagedFile))
     throw failure("ancestor_identity");
   const channel = observedAncestors.find((ancestor) => ancestor.path === path);
   if (!channel || !sameDirectoryAuthority(channel.stat, before))
     throw failure("ancestor_identity");
   checkAncestors(observedAncestors.filter((ancestor) => ancestor.path !== path));
+  channel.stat = current;
+  return current;
+}
+function receiveWaitingResponseChannel(path, before, stagedFile, observedAncestors, responsePath) {
+  const current = directory(path, true);
+  if (sameDirectoryAuthority(before, current))
+    return current;
+  if (!isInitialGuestOwnerProjection(before, current, stagedFile))
+    throw failure("ancestor_identity");
+  const channel = observedAncestors.find((ancestor) => ancestor.path === path);
+  if (!channel || !sameDirectoryAuthority(channel.stat, before))
+    throw failure("ancestor_identity");
+  checkAncestors(observedAncestors.filter((ancestor) => ancestor.path !== path));
+  try {
+    fs.lstatSync(responsePath);
+    throw failure("ancestor_identity");
+  } catch (error) {
+    if (!isMissing(error))
+      throw error;
+  }
+  if (!sameDirectoryAuthority(current, directory(path, true)))
+    throw failure("ancestor_identity");
   channel.stat = current;
   return current;
 }
@@ -621,7 +646,7 @@ async function exchange(options, bootstrap) {
     expiresAtMs: options.deadlineMs
   }));
   let requests = directory(options.requestDir, true);
-  const responses = directory(options.responseDir, true);
+  let responses = directory(options.responseDir, true);
   const creationPaths = bootstrap ? bootstrapPaths(authority, options.tenant, options.repository) : [];
   if (bootstrap)
     checkBootstrapDirectories(creationPaths, true);
@@ -683,6 +708,7 @@ async function exchange(options, bootstrap) {
       if (!Number.isSafeInteger(nowMs) || nowMs < previousNow || nowMs >= options.deadlineMs)
         throw failure("deadline");
       previousNow = nowMs;
+      responses = receiveWaitingResponseChannel(options.responseDir, responses, owned, aliasAncestors, responsePath);
       checkAncestors(aliasAncestors);
       for (const [path, expected] of [
         [options.requestDir, requests],
