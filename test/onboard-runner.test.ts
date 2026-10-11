@@ -424,6 +424,133 @@ function secretsNowhere(f: ReturnType<typeof fixture>) {
   expect(visible).not.toContain("ctc_user_fixture_secret");
 }
 
+describe("release-pinned supervisor receiving", () => {
+  const old = `ghcr.io/coalesce-labs/catalyst-supervisor@sha256:${"d".repeat(64)}`;
+  function productionImages(initial: "matching" | "stale", pullResult: "matching" | "stale" | "refused" = "matching") {
+    const engine = fakeEngine();
+    let supervisor = initial === "matching" ? RUNNER_HOST_IMAGES.supervisor : old;
+    const reads: string[] = [];
+    const pulls: string[] = [];
+    const configs: string[] = [];
+    const actual = dockerRunnerEngine({
+      env: { DOCKER_HOST: "unix:///fixture/docker.sock" },
+      exec: async (args, opts) => {
+        if (args[0] === "image" && args[1] === "inspect") {
+          const requested = args[2]!;
+          reads.push(requested);
+          const received = requested === RUNNER_HOST_IMAGES.supervisor ? supervisor : requested;
+          return { code: 0, stdout: JSON.stringify([{
+            Id: `sha256:${"e".repeat(64)}`, Os: "linux", Architecture: "arm64", RepoDigests: [received],
+          }]) };
+        }
+        if (args.includes("pull")) {
+          const requested = args.at(-1)!;
+          pulls.push(requested);
+          const config = args[args.indexOf("--config") + 1]!;
+          configs.push(config);
+          expect(args.slice(0, 2)).toEqual(["--host", "unix:///fixture/docker.sock"]);
+          expect(opts.env?.DOCKER_CONFIG).toBe(config);
+          expect(JSON.parse(readFileSync(join(config, "config.json"), "utf8"))).toEqual({ auths: {} });
+          if (pullResult === "matching") supervisor = requested;
+          return { code: pullResult === "refused" ? 1 : 0, stdout: "" };
+        }
+        throw Error(`unexpected Docker call: ${args.join(" ")}`);
+      },
+    });
+    engine.imageArch = actual.imageArch;
+    engine.pull = actual.pull;
+    const enrollment = engine.enrollment;
+    engine.enrollment = async (...args) => {
+      engine.calls.push("credential-helper");
+      return enrollment(...args);
+    };
+    const f = fixture({ selected: true, runnerCloud: true, env: {}, engine });
+    return { f, reads, pulls, configs };
+  }
+
+  test("a matching production cache starts the release digest, records it and makes no pull", async () => {
+    const x = productionImages("matching");
+    const result = await run(x.f);
+    expect(result).toMatchObject({ state: "done", evidence: { supervisorImage: RUNNER_HOST_IMAGES.supervisor } });
+    if (result.state !== "done") throw Error("expected completed installation receiving");
+    expect(x.reads).toEqual(Object.values(RUNNER_HOST_IMAGES).flatMap(ref => [ref, ref]));
+    expect(x.pulls).toEqual([]);
+    expect(x.f.engine.calls).toContain("composeUp");
+    expect(readFileSync(join(x.f.dir, ".env"), "utf8")).toContain(`CATALYST_SUPERVISOR_IMAGE=${RUNNER_HOST_IMAGES.supervisor}\n`);
+    const path = join(x.f.home, "install-journal.json");
+    writeOnboardJournal(path, { ...x.f.journal, steps: [...x.f.journal.steps, { id: "runner", ...result, state: result.state }] });
+    expect(readOnboardJournal(path, x.f.journal.cli)?.steps.find(s => s.id === "runner")?.evidence?.supervisorImage).toBe(RUNNER_HOST_IMAGES.supervisor);
+    secretsNowhere(x.f);
+  });
+
+  test("a stale arm64 cache is pulled by the release digest and verified again before Compose", async () => {
+    const x = productionImages("stale");
+    x.f.engine.nativeThoughtsCustody = async ({ dir, supervisorImage }) => {
+      expect(supervisorImage).toBe(RUNNER_HOST_IMAGES.supervisor);
+      expect(x.reads.filter(ref => ref === supervisorImage)).toHaveLength(2);
+      expect(x.pulls).toEqual([supervisorImage]);
+      expect(x.f.engine.calls).not.toContain("credential-helper");
+      expect(x.f.engine.calls).not.toContain("composeUp");
+      return nativeCustodyFixture(dir);
+    };
+    expect(await run(x.f)).toMatchObject({ state: "done", evidence: { supervisorImage: RUNNER_HOST_IMAGES.supervisor } });
+    expect(x.f.engine.calls).toContain("composeUp");
+    expect(x.pulls).toEqual([RUNNER_HOST_IMAGES.supervisor]);
+    expect(x.configs).toHaveLength(1);
+    expect(existsSync(x.configs[0]!)).toBe(false);
+    secretsNowhere(x.f);
+  });
+
+  test.each(["refused", "stale"] as const)("stale cache and %s pull refuse before credentials, admission or runtime start", async pull => {
+    const x = productionImages("stale", pull);
+    const result = await x.f.adapter.act!(x.f.ctx, x.f.journal);
+    expect(result).toMatchObject({ state: "waiting", reason: "runner_supervisor_image_unavailable",
+      evidence: { image: RUNNER_HOST_IMAGES.supervisor, supervisorImage: RUNNER_HOST_IMAGES.supervisor } });
+    expect(x.pulls).toEqual([RUNNER_HOST_IMAGES.supervisor]);
+    for (const call of ["vmCapabilities", "nativeThoughtsCustody", "credential-helper", "composeUp"])
+      expect(x.f.engine.calls).not.toContain(call);
+    expect(x.f.engine.calls.some(call => call.startsWith("writeVolumeFile"))).toBe(false);
+    expect(x.f.state.mints).toEqual([]);
+    expect(x.f.state.keyMints).toEqual([]);
+    expect(x.f.state.admissionWrites).toEqual([]);
+    expect(x.f.engine.running).toBe(false);
+    expect(existsSync(join(x.f.dir, ".env"))).toBe(false);
+    expect(x.configs).toHaveLength(1);
+    expect(existsSync(x.configs[0]!)).toBe(false);
+    if (result.state !== "waiting") throw Error("expected supervisor image refusal");
+    expect(onboardReasonText({ id: "runner", ...result, state: result.state }, {})).toContain("supervisor image required by this CLI release");
+  });
+
+  test.each([
+    { Id: "sha256:bad" }, { Os: "windows" }, { Architecture: "" }, { RepoDigests: [] },
+  ])("production cache refuses malformed image metadata %j", async patch => {
+    const engine = dockerRunnerEngine({ exec: async () => ({ code: 0, stdout: JSON.stringify([{
+      Id: `sha256:${"e".repeat(64)}`, Os: "linux", Architecture: "arm64", RepoDigests: [RUNNER_HOST_IMAGES.supervisor], ...patch,
+    }]) }) });
+    expect(await engine.imageArch(RUNNER_HOST_IMAGES.supervisor)).toBeNull();
+  });
+
+  test("saved intent and a live old supervisor do not satisfy the current release", async () => {
+    const x = productionImages("matching");
+    expect((await run(x.f)).state).toBe("done");
+    const custody = nativeCustodyFixture(x.f.dir);
+    for (const root of [custody.requestsRoot, custody.responsesRoot]) mkdirSync(root, { mode: 0o700 });
+    const config = { Image: old,
+      Env: ["CATALYST_HOST_NAME=catalyst-laptop", "CATALYST_MIRROR_URL=https://cloud.example.test"],
+      Labels: { "com.docker.compose.project": "catalyst-host", "com.docker.compose.service": "supervisor",
+        "com.docker.compose.project.working_dir": x.f.dir,
+        "com.docker.compose.project.config_files": join(x.f.dir, "compose.yaml") + "," + join(x.f.dir, "compose.darwin-thoughts.yaml") } };
+    x.f.engine.installation = dockerRunnerEngine({ exec: async args => {
+      if (args[0] === "ps") return { code: 0, stdout: "e".repeat(64) };
+      if (args[0] === "inspect") return { code: 0, stdout: JSON.stringify([{ Config: config }]) };
+      throw Error(`unexpected Docker call: ${args.join(" ")}`);
+    } }).installation;
+    expect(await x.f.adapter.check(x.f.ctx, x.f.journal)).toEqual({ state: "pending" });
+    config.Image = RUNNER_HOST_IMAGES.supervisor;
+    expect(await x.f.adapter.check(x.f.ctx, x.f.journal)).toMatchObject({ state: "done" });
+  });
+});
+
 describe("opting in", () => {
   test("without a choice and without a terminal it is skipped and touches nothing", async () => {
     const f = fixture();
@@ -589,7 +716,7 @@ describe("prerequisites", () => {
     const result = await run(f);
     expect(result).toMatchObject({
       state: "waiting",
-      reason: "runner_images_unavailable",
+      reason: "runner_supervisor_image_unavailable",
       evidence: { selected: true, image: SUPERVISOR },
     });
     expect(engine.calls.filter(call => call.startsWith("pull "))).toEqual([`pull ${SUPERVISOR}`]);
@@ -599,8 +726,8 @@ describe("prerequisites", () => {
   });
 
   test.each([
-    ["pull refused", "runner_images_unavailable"],
-    ["image still absent", "runner_images_unavailable"],
+    ["pull refused", "runner_supervisor_image_unavailable"],
+    ["image still absent", "runner_supervisor_image_unavailable"],
     ["emulated image", "runner_image_emulated"],
     ["interrupted pull", "interrupted"],
   ])("VM image preparation holds on %s before native or credential work", async (kind, reason) => {
@@ -787,7 +914,7 @@ describe("prerequisites", () => {
       expect(ref).toMatch(/^ghcr\.io\/coalesce-labs\/[a-z-]+@sha256:[0-9a-f]{64}$/);
   });
 
-  const PUBLIC_RUNNER = "ghcr.io/coalesce-labs/catalyst-runner@sha256:dc83c11d357f1f5fa1ec55c669d02e9ff6f5ec9633a9bdc6fc15fbe7497f9655";
+  const PUBLIC_RUNNER = "ghcr.io/coalesce-labs/catalyst-runner@sha256:9db2bf2c5580e2a1459fd076fa32c9af34456cc639ec3ab92b57b6ad98da67fb";
   function defaultFixture() {
     const engine = fakeEngine();
     engine.images.set(RUNNER_HOST_IMAGES.supervisor, "arm64");
@@ -900,6 +1027,7 @@ describe("bringing the host up", () => {
         hostName: "catalyst-laptop",
         hostId: "host-1",
         capacity: 2,
+        supervisorImage: SUPERVISOR,
       },
     });
     expect(f.state.mints).toEqual([
@@ -1414,7 +1542,7 @@ describe("the Docker engine", () => {
       "ps --all": { code: 0, stdout: "0123456789ab" },
       inspect: { code, stdout: JSON.stringify(value) },
     }).exec }).installation!(f.ctx.home, SUPERVISOR);
-    expect(await inspect([{ Config: config }])).toEqual({ dir: f.dir, hostName: "catalyst-laptop", baseUrl: "https://cloud.example.test" });
+    expect(await inspect([{ Config: config }])).toEqual({ dir: f.dir, hostName: "catalyst-laptop", baseUrl: "https://cloud.example.test", supervisorImage: SUPERVISOR });
     expect(await inspect([{ Config: { ...config, Image: "unrelated:latest" } }])).toBe("unverified");
     expect(await inspect([{ Config: config }], 1)).toBe("unverified");
     expect(await dockerRunnerEngine({ exec: recordingExec({ "ps --all": { code: 0, stdout: "" } }).exec }).installation!(f.ctx.home, SUPERVISOR)).toBe("missing");
@@ -1480,7 +1608,7 @@ describe("the Docker engine", () => {
       "com.docker.compose.project.config_files": join(f.dir, "compose.yaml") + "," + override,
     } };
     const inspect = () => dockerRunnerEngine({ exec: recordingExec({ "ps --all": { code: 0, stdout: "0123456789ab" }, inspect: { code: 0, stdout: JSON.stringify([{ Config: config }]) } }).exec }).installation!(f.ctx.home, SUPERVISOR);
-    expect(await inspect()).toEqual({ dir: f.dir, hostName: "catalyst-laptop", baseUrl: "https://cloud.example.test" });
+    expect(await inspect()).toEqual({ dir: f.dir, hostName: "catalyst-laptop", baseUrl: "https://cloud.example.test", supervisorImage: SUPERVISOR });
     writeFileSync(override, "services: {}\n");
     // chmod, rather than creation mode, makes the broad permissions meaningful on an existing file.
     const { chmodSync } = await import("node:fs");
@@ -2003,6 +2131,15 @@ describe("owner-managed preserving replacement through the existing CLI path", (
       },
     });
     f.engine.installation = actual.installation;
+    const composeUp = f.engine.composeUp;
+    f.engine.composeUp = async (...args) => {
+      const started = await composeUp(...args);
+      if (started) {
+        row.Config.Image = SUPERVISOR;
+        row.Image = `sha256:${"a".repeat(64)}`;
+      }
+      return started;
+    };
     let received = false;
     f.engine.nativeThoughtsCustody = async ({
       dir,

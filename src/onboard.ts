@@ -488,6 +488,7 @@ function normalizeStep(value: unknown, fallbackAt: string): OnboardStep | null {
     "teamKey",
     "selected",
     "hostName",
+    "supervisorImage",
     "hostId",
     "capacity",
     "failing",
