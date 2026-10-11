@@ -43,16 +43,16 @@ import {
 /** The Compose project name the vendored file declares. */
 export const RUNNER_PROJECT = "catalyst-host";
 export const RUNNER_SESSION_NETWORK = "catalyst-session-v1";
-/** Qualified public images from main 72e4e20f86: host run 38073557244 and
- * runner run 38073557245; the unchanged watchdog retains its earlier reviewed pin.
+/** Supervisor from ee729b12 (Host images 38138827750); runner from
+ * 91a82214 (Runner image 38133282600). The watchdog retains its reviewed pin.
  * Explicit environment values override these pins; a saved runner image is preserved. */
 export const RUNNER_HOST_IMAGES = {
   supervisor:
-    "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:5aa2e7ab67d85c837a81e272ee089c8438ae1ba5b886b05354515be4058d15f6",
+    "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:3331ebc4204ae3975a4efb2c870c941f9c0f5ab435735e91dc9977941c91e9a8",
   watchdog:
     "ghcr.io/coalesce-labs/catalyst-deadline-watchdog@sha256:a5999dbf229ac432b83c2ed3fe43fa251366baceb73af2f57590890a6a758f0d",
   runner:
-    "ghcr.io/coalesce-labs/catalyst-runner@sha256:dc83c11d357f1f5fa1ec55c669d02e9ff6f5ec9633a9bdc6fc15fbe7497f9655",
+    "ghcr.io/coalesce-labs/catalyst-runner@sha256:9db2bf2c5580e2a1459fd076fa32c9af34456cc639ec3ab92b57b6ad98da67fb",
 } as const;
 const IMAGE_REF = /^[a-z0-9][a-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}$/;
 const HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
@@ -118,9 +118,9 @@ export interface RunnerEngine {
   info(signal?: AbortSignal): Promise<RunnerEngineInfo | null>;
   /** Existing Compose ownership and public identity, before setup chooses new files or a name. */
   installation?(home: string, supervisorImage: string, signal?: AbortSignal): Promise<
-    { dir: string; hostName: string; baseUrl: string } | "missing" | "unverified"
+    { dir: string; hostName: string; baseUrl: string; supervisorImage?: string } | "missing" | "unverified"
   >;
-  /** The architecture of a local image, or null when the engine does not have it. */
+  /** The architecture of a local image received at this exact digest, or null when unverified. */
   imageArch(ref: string, signal?: AbortSignal): Promise<string | null>;
   pull(ref: string, signal?: AbortSignal): Promise<boolean>;
   network(
@@ -350,15 +350,22 @@ export function dockerRunnerEngine(
               !cached[0].RepoDigests.includes(config.Image)) return "unverified";
           }
         }
-        return { dir, hostName, baseUrl: normalizeBaseUrl(baseUrl) };
+        return { dir, hostName, baseUrl: normalizeBaseUrl(baseUrl), supervisorImage: config.Image };
       } catch { return "unverified"; }
     },
     async imageArch(ref, signal) {
-      const read = await docker(
-        ["image", "inspect", "--format", "{{.Architecture}}", ref],
-        { signal },
-      );
-      return read.code === 0 ? read.stdout.trim() || null : null;
+      if (!IMAGE_REF.test(ref)) return null;
+      const read = await docker(["image", "inspect", ref], { signal });
+      if (read.code !== 0) return null;
+      try {
+        const rows = JSON.parse(read.stdout);
+        if (!Array.isArray(rows) || rows.length !== 1) return null;
+        const row = object(rows[0]);
+        if (typeof row?.Id !== "string" || !/^sha256:[0-9a-f]{64}$/.test(row.Id) ||
+          row.Os !== "linux" || typeof row.Architecture !== "string" || !row.Architecture ||
+          !Array.isArray(row.RepoDigests) || !row.RepoDigests.includes(ref)) return null;
+        return row.Architecture;
+      } catch { return null; }
     },
     async pull(ref, signal) {
       const host = await endpoint(signal);
@@ -694,6 +701,7 @@ interface Prepared {
   dir: string;
   info: RunnerEngineInfo;
   images: { supervisor: string; watchdog: string; runner: string };
+  installedSupervisorImage?: string;
 }
 
 /** Setup's image-preparation boundary, also runnable before an installation is changed.
@@ -834,7 +842,8 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
       return waiting("runner_image_unpinned", selected);
     if(!info.vm && !(await engine.nativeEgressStatus?.(ctx.now().getTime(),signal)))return waiting("runner_native_egress_setup_required",selected);
     return { account, baseUrl: normalizeBaseUrl(cfg.baseUrl), teamKey, teamId, cloud, dir, info, images,
-      ...(installation && installation !== "missing" ? { installedName: installation.hostName } : {}) };
+      ...(installation && installation !== "missing" ? { installedName: installation.hostName,
+        installedSupervisorImage: installation.supervisorImage } : {}) };
   }
 
   async function desiredEnv(
@@ -1011,8 +1020,9 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
       } catch {
         /* A missing or unreadable compose needs an explicitly authorized repair. */
       }
-      const changed = !saved || !composeMatches || Object.entries(want).some(([key, value]) => saved[key] !== value);
-      const hostEvidence = { ...selected, hostName: name };
+      const changed = !saved || !composeMatches || Object.entries(want).some(([key, value]) => saved[key] !== value) ||
+        (p.installedSupervisorImage !== undefined && p.installedSupervisorImage !== p.images.supervisor);
+      const hostEvidence = { ...selected, hostName: name, supervisorImage: p.images.supervisor };
       const pending = (): OnboardStepResult =>
         mayAct ? { state: "pending" } : waiting("runner_needs_runner_flag", hostEvidence);
       if (!running || changed)
@@ -1126,8 +1136,11 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
         }
       };
       const imagesRefused = await prepareRunnerImages(engine, Object.values(p.images), p.info.arch, signal);
-      if (imagesRefused) return waiting(imagesRefused.reason,
-        { ...selected, ...(imagesRefused.image ? { image: imagesRefused.image } : {}) });
+      if (imagesRefused) return waiting(
+        imagesRefused.reason === "runner_images_unavailable" && imagesRefused.image === p.images.supervisor
+          ? "runner_supervisor_image_unavailable" : imagesRefused.reason,
+        { ...selected, supervisorImage: p.images.supervisor,
+          ...(imagesRefused.image ? { image: imagesRefused.image } : {}) });
       if (p.info.vm) {
         const capability = await engine.vmCapabilities(p.dir, p.images.supervisor, p.baseUrl, signal);
         if (capability !== "ready") return waiting(capability, selected);
