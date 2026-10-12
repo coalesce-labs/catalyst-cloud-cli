@@ -38,14 +38,12 @@ interface Artifacts {
 interface EngineInput extends Executables {
   readonly [key: string]: unknown;
   readonly principal: Principal; readonly supervisorImage: string;
-  readonly producerSupervisorImage?: string;
   readonly runnerImage: string; readonly deadlineMs: number;
   readonly signal?: AbortSignal;
 }
 interface EngineIdentity {
   readonly endpoint: string; readonly daemonId: string;
   readonly cachedSupervisor: boolean; readonly cachedRunner: boolean;
-  readonly cachedProducerSupervisor: boolean;
   readonly runnerCustodyVersion?: string;
 }
 interface BootstrapInput extends Executables {
@@ -171,6 +169,28 @@ class Custody {
     try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     this.hold(value, false);
   }
+  /** Atomically re-records an already-held private file. The replacement is created inside the
+   * held directory and renamed over the target, then re-held, so every custody invariant
+   * (single-owner 0600, nlink 1, no symlinks) is re-verified on the new bytes. */
+  replace(value: string, bytes: Buffer) {
+    const held = this.hold(value, false);
+    this.recheck();
+    const temporary = value + "." + randomBytes(16).toString("hex") + ".tmp";
+    let renamed = false;
+    try {
+      const fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT |
+        fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+      try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      fs.renameSync(temporary, value);
+      renamed = true;
+    } finally {
+      if (!renamed) try { fs.unlinkSync(temporary); } catch { /* The original error propagates. */ }
+    }
+    fs.closeSync(held.fd);
+    this.held.delete(value);
+    this.hold(value, false);
+    this.recheck();
+  }
   recheck() {
     for (const [value, held] of this.held) {
       const current = this.ports.stat(value, fs.fstatSync(held.fd, { bigint: true }));
@@ -237,7 +257,7 @@ function factory(ports: Ports) {
       const nodeHash = executable(executables.nodeExecutable, principal, roots);
       const dockerHash = executable(executables.dockerExecutable, principal, roots);
       let authority: Authority | undefined;
-      let producerSupervisorImage = input.supervisorImage;
+      let enrolledSupervisorImage: string | undefined;
       if (existing) {
         custody.walk(state, false, 0o700, true);
         const runtime = record(parse(custody.read(join(state, "runtime.json"), 4096)),
@@ -261,18 +281,18 @@ function factory(ports: Ports) {
         try { key = createPrivateKey({ key: custody.read(privateKeyFile, 4096), type: "pkcs8", format: "der" }); }
         catch { return fail("private_key_custody_invalid"); }
         if (key.asymmetricKeyType !== "ed25519" || createPublicKey(key).export({ type: "spki", format: "der" }).toString("base64") !== authority.publicKey) fail("private_key_authority_mismatch");
-        // The enrolled producer attests its helper image. A runtime update does not re-enroll it.
-        producerSupervisorImage = row.supervisorImage;
+        // The recorded helper image only authenticates the existing state. When it is not the
+        // current pin, the producer is re-attested on the current pin below, before the proof.
+        enrolledSupervisorImage = row.supervisorImage;
       }
       custody.recheck();
       alive();
       const engine = await ports.engineIdentity({ ...executables, principal,
-        supervisorImage: input.supervisorImage, producerSupervisorImage,
+        supervisorImage: input.supervisorImage,
         runnerImage: input.runnerImage, deadlineMs: input.deadlineMs, signal });
       alive();
       if (!/^unix:\/\/\/[^,\0]+$/.test(engine.endpoint) || normalize(engine.endpoint.slice(7)) !== engine.endpoint.slice(7) ||
           !engine.cachedSupervisor || !engine.cachedRunner || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(engine.daemonId)) fail("engine_endpoint_or_cache_invalid");
-      if (engine.cachedProducerSupervisor !== true) fail("producer_helper_cache_unavailable");
       if (engine.runnerCustodyVersion !== "v1") fail("runner_custody_label_unqualified");
       if (authority && (authority.endpoint !== engine.endpoint || authority.daemonId !== engine.daemonId)) fail("engine_authority_mismatch");
       custody.recheck();
@@ -290,6 +310,14 @@ function factory(ports: Ports) {
         });
         custody.create(privateKeyFile, key.privateKey.export({ type: "pkcs8", format: "der" }));
         custody.create(configPath, Buffer.from(canonicalDarwinThoughtsJson({
+          version: 1, authority, privateKeyFile, supervisorImage: input.supervisorImage,
+          dockerExecutable: executables.dockerExecutable, dockerExecutableSha256: dockerHash,
+        })));
+      } else if (enrolledSupervisorImage !== input.supervisorImage) {
+        // Re-attest the enrolled producer on the current pinned helper, exactly as first
+        // enrollment records it before proving it: same authority, key and executable pins,
+        // same repository, cache-only, and the signed bootstrap below runs on the new pin.
+        custody.replace(configPath, Buffer.from(canonicalDarwinThoughtsJson({
           version: 1, authority, privateKeyFile, supervisorImage: input.supervisorImage,
           dockerExecutable: executables.dockerExecutable, dockerExecutableSha256: dockerHash,
         })));
@@ -317,7 +345,7 @@ function factory(ports: Ports) {
       await ports.service({ ...executables, uid: principal.uid, serviceLabel: LABEL, plistPath, deadlineMs: input.deadlineMs, signal });
       alive();
       const receipt = await ports.receiveBootstrap({ ...executables, authority, configPath,
-        supervisorImage: producerSupervisorImage, deadlineMs: input.deadlineMs, signal });
+        supervisorImage: input.supervisorImage, deadlineMs: input.deadlineMs, signal });
       alive();
       if (ports.now() >= input.deadlineMs) fail("startup_proof_expired");
       // The canonical verifier compares these observations byte-for-byte with
@@ -424,9 +452,6 @@ async function actualEngine(input: EngineInput): Promise<EngineIdentity> {
     ["--config", config, "--host", selected, ...args], input.deadlineMs, 16384, input.signal);
   const daemon = await run(["info", "--format", "{{.ID}}"]);
   const supervisor = await run(["image", "inspect", "--format", "{{.Id}}", input.supervisorImage]);
-  const producerSupervisorImage = input.producerSupervisorImage ?? input.supervisorImage;
-  const producerSupervisor = producerSupervisorImage === input.supervisorImage ? supervisor :
-    await run(["image", "inspect", "--format", "{{.Id}}", producerSupervisorImage]);
   const runner = await run(["image", "inspect", "--format", "{{json .}}", input.runnerImage]);
   if (daemon.code !== 0) fail("engine_identity_unavailable");
   let runnerId: string | undefined;
@@ -450,7 +475,6 @@ async function actualEngine(input: EngineInput): Promise<EngineIdentity> {
   }
   return { endpoint: selected, daemonId: daemon.stdout,
     cachedSupervisor: supervisor.code === 0 && /^sha256:[a-f0-9]{64}$/.test(supervisor.stdout),
-    cachedProducerSupervisor: producerSupervisor.code === 0 && /^sha256:[a-f0-9]{64}$/.test(producerSupervisor.stdout),
     cachedRunner: runnerId !== undefined,
     ...(runnerCustodyVersion === undefined ? {} : { runnerCustodyVersion }) };
 }
