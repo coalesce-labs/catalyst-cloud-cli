@@ -107,6 +107,16 @@ export interface RunnerEnrollment {
 }
 export type RunnerOrgKeyStatus = "valid" | "different" | "missing" | "invalid" | "unavailable";
 type VolumeFile = "CATALYST_ORG_KEY_FILE" | "CATALYST_HOST_CREDENTIAL_FILE";
+/** One container of the existing Compose project, whatever state it is in. */
+export interface RunnerProjectContainer {
+  service: string;
+  state: string;
+}
+/** What `compose up` reports back: success, or Compose's own error text. */
+export interface RunnerComposeUp {
+  ok: boolean;
+  error?: string;
+}
 /** Every Docker call the step makes. Each answers false or null instead of throwing. */
 export interface RunnerUnenrolled { unenrolled: true; tokenSpent: boolean }
 function isUnenrolled(value: RunnerEnrollment | RunnerUnenrolled | null): value is RunnerUnenrolled {
@@ -120,6 +130,11 @@ export interface RunnerEngine {
   installation?(home: string, supervisorImage: string, signal?: AbortSignal): Promise<
     { dir: string; hostName: string; baseUrl: string; supervisorImage?: string } | "missing" | "unverified"
   >;
+  /** Every container of this Compose project in any state, read before Compose is started.
+   * Null when the listing itself could not be read; never a guess. */
+  projectContainers?(signal?: AbortSignal): Promise<RunnerProjectContainer[] | null>;
+  /** Resumes the project's paused containers in place: adoption, never removal. */
+  composeUnpause?(dir: string, signal?: AbortSignal): Promise<boolean>;
   /** The architecture of a local image received at this exact digest, or null when unverified. */
   imageArch(ref: string, signal?: AbortSignal): Promise<string | null>;
   pull(ref: string, signal?: AbortSignal): Promise<boolean>;
@@ -154,7 +169,7 @@ export interface RunnerEngine {
     value: string,
     signal?: AbortSignal,
   ): Promise<boolean>;
-  composeUp(dir: string, signal?: AbortSignal): Promise<boolean>;
+  composeUp(dir: string, signal?: AbortSignal): Promise<RunnerComposeUp>;
   composeRunning(dir: string, signal?: AbortSignal): Promise<boolean>;
 }
 
@@ -191,6 +206,20 @@ const spawnDocker: RunnerExec = (args, options) =>
     child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
     child.stdin.end(options.input ?? "");
   });
+
+/** Compose's own error lines, reduced to short printable text a person can act on. */
+function composeErrorText(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.replace(/[^\x20-\x7e]/g, "").trim())
+    .filter((line) => line !== "" && !line.startsWith("time="));
+  const errors = lines.filter((line) =>
+    /error|failed|cannot|conflict|paused|in use|refused|denied|invalid/i.test(line),
+  );
+  const text = (errors.length > 0 ? errors : lines).slice(0, 3).join(" | ").slice(0, 480);
+  return text !== "" ? text : undefined;
+}
 
 /** The real engine, through the docker CLI. Compose reads `.env` only: the caller's CATALYST_ and
  * DOCKER_SOCKET_ variables are removed, because Compose prefers an exported value over the file. */
@@ -352,6 +381,25 @@ export function dockerRunnerEngine(
         }
         return { dir, hostName, baseUrl: normalizeBaseUrl(baseUrl), supervisorImage: config.Image };
       } catch { return "unverified"; }
+    },
+    async projectContainers(signal) {
+      const read = await docker(["ps", "--all",
+        "--filter", `label=com.docker.compose.project=${RUNNER_PROJECT}`,
+        "--format", '{{.Label "com.docker.compose.service"}}\t{{.State}}'], { signal });
+      if (read.code !== 0) return null;
+      const rows: RunnerProjectContainer[] = [];
+      for (const line of read.stdout.split("\n")) {
+        const [service, state] = line.trim().split("\t");
+        if (service && state &&
+          /^[a-z][a-z0-9_-]{0,63}$/.test(service) && /^[a-z]+$/.test(state))
+          rows.push({ service, state });
+      }
+      return rows;
+    },
+    async composeUnpause(dir, signal) {
+      const files = compose(dir);
+      if (!files) return false;
+      return (await docker([...files, "unpause"], { cwd: dir, signal, timeoutMs: 120_000 })).code === 0;
     },
     async imageArch(ref, signal) {
       if (!IMAGE_REF.test(ref)) return null;
@@ -559,11 +607,11 @@ export function dockerRunnerEngine(
     },
     async composeUp(dir, signal) {
       const files = compose(dir);
-      if (!files) return false;
-      return (
-        (await docker([...files, "up", "--detach"], { cwd: dir, signal, timeoutMs: 600_000 }))
-          .code === 0
-      );
+      if (!files) return { ok: false };
+      const read = await docker([...files, "up", "--detach"], { cwd: dir, signal, timeoutMs: 600_000 });
+      return read.code === 0
+        ? { ok: true }
+        : { ok: false, error: composeErrorText(read.stderr || read.stdout) };
     },
     async composeRunning(dir, signal) {
       const files = compose(dir);
@@ -1083,6 +1131,7 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
       const p = await prepare(ctx, journal, signal);
       if (!("dir" in p)) return p;
       if(!mayAct)return waiting("runner_needs_runner_flag",selected);
+      let replacingContainers = false;
       try {
         mkdirSync(p.dir, { recursive: true, mode: 0o700 });
         if (lstatSync(p.dir).isSymbolicLink()) throw new Error("runner_directory_unsafe");
@@ -1105,7 +1154,10 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
         } catch {
           /* first run */
         }
-        if (!current?.equals(compose)) writeFileSync(join(p.dir, "compose.yaml"), compose, { mode: 0o644 });
+        if (!current?.equals(compose)) {
+          replacingContainers = current !== null;
+          writeFileSync(join(p.dir, "compose.yaml"), compose, { mode: 0o644 });
+        }
       } catch {
         return { state: "failed", reason: "runner_directory_unavailable", evidence: selected };
       }
@@ -1236,8 +1288,27 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
         if("reason" in read)return waiting(read.reason,selected);
         if(!read.ready){const enabled=await runnerAdmission(ctx,journal,p.teamId,true,signal);if("reason" in enabled)return waiting(enabled.reason,selected);if(!enabled.ready)return waiting("runner_admission_unverified",selected);}
       }
-      if (!(await engine.composeUp(p.dir, signal)))
-        return { state: "failed", reason: "runner_compose_failed", evidence: selected };
+      // CTC-5721: an older catalyst-host project must never meet Compose as a surprise exit.
+      // Its paused containers cannot be started by Compose: adopt them, or name the exact command.
+      const containers = (await engine.projectContainers?.(signal)) ?? null;
+      const paused = containers?.filter((row) => row.state === "paused") ?? [];
+      const pausedNames = [...new Set(paused.map((row) => row.service))];
+      if (paused.length > 0) {
+        const resumed = (await engine.composeUnpause?.(p.dir, signal)) === true;
+        if (!resumed)
+          return waiting("runner_compose_paused", { ...selected, hostName: name,
+            project: RUNNER_PROJECT, services: pausedNames.join(",") });
+        input.message?.(`Resumed the paused containers (${pausedNames.join(", ")}) of the existing ${RUNNER_PROJECT} project; setup adopts it.`);
+      } else if (containers && containers.length > 0 && replacingContainers) {
+        input.message?.(`Replacing the existing ${RUNNER_PROJECT} project's containers (${[...new Set(containers.map((row) => row.service))].join(", ")}) with this release's Compose definitions.`);
+      } else if (containers && containers.some((row) => row.state !== "running")) {
+        const stopped = [...new Set(containers.filter((row) => row.state !== "running").map((row) => row.service))];
+        input.message?.(`Starting the existing ${RUNNER_PROJECT} project's stopped containers (${stopped.join(", ")}); setup adopts it.`);
+      }
+      const up = await engine.composeUp(p.dir, signal);
+      if (!up.ok)
+        return { state: "failed", reason: "runner_compose_failed", evidence: { ...selected,
+          project: RUNNER_PROJECT, ...(up.error ? { composeError: up.error } : {}) } };
       acted = true;
       return { state: "done" };
     },
