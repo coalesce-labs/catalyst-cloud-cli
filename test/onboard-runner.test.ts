@@ -50,7 +50,9 @@ interface FakeEngine extends RunnerEngine {
   networkState: "ready" | "missing" | "misshaped";
   running: boolean;
   files: Map<string, string>;
-  upError: boolean;
+  upError: string | false;
+  containers: Array<{ service: string; state: string }> | null;
+  unpauseFails: boolean;
 }
 const custodyKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "der" }).toString("base64");
 function nativeCustodyFixture(dir: string) {
@@ -75,6 +77,8 @@ function fakeEngine(
     running: false,
     files: new Map(),
     upError: false,
+    containers: null,
+    unpauseFails: false,
     info: async () => {
       engine.calls.push("info");
       return info;
@@ -125,8 +129,19 @@ function fakeEngine(
     },
     composeUp: async () => {
       engine.calls.push("composeUp");
-      if (engine.upError) return false;
+      if (engine.upError !== false)
+        return { ok: false, ...(engine.upError ? { error: engine.upError } : {}) };
       engine.running = true;
+      return { ok: true };
+    },
+    projectContainers: async () => {
+      engine.calls.push("projectContainers");
+      return engine.containers;
+    },
+    composeUnpause: async () => {
+      engine.calls.push("composeUnpause");
+      if (engine.unpauseFails) return false;
+      for (const row of engine.containers ?? []) if (row.state === "paused") row.state = "running";
       return true;
     },
     composeRunning: async () => engine.running,
@@ -1325,14 +1340,18 @@ describe("bringing the host up", () => {
     expect(f.state.mints).toEqual([]);
   });
 
-  test("a Compose failure fails the step", async () => {
+  test("a Compose failure fails the step naming the project and the daemon's error", async () => {
     const engine = fakeEngine();
-    engine.upError = true;
+    engine.upError = "Error response from daemon: driver failed programming external connectivity";
     const f = fixture({ selected: true, engine });
     withOrgKey(f);
     expect(await run(f)).toMatchObject({
       state: "failed",
       reason: "runner_compose_failed",
+      evidence: {
+        project: "catalyst-host",
+        composeError: "Error response from daemon: driver failed programming external connectivity",
+      },
     });
   });
 
@@ -1498,7 +1517,7 @@ describe("bringing the host up", () => {
 });
 
 describe("the Docker engine", () => {
-  function recordingExec(answers: Record<string, { code: number; stdout?: string }> = {}) {
+  function recordingExec(answers: Record<string, { code: number; stdout?: string; stderr?: string }> = {}) {
     const runs: Array<{
       args: string[];
       env: NodeJS.ProcessEnv;
@@ -1513,7 +1532,11 @@ describe("the Docker engine", () => {
       ) => {
         runs.push({ args, ...opts });
         const key = Object.keys(answers).find((k) => args.join(" ").startsWith(k));
-        return { code: key ? answers[key]!.code : 0, stdout: key ? (answers[key]!.stdout ?? "") : "" };
+        return {
+          code: key ? answers[key]!.code : 0,
+          stdout: key ? (answers[key]!.stdout ?? "") : "",
+          stderr: key ? (answers[key]!.stderr ?? "") : "",
+        };
       },
     };
   }
@@ -1555,7 +1578,7 @@ describe("the Docker engine", () => {
       exec: r.exec,
       env: { PATH: "/bin", CATALYST_RUNNER_IMAGE: "other", DOCKER_HOST: "unix:///x.sock" },
     });
-    expect(await engine.composeUp("/r")).toBe(true);
+    expect(await engine.composeUp("/r")).toEqual({ ok: true });
     expect(r.runs[0]!.args).toEqual([
       "compose",
       "--project-name",
@@ -1579,7 +1602,7 @@ describe("the Docker engine", () => {
     writeFileSync(join(f.dir, "compose.darwin-thoughts.yaml"), "services: {}\n", { mode: 0o600 });
     const r = recordingExec();
     const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
-    expect(await engine.composeUp(f.dir)).toBe(true);
+    expect(await engine.composeUp(f.dir)).toEqual({ ok: true });
     expect(r.runs[0]!.args).toEqual(["compose", "--project-name", "catalyst-host", "--file", join(f.dir, "compose.yaml"), "--file", join(f.dir, "compose.darwin-thoughts.yaml"), "--env-file", join(f.dir, ".env"), "up", "--detach"]);
   });
 
@@ -1589,8 +1612,55 @@ describe("the Docker engine", () => {
     writeFileSync(join(f.dir, ".env"), "CATALYST_THOUGHTS_CUSTODY_AUTHORITY='{}'\n", { mode: 0o600 });
     const r = recordingExec();
     const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
-    expect(await engine.composeUp(f.dir)).toBe(false);
+    expect(await engine.composeUp(f.dir)).toEqual({ ok: false });
     expect(r.runs).toEqual([]);
+  });
+
+  test("the existing project's containers are read with their states before Compose starts", async () => {
+    const r = recordingExec({ "ps --all": { code: 0, stdout: "watchdog\tpaused\nsupervisor\texited\n" } });
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    expect(await engine.projectContainers!()).toEqual([
+      { service: "watchdog", state: "paused" },
+      { service: "supervisor", state: "exited" },
+    ]);
+    expect(r.runs[0]!.args).toEqual([
+      "ps", "--all",
+      "--filter", "label=com.docker.compose.project=catalyst-host",
+      "--format", '{{.Label "com.docker.compose.service"}}\t{{.State}}',
+    ]);
+  });
+
+  test("an unreadable container listing reads as null, never as a wrong verdict", async () => {
+    const r = recordingExec({ "ps --all": { code: 1, stdout: "" } });
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    expect(await engine.projectContainers!()).toBeNull();
+  });
+
+  test("compose unpause adopts the paused project in place, removing nothing", async () => {
+    const r = recordingExec();
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    expect(await engine.composeUnpause!("/r")).toBe(true);
+    expect(r.runs[0]!.args).toEqual([
+      "compose", "--project-name", "catalyst-host", "--file", "/r/compose.yaml",
+      "--env-file", "/r/.env", "unpause",
+    ]);
+    expect(r.runs[0]!.cwd).toBe("/r");
+  });
+
+  test("a Compose failure carries the daemon's own error text, without log noise", async () => {
+    const r = recordingExec({ compose: { code: 1, stderr: "time=2026-10-02T12:00:00Z level=warning msg=unrelated noise\nError response from daemon: Cannot start container catalyst-host-supervisor-1: container is paused\n" } });
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    const up = await engine.composeUp("/r");
+    expect(up.ok).toBe(false);
+    expect(up.error).toBe("Error response from daemon: Cannot start container catalyst-host-supervisor-1: container is paused");
+  });
+
+  test("Compose output that is only control characters yields no error text", async () => {
+    const r = recordingExec({ compose: { code: 1, stderr: "\x00\x07\x1b" } });
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    const up = await engine.composeUp("/r");
+    expect(up.ok).toBe(false);
+    expect(up.error).toBeUndefined();
   });
 
   test("installation receives an exact two-file Darwin identity only with private custody files", async () => {
@@ -2134,7 +2204,7 @@ describe("owner-managed preserving replacement through the existing CLI path", (
     const composeUp = f.engine.composeUp;
     f.engine.composeUp = async (...args) => {
       const started = await composeUp(...args);
-      if (started) {
+      if (started.ok) {
         row.Config.Image = SUPERVISOR;
         row.Image = `sha256:${"a".repeat(64)}`;
       }
@@ -2321,4 +2391,136 @@ describe("owner-managed preserving replacement through the existing CLI path", (
       );
     },
   );
+});
+
+describe("installing over an existing catalyst-host project", () => {
+  function withOrgKey(f: ReturnType<typeof fixture>) {
+    const file = join(f.home, "org-key");
+    writeFileSync(file, `${ORG_KEY}\n`, { mode: 0o600 });
+    f.ctx.env.CATALYST_RUNNER_ORG_KEY_FILE = file;
+  }
+
+  test("a paused project is resumed and adopted before Compose starts", async () => {
+    const engine = fakeEngine();
+    engine.containers = [
+      { service: "supervisor", state: "paused" },
+      { service: "watchdog", state: "paused" },
+    ];
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostId: "host-1" } });
+    expect(engine.calls.indexOf("composeUnpause")).toBeGreaterThan(-1);
+    expect(engine.calls.indexOf("composeUnpause")).toBeLessThan(engine.calls.indexOf("composeUp"));
+    expect(engine.containers?.every((row) => row.state === "running")).toBe(true);
+    expect(f.messages.join("\n")).toContain("Resumed the paused containers (supervisor, watchdog)");
+    expect(f.messages.join("\n")).toContain("catalyst-host");
+    secretsNowhere(f);
+  });
+
+  test("a paused project that cannot resume stops with the exact command, never exit 10", async () => {
+    const engine = fakeEngine();
+    engine.containers = [{ service: "supervisor", state: "paused" }];
+    engine.unpauseFails = true;
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    const result = await run(f);
+    expect(result).toMatchObject({
+      state: "waiting",
+      reason: "runner_compose_paused",
+      evidence: { project: "catalyst-host", services: "supervisor" },
+    });
+    expect(engine.calls).not.toContain("composeUp");
+    if (result.state !== "waiting") throw Error("expected a waiting result");
+    const text = onboardReasonText({ id: "runner", ...result, state: result.state });
+    expect(text).toContain("docker compose -p catalyst-host unpause");
+    expect(text).toContain("supervisor");
+    expect(text).toContain("catalyst onboard --runner");
+    expect(text).toContain("removed nothing");
+    secretsNowhere(f);
+  });
+
+  test("a stopped project is adopted with its stopped containers named", async () => {
+    const engine = fakeEngine();
+    engine.containers = [
+      { service: "supervisor", state: "exited" },
+      { service: "watchdog", state: "exited" },
+    ];
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostId: "host-1" } });
+    expect(engine.calls).not.toContain("composeUnpause");
+    expect(f.messages.join("\n")).toContain("Starting the existing catalyst-host project's stopped containers (supervisor, watchdog)");
+    secretsNowhere(f);
+  });
+
+  test("a changed Compose file names the existing containers it replaces", async () => {
+    const engine = fakeEngine();
+    engine.containers = [{ service: "supervisor", state: "running" }];
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    mkdirSync(f.dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(f.dir, "compose.yaml"), "name: catalyst-host\nservices: {}\n", { mode: 0o644 });
+    expect(await f.adapter.act!(f.ctx, f.journal)).toEqual({ state: "done" });
+    expect(f.messages.join("\n")).toContain("Replacing the existing catalyst-host project's containers (supervisor)");
+    secretsNowhere(f);
+  });
+
+  test("a clean machine behaves exactly as today", async () => {
+    const engine = fakeEngine();
+    engine.containers = [];
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostId: "host-1", capacity: 2 } });
+    expect(engine.calls).not.toContain("composeUnpause");
+    expect(f.messages.join("\n")).not.toMatch(/existing catalyst-host project/i);
+    const legacy = fakeEngine();
+    delete legacy.projectContainers;
+    delete legacy.composeUnpause;
+    const plain = fixture({ selected: true, engine: legacy });
+    withOrgKey(plain);
+    expect(await run(plain)).toMatchObject({ state: "done", evidence: { hostId: "host-1" } });
+    expect(legacy.calls).not.toContain("composeUnpause");
+    secretsNowhere(f);
+    secretsNowhere(plain);
+  });
+
+  test("a Compose failure over a stopped project names the error, the project and the next command", async () => {
+    const engine = fakeEngine();
+    engine.containers = [{ service: "supervisor", state: "exited" }];
+    engine.upError = "Error response from daemon: Cannot start container catalyst-host-supervisor-1: container is paused";
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    const result = await run(f);
+    expect(result).toMatchObject({
+      state: "failed",
+      reason: "runner_compose_failed",
+      evidence: { project: "catalyst-host", composeError: "Error response from daemon: Cannot start container catalyst-host-supervisor-1: container is paused" },
+    });
+    if (result.state !== "failed") throw Error("expected a failed result");
+    const text = onboardReasonText({ id: "runner", ...result, state: result.state });
+    expect(text).toContain("runner project catalyst-host");
+    expect(text).toContain("container is paused");
+    expect(text).toContain("docker compose -p catalyst-host logs");
+    expect(text).toContain("catalyst onboard --runner");
+    secretsNowhere(f);
+  });
+
+  test("a Compose failure without captured output still names the project and the next command", async () => {
+    const engine = fakeEngine();
+    engine.upError = "";
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    const result = await run(f);
+    expect(result).toMatchObject({
+      state: "failed",
+      reason: "runner_compose_failed",
+      evidence: { project: "catalyst-host" },
+    });
+    if (result.state !== "failed" || !result.evidence) throw Error("expected a failed result with evidence");
+    expect(result.evidence.composeError).toBeUndefined();
+    const text = onboardReasonText({ id: "runner", ...result, state: result.state });
+    expect(text).toContain("runner project catalyst-host");
+    expect(text).toContain("docker compose -p catalyst-host logs");
+    secretsNowhere(f);
+  });
 });

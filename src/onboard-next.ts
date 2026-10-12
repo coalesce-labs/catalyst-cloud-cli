@@ -284,7 +284,9 @@ const REASONS: Record<string, string> = {
   runner_org_key_write_failed:
     "Setup could not place the organization key on the runner. Check that Docker is running, then run catalyst onboard again.",
   runner_compose_failed:
-    "Docker Compose could not start the runner. Run docker compose -p catalyst-host logs to see why, then run catalyst onboard again.",
+    "Docker Compose could not start the runner project catalyst-host. Run docker compose -p catalyst-host logs to see why, then run catalyst onboard --runner again.",
+  runner_compose_paused:
+    "The existing catalyst-host Compose project's containers are paused. Run docker compose -p catalyst-host unpause to resume them, then run catalyst onboard --runner again. Setup removed nothing.",
   runner_compose_not_running:
     "The runner's supervisor is not running. Run docker compose -p catalyst-host logs supervisor to see why, then run catalyst onboard again.",
   runner_enrollment_unverified:
@@ -652,6 +654,25 @@ export function onboardReasonText(
         ? `: ${failing.split(",").join(", ")}`
         : "";
     return `The runner is enrolled but its readiness checks fail${checks}. Run docker compose -p catalyst-host logs supervisor for the remedy, then run catalyst onboard again.`;
+  }
+  // CTC-5721: a Compose failure, or a paused older project, carries the evidence the adapter recorded.
+  if (reason === "runner_compose_paused") {
+    const services = typeof step.evidence?.services === "string" &&
+        /^[a-z0-9][a-z0-9_-]{0,63}(,[a-z0-9][a-z0-9_-]{0,63})*$/.test(step.evidence.services)
+      ? ` (${step.evidence.services.split(",").join(", ")})`
+      : "";
+    return `Setup found the existing catalyst-host Compose project's containers${services} paused and could not resume them. Run docker compose -p catalyst-host unpause to resume them, then run catalyst onboard --runner again. Setup removed nothing.`;
+  }
+  if (reason === "runner_compose_failed") {
+    const project = typeof step.evidence?.project === "string" &&
+        /^[a-z0-9][a-z0-9-]{0,63}$/.test(step.evidence.project)
+      ? step.evidence.project
+      : "catalyst-host";
+    const error = typeof step.evidence?.composeError === "string" &&
+        /^[\x20-\x7e]{1,500}$/.test(step.evidence.composeError)
+      ? step.evidence.composeError.replace(/\.+$/, "")
+      : undefined;
+    return `Docker Compose could not start the runner project ${project}${error ? `: ${error}` : ""}. Run docker compose -p ${project} logs to see why, then run catalyst onboard --runner again.`;
   }
   if (reason === "runner_admission_operator")
     return `The admission policy for team ${onboardTeamKey(context.journal) ?? "<TEAM KEY>"} needs a Catalyst operator to check it. Setup changes only restricted admission and preserves existing policy fields. Ask Catalyst support to confirm a compatible policy, then run the same setup command.`;
