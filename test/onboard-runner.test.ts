@@ -910,6 +910,29 @@ describe("prerequisites", () => {
     expect(unsafe.state.admissionWrites).toEqual([]);
   });
 
+  test("re-installing over an existing custody project re-attests on the new pin and reaches Compose again", async () => {
+    const engine = fakeEngine();
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    expect((await run(f)).state).toBe("done");
+    const next = SUPERVISOR.replace("a".repeat(64), "f".repeat(64));
+    engine.images.set(next, "arm64");
+    f.ctx.env.CATALYST_SUPERVISOR_IMAGE = next;
+    let custodyImage: string | undefined;
+    engine.nativeThoughtsCustody = async (input) => {
+      engine.calls.push("nativeThoughtsCustody");
+      custodyImage = input.supervisorImage;
+      return nativeCustodyFixture(input.dir);
+    };
+    expect((await run(f)).state).toBe("done");
+    expect(custodyImage).toBe(next);
+    expect(readFileSync(join(f.dir, ".env"), "utf8")).toContain(`CATALYST_SUPERVISOR_IMAGE=${next}\n`);
+    expect(readFileSync(join(f.dir, ".env"), "utf8")).toContain("CATALYST_THOUGHTS_CUSTODY_AUTHORITY=");
+    expect(existsSync(join(f.dir, "compose.darwin-thoughts.yaml"))).toBe(true);
+    expect(engine.calls).toContain(`imageArch ${next}`);
+    expect(engine.calls.filter(call => call === "composeUp")).toHaveLength(2);
+    secretsNowhere(f);
+  });
+
   test("native Linux keeps cached-image pulls and never invokes Darwin custody", async () => {
     const engine = fakeEngine({ arch: "amd64", vm: false });
     for (const ref of [SUPERVISOR, WATCHDOG, RUNNER]) engine.images.set(ref, "amd64");

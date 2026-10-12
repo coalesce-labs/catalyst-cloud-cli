@@ -44,7 +44,6 @@ describe("native Darwin custody installer", () => {
     const calls: Array<Record<string, unknown>> = [];
     let endpoint = "unix://" + join(home, "engine.sock");
     let cached = true;
-    let cachedProducerSupervisor = true;
     let runnerCustodyVersion: string | undefined = "v1";
     let wrongSignature = false;
     let nonceCount = 0;
@@ -62,7 +61,7 @@ describe("native Darwin custody installer", () => {
       engineIdentity: async (input: Record<string, unknown>) => {
         calls.push({ kind: "engine", ...input });
         return { endpoint, daemonId: "selected-daemon", cachedSupervisor: cached,
-          cachedProducerSupervisor, cachedRunner: cached, runnerCustodyVersion };
+          cachedRunner: cached, runnerCustodyVersion };
       },
       service: async (input: Record<string, unknown>) => { calls.push({ kind: "service", ...input }); },
       receiveBootstrap: async input => {
@@ -96,7 +95,6 @@ describe("native Darwin custody installer", () => {
       state: join(dirname(dir), "darwin-thoughts-custody"),
       setEndpoint: (value: string) => { endpoint = value; },
       setCached: (value: boolean) => { cached = value; },
-      setCachedProducerSupervisor: (value: boolean) => { cachedProducerSupervisor = value; },
       setRunnerCustodyVersion: (value: string | undefined) => { runnerCustodyVersion = value; },
       setWrongSignature: () => { wrongSignature = true; } };
   }
@@ -180,32 +178,48 @@ describe("native Darwin custody installer", () => {
     expect(fs.readFileSync(first.configPath)).toEqual(config); expect(fs.readFileSync(keyFile)).toEqual(key);
     expect(f.calls.filter(call => call.kind === "bootstrap")).toHaveLength(2);
   });
-  it("updates runtime images while preserving the enrolled producer helper and all private authority bytes", async () => {
+  it("re-attests an older enrolled helper on the current pin, replacing only the recorded image", async () => {
     const f = fixture(); const first = await f.harness.install(f.input);
-    const paths = ["producer.json", "private-key.der", "runtime.json", "producer.mjs", "watchdog.mjs", "watchdog-deadline.mjs"]
-      .map(name => join(f.state, name));
-    paths.push(join(home, "Library", "LaunchAgents", first.serviceLabel + ".plist"));
-    const before = paths.map(path => fs.readFileSync(path));
-    f.calls.length = 0;
     const runtimeSupervisor = "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:" + "c".repeat(64);
     const runtimeRunner = "ghcr.io/coalesce-labs/catalyst-runner@sha256:" + "d".repeat(64);
+    const before = {
+      key: fs.readFileSync(join(f.state, "private-key.der")),
+      runtime: fs.readFileSync(join(f.state, "runtime.json")),
+      producer: fs.readFileSync(join(f.state, "producer.mjs")),
+      watchdog: fs.readFileSync(join(f.state, "watchdog.mjs")),
+      deadline: fs.readFileSync(join(f.state, "watchdog-deadline.mjs")),
+      plist: fs.readFileSync(join(home, "Library", "LaunchAgents", first.serviceLabel + ".plist")),
+    };
+    const enrolled = JSON.parse(fs.readFileSync(first.configPath, "utf8"));
+    f.calls.length = 0;
     const second = await f.harness.install({ ...f.input, supervisorImage: runtimeSupervisor, runnerImage: runtimeRunner });
     expect(second.authority).toEqual(first.authority);
-    expect(paths.map(path => fs.readFileSync(path))).toEqual(before);
+    expect(fs.readFileSync(join(f.state, "private-key.der"))).toEqual(before.key);
+    expect(fs.readFileSync(join(f.state, "runtime.json"))).toEqual(before.runtime);
+    expect(fs.readFileSync(join(f.state, "producer.mjs"))).toEqual(before.producer);
+    expect(fs.readFileSync(join(f.state, "watchdog.mjs"))).toEqual(before.watchdog);
+    expect(fs.readFileSync(join(f.state, "watchdog-deadline.mjs"))).toEqual(before.deadline);
+    expect(fs.readFileSync(join(home, "Library", "LaunchAgents", first.serviceLabel + ".plist"))).toEqual(before.plist);
+    const reattested = JSON.parse(fs.readFileSync(first.configPath, "utf8"));
+    expect(reattested).toEqual({ ...enrolled, supervisorImage: runtimeSupervisor });
+    expect(fs.lstatSync(first.configPath).mode & 0o7777).toBe(0o600);
     expect(f.calls.find(call => call.kind === "engine")).toMatchObject({
-      supervisorImage: runtimeSupervisor, producerSupervisorImage: SUPERVISOR, runnerImage: runtimeRunner,
+      supervisorImage: runtimeSupervisor, runnerImage: runtimeRunner,
     });
-    expect(f.calls.find(call => call.kind === "bootstrap")).toMatchObject({ supervisorImage: SUPERVISOR });
+    expect(f.calls.find(call => call.kind === "engine")).not.toHaveProperty("producerSupervisorImage");
+    expect(f.calls.find(call => call.kind === "bootstrap")).toMatchObject({ supervisorImage: runtimeSupervisor });
     expect(f.calls.map(call => call.kind)).toEqual(["engine", "service", "bootstrap"]);
   });
-  it("refuses an uncached enrolled producer helper before service or proof while preserving existing state", async () => {
-    const f = fixture(); const first = await f.harness.install(f.input);
-    const config = fs.readFileSync(first.configPath); const key = fs.readFileSync(join(f.state, "private-key.der"));
-    f.calls.length = 0; f.setCachedProducerSupervisor(false);
-    await expect(f.harness.install(f.input)).rejects.toThrow(/producer_helper_cache_unavailable/);
-    expect(f.calls.map(call => call.kind)).toEqual(["engine"]);
-    expect(fs.readFileSync(first.configPath)).toEqual(config);
-    expect(fs.readFileSync(join(f.state, "private-key.der"))).toEqual(key);
+  it("re-attests without any Engine work on the evicted enrolled digest", async () => {
+    const f = fixture(); await f.harness.install(f.input);
+    const runtimeSupervisor = "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:" + "e".repeat(64);
+    f.calls.length = 0;
+    const second = await f.harness.install({ ...f.input, supervisorImage: runtimeSupervisor });
+    expect(second.authority).toBeDefined();
+    expect(JSON.parse(fs.readFileSync(second.configPath, "utf8")).supervisorImage).toBe(runtimeSupervisor);
+    expect(f.calls.filter(call => call.kind === "engine")).toHaveLength(1);
+    expect(f.calls.find(call => call.kind === "engine")).not.toHaveProperty("producerSupervisorImage");
+    expect(f.calls.map(call => call.kind)).toEqual(["engine", "service", "bootstrap"]);
   });
   it.each(["foreign repository", "unpinned", "malformed"])("refuses an invalid saved producer helper: %s", async kind => {
     const f = fixture(); const first = await f.harness.install(f.input);
