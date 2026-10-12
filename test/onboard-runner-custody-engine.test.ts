@@ -60,27 +60,18 @@ describe("actual custody Engine selection through a fixed fake executable", () =
     expect(calls[0]).toContain("lane-selected");
     expect(calls.slice(1).every(call => call.includes("unix:///selected.sock"))).toBe(true);
   });
-  it("receives the runtime and enrolled helper caches separately on the same selected Engine", async () => {
+  it("receives exactly one supervisor cache inspect: the current pin", async () => {
     const f = fixture(); process.env.DOCKER_CONTEXT = "lane-selected";
-    const producerSupervisorImage = "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:" + "c".repeat(64);
-    expect(await inspectDarwinThoughtsEngineForTest({ ...f.input, producerSupervisorImage })).toMatchObject({
-      endpoint: "unix:///selected.sock", cachedSupervisor: true, cachedProducerSupervisor: true, cachedRunner: true,
+    const received = await inspectDarwinThoughtsEngineForTest(f.input);
+    expect(received).toMatchObject({
+      endpoint: "unix:///selected.sock", cachedSupervisor: true, cachedRunner: true,
     });
+    expect(received).not.toHaveProperty("cachedProducerSupervisor");
     const calls = fs.readFileSync(f.log, "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
-    expect(calls).toHaveLength(5);
+    expect(calls).toHaveLength(4);
     expect(calls.filter(call => call.includes("image")).map(call => call.at(-1)))
-      .toEqual([f.input.supervisorImage, producerSupervisorImage, f.input.runnerImage]);
+      .toEqual([f.input.supervisorImage, f.input.runnerImage]);
     expect(calls.slice(1).every(call => call.includes("unix:///selected.sock"))).toBe(true);
-    expect(calls.every(call => !call.includes("pull"))).toBe(true);
-  });
-  it("does not substitute the cached runtime image for an uncached enrolled helper", async () => {
-    const producerSupervisorImage = "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:" + "c".repeat(64);
-    const f = fixture("v1", producerSupervisorImage);
-    expect(await inspectDarwinThoughtsEngineForTest({ ...f.input, producerSupervisorImage })).toMatchObject({
-      cachedSupervisor: true, cachedProducerSupervisor: false, cachedRunner: true,
-    });
-    const calls = fs.readFileSync(f.log, "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
-    expect(calls.some(call => call.includes("image") && call.at(-1) === producerSupervisorImage)).toBe(true);
     expect(calls.every(call => !call.includes("pull"))).toBe(true);
   });
   it("refuses conflicting HOST/CONTEXT before any executable work", async () => {
