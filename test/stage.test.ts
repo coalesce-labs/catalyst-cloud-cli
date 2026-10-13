@@ -457,6 +457,28 @@ describe("stage local-phase wrapper", () => {
     ];
     expect(await main(args, ctx)).toBe(2);
     expect(calls.filter((c) => c.path === stageRoutes.release)).toHaveLength(0);
+    const writesBeforeChangedRetry = calls.filter(
+      (c) => c.path === stageRoutes.artifact,
+    ).length;
+    const changed = Buffer.from("# Research\nChanged after the receipt.\n");
+    writeFileSync(artifact, changed);
+    writeFileSync(
+      evidence,
+      JSON.stringify({
+        artifactSha256: createHash("sha256").update(changed).digest("hex"),
+      }),
+    );
+    expect(await main(args, ctx)).toBe(1);
+    expect(calls.filter((c) => c.path === stageRoutes.artifact)).toHaveLength(
+      writesBeforeChangedRetry,
+    );
+    writeFileSync(artifact, bytes);
+    writeFileSync(
+      evidence,
+      JSON.stringify({
+        artifactSha256: createHash("sha256").update(bytes).digest("hex"),
+      }),
+    );
     expect(await main(args, ctx)).toBe(0);
     expect(calls.filter((c) => c.path === stageRoutes.release)).toHaveLength(1);
     expect(

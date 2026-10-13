@@ -42,6 +42,7 @@ interface LeaseState {
   node: string;
   expiresAtMs: number;
   priorDir?: string;
+  terminalAttempt?: { kind: "complete" | "failed"; sha256: string };
   routes: Record<Route, string>;
 }
 
@@ -699,6 +700,34 @@ async function terminal(
     completeBytes = checkedArtifact(artifactPath, artifactNames[state.phase]!);
     completeEvidence = evidenceFor(state.phase, evidencePath, completeBytes);
   }
+  const failurePath =
+    kind === "failed" ? flagString(args, "artifact") : undefined;
+  const failureDiagnostic =
+    state.phase === "intake" || state.phase === "remediate"
+      ? JSON.stringify({ failed: true, summary })
+      : `# ${state.phase} failed\n\n${summary}\n`;
+  const terminalBytes =
+    kind === "complete"
+      ? completeBytes!
+      : failurePath
+        ? checkedArtifact(failurePath, artifactNames[state.phase]!)
+        : Buffer.from(failureDiagnostic);
+  const attemptSha256 = createHash("sha256")
+    .update(JSON.stringify({ kind, summary, evidence: completeEvidence }))
+    .update(terminalBytes)
+    .digest("hex");
+  if (state.terminalAttempt) {
+    if (
+      state.terminalAttempt.kind !== kind ||
+      state.terminalAttempt.sha256 !== attemptSha256
+    )
+      throw new UsageError(
+        "terminal publication already began with different artifact, evidence, or summary; retry the original payload",
+      );
+  } else {
+    state.terminalAttempt = { kind, sha256: attemptSha256 };
+    saveState(ctx.home, state);
+  }
   let artifactKey: string | undefined;
   let failure: unknown;
   try {
@@ -709,7 +738,7 @@ async function terminal(
         cfg,
         state,
         artifactNames[state.phase]!,
-        completeBytes!,
+        terminalBytes,
       );
       const receipt = {
         version: 1,
@@ -733,20 +762,12 @@ async function terminal(
         "application/json",
       );
     } else {
-      const artifactPath = flagString(args, "artifact");
-      const diagnostic =
-        state.phase === "intake" || state.phase === "remediate"
-          ? JSON.stringify({ failed: true, summary })
-          : `# ${state.phase} failed\n\n${summary}\n`;
-      const bytes = artifactPath
-        ? checkedArtifact(artifactPath, artifactNames[state.phase]!)
-        : Buffer.from(diagnostic);
       artifactKey = await publishArtifact(
         ctx,
         cfg,
         state,
         artifactNames[state.phase]!,
-        bytes,
+        terminalBytes,
       );
     }
     await publishEvent(
