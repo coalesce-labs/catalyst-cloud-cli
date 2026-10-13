@@ -501,6 +501,28 @@ describe("stage local-phase wrapper", () => {
     ).toHaveLength(2);
   });
 
+  test("a runtime expiry retains the saved proof while the work lease is live", async () => {
+    const { home, ctx, calls } = setup();
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const path = join(
+      home,
+      ".config",
+      "catalyst-cloud",
+      "local-stages",
+      "CTC-5742.json",
+    );
+    const state = JSON.parse(readFileSync(path, "utf8"));
+    state.runtime.expiresAtMs = 1;
+    writeFileSync(path, JSON.stringify(state));
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(1);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.claim),
+    ).toHaveLength(1);
+    expect(JSON.parse(readFileSync(path, "utf8")).credential).toBe(
+      "lease-secret",
+    );
+  });
+
   test("a frontier mismatch releases without publishing", async () => {
     const { ctx, calls } = setup("plan");
     expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(2);
@@ -963,6 +985,37 @@ describe("stage local-phase wrapper", () => {
     ];
     expect(await main(renew, ctx)).toBe(2);
     expect(await main(renew, ctx)).toBe(0);
+  });
+
+  test("an old nonempty partial recovery lock is reclaimed on retry", async () => {
+    const { home, ctx, calls } = setup();
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const lock = join(
+      home,
+      ".config",
+      "catalyst-cloud",
+      "local-stages",
+      "CTC-5742.json.lock",
+    );
+    writeFileSync(
+      lock,
+      JSON.stringify({ owner: "dead-owner", pid: 99_999_999 }),
+    );
+    writeFileSync(`${lock}.recovery`, '{"owner":');
+    utimesSync(`${lock}.recovery`, new Date(0), new Date(0));
+    const renew = [
+      "stage",
+      "renew",
+      "CTC-5742",
+      "research",
+      "--assertion",
+      "still working",
+    ];
+    expect(await main(renew, ctx)).toBe(2);
+    expect(await main(renew, ctx)).toBe(0);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.renew),
+    ).toHaveLength(1);
   });
 
   test("an old partial stage lock left by a killed process is recoverable", async () => {

@@ -161,29 +161,38 @@ async function withStageLock<T>(
               // A process can die between the exclusive create and writing its owner record.
               // Leave a fresh partial write alone; an old one is safe to recover on retry.
               const recoveryStat = statSync(recoveryPath);
+              let recoverer: { owner: string; pid: number } | undefined;
+              try {
+                const parsed: unknown = JSON.parse(
+                  readFileSync(recoveryPath, "utf8"),
+                );
+                if (
+                  parsed !== null &&
+                  typeof parsed === "object" &&
+                  !Array.isArray(parsed) &&
+                  typeof (parsed as { owner?: unknown }).owner === "string" &&
+                  Number.isSafeInteger((parsed as { pid?: unknown }).pid) &&
+                  (parsed as { pid: number }).pid > 0
+                )
+                  recoverer = parsed as { owner: string; pid: number };
+              } catch {
+                // A killed writer can leave nonempty, incomplete JSON.
+              }
               if (
-                recoveryStat.size === 0 &&
+                recoverer === undefined &&
                 Date.now() - recoveryStat.mtimeMs > 5_000
               ) {
-                unlinkSync(recoveryPath);
-                throw new CliError(
-                  "stale recovery lock removed; retry",
-                  "stage-locked",
-                );
+                const current = statSync(recoveryPath);
+                if (
+                  current.dev === recoveryStat.dev &&
+                  current.ino === recoveryStat.ino &&
+                  current.mtimeMs === recoveryStat.mtimeMs
+                )
+                  unlinkSync(recoveryPath);
               }
-              const recoverer = JSON.parse(
-                readFileSync(recoveryPath, "utf8"),
-              ) as {
-                owner?: string;
-                pid?: number;
-              };
-              if (
-                typeof recoverer.owner === "string" &&
-                Number.isSafeInteger(recoverer.pid) &&
-                recoverer.pid! > 0
-              ) {
+              if (recoverer !== undefined) {
                 try {
-                  process.kill(recoverer.pid!, 0);
+                  process.kill(recoverer.pid, 0);
                 } catch (probe) {
                   if ((probe as NodeJS.ErrnoException).code === "ESRCH") {
                     const current = JSON.parse(
@@ -663,7 +672,7 @@ async function start(
     const previous = JSON.parse(
       readFileSync(statePath(ctx.home, ticket), "utf8"),
     ) as LeaseState;
-    const deadline = Math.min(
+    const deadline = Math.max(
       previous.expiresAtMs,
       previous.runtime?.expiresAtMs ?? previous.expiresAtMs,
     );
