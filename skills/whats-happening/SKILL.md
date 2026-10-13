@@ -10,7 +10,7 @@ allowed-tools: Bash(catalyst:*) Bash(npx -p @catalyst-cloud/cli catalyst:*)
 
 Use one snapshot and the person's login. Run scripts, never read them. --help explains usage; exit 2 needs onboard, exit 1 means failure.
 
-- `node scripts/snapshot.mjs` reads contract, running work, queue and ranked asks from the cloud. --board adds stages, --accounts coding accounts, --team K narrows. --replica adds optional local diagnostics.
+- `node scripts/snapshot.mjs` reads contract, running work, queue and ranked asks from the cloud. --board adds every open ticket's count per stage with up to 50 cards each; when boardTruncated is present, say how many it left out. --accounts adds coding accounts, --team K narrows. --replica adds optional local diagnostics.
 - `node scripts/explain.mjs <ticket>` explains eligibility; --history adds attempts, rounds, holds and releases.
 - `node scripts/show-my-map.mjs [--team K]` prints stages, labels, ladder and thresholds.
 
