@@ -514,6 +514,12 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       help: "with --class: at most this many tickets (the cloud caps it at 25)",
     },
   },
+  stage: {
+    artifact: { value: true, help: "done/fail: path to the phase artifact" },
+    evidence: { value: true, help: "done: JSON file with phase-specific receipt evidence" },
+    summary: { value: true, help: "done/fail: concise outcome summary" },
+    assertion: { value: true, help: "renew: work completed since the previous renewal" },
+  },
 };
 
 export const VERB_USAGE: Record<string, string> = {
@@ -566,6 +572,8 @@ export const VERB_USAGE: Record<string, string> = {
     "connections personal <linear|github> <start|status> [--wait <seconds>] [--json]",
   release:
     "release <ticket> --because <what changed> [--retry-unchanged] [--dry-run] [--json] | release --class <failure-class> --team <K> --because <what changed> [--retry-unchanged] [--dry-run] [--limit N] [--json]",
+  stage:
+    "stage start|renew|done|fail <ticket> <phase> [--artifact <path>] [--evidence <json>] [--summary <text>] [--assertion <work done>]",
 };
 
 export function parseArgs(argv: string[]): ParsedArgs {

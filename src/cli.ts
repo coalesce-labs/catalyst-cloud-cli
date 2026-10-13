@@ -93,6 +93,7 @@ import { cmdWrite, type WriteDeps } from "./write.js";
 import { cmdAsk } from "./ask.js";
 import { cmdMcp } from "./mcp.js";
 import { cmdRelease } from "./release.js";
+import { cmdStage } from "./stage.js";
 import { cmdEnvironment, type EnvironmentDeps } from "./environment.js";
 import { cmdEnv, type EnvDeps } from "./env.js";
 import { cmdSecret, type SecretDeps } from "./secret.js";
@@ -222,6 +223,7 @@ export function usageText(): string {
     "  catalyst team <list|check|map|adopt|migrate|checklist> ...",
     "  catalyst capabilities [--json]   (what this CLI can do, the role each verb needs, and whether this cloud serves it)",
     "  catalyst project list [--json]   (all workspace projects, including those with no stage mapping)",
+    "  catalyst stage <start|renew|done|fail> <ticket> <phase>   (a cloud-claimed local phase)",
     "  catalyst project wip-limit <get|set <n>|set default> [--team K]   (a project's new-start WIP limit; members read, owners and admins set)",
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
@@ -719,6 +721,8 @@ export async function main(
         return await cmdAccounts(args, ctx);
       case "release":
         return await cmdRelease(args, ctx);
+      case "stage":
+        return await cmdStage(args, ctx);
       case "environment":
         return await cmdEnvironment(args, ctx, deps.environment ?? {});
       case "env":
