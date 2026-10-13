@@ -105,23 +105,56 @@ async function withStageLock<T>(
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      let stale = false;
+      let staleOwner: string | undefined;
+      let stalePid: number | undefined;
       try {
         const holder = JSON.parse(readFileSync(path, "utf8")) as {
+          owner?: string;
           pid?: number;
         };
-        if (Number.isSafeInteger(holder.pid) && holder.pid! > 0) {
+        if (typeof holder.owner === "string" && Number.isSafeInteger(holder.pid) && holder.pid! > 0) {
           try {
             process.kill(holder.pid!, 0);
           } catch (probe) {
-            stale = (probe as NodeJS.ErrnoException).code === "ESRCH";
+            if ((probe as NodeJS.ErrnoException).code === "ESRCH") {
+              staleOwner = holder.owner;
+              stalePid = holder.pid;
+            }
           }
         }
       } catch {
         // A partial lock write is treated as live; a later invocation can retry.
       }
-      if (stale && attempt === 0) {
-        unlinkSync(path);
+      if (staleOwner !== undefined && attempt === 0) {
+        // Only one stale-lock recoverer may inspect and remove the old inode at a time. Without
+        // this second exclusive lock, two readers can both see a dead PID and the second can
+        // unlink the first reader's newly acquired live lock.
+        const recoveryPath = `${path}.recovery`;
+        let recoveryFd: number;
+        try {
+          recoveryFd = openSync(recoveryPath, "wx", 0o600);
+          closeSync(recoveryFd);
+        } catch {
+          throw new CliError(
+            `another stage command is recovering the lock for ${ticket}; retry when it finishes`,
+            "stage-locked",
+          );
+        }
+        try {
+          const current = JSON.parse(readFileSync(path, "utf8")) as {
+            owner?: string;
+            pid?: number;
+          };
+          if (current.owner === staleOwner && current.pid === stalePid) {
+            try {
+              process.kill(stalePid!, 0);
+            } catch (probe) {
+              if ((probe as NodeJS.ErrnoException).code === "ESRCH") unlinkSync(path);
+            }
+          }
+        } finally {
+          unlinkSync(recoveryPath);
+        }
         continue;
       }
       throw new CliError(
@@ -654,7 +687,9 @@ async function start(
       saveState(ctx.home, state);
     }
     await publishEvent(ctx, cfg, state, "started");
-    await moveCardToStage(ctx, cfg, doc, state);
+    // Under trailing keying, the accepted terminal receipt moves the card. A start event records
+    // activity and timing but must not present unfinished work as a completed phase.
+    if (doc.ladder.keying === "leading") await moveCardToStage(ctx, cfg, doc, state);
   } catch (err) {
     if (err instanceof CliError && err.code === "stage-dispossessed") {
       try {

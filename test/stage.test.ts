@@ -27,6 +27,7 @@ function setup(
     releaseRefusal?: string;
     rejectReceiptOnce?: boolean;
     rejectReceiptOnRetry?: boolean;
+    keying?: "leading" | "trailing";
   } = {},
 ) {
   const home = tempHome();
@@ -50,6 +51,7 @@ function setup(
   let receiptUploads = 0;
   const doc = buildFixtureContract();
   doc.teams[0]!.key = "CTC";
+  doc.ladder.keying = opts.keying ?? "trailing";
   doc.routes = [
     ...doc.routes,
     ...(["claim", "renew", "release"] as const).map((key) => ({
@@ -255,12 +257,8 @@ describe("stage local-phase wrapper", () => {
     const startedIndex = calls.findIndex(
       (c) => c.path === stageRoutes.coordination,
     );
-    const moveIndex = calls.findIndex((c) => c.path === issueStatePath);
-    expect(moveIndex).toBeGreaterThan(startedIndex);
-    expect(calls[moveIndex]?.body).toEqual({
-      issueId: "linear-issue-5742",
-      stateId: "state-research",
-    });
+    expect(startedIndex).toBeGreaterThanOrEqual(0);
+    expect(calls.some((c) => c.path === issueStatePath)).toBe(false);
   });
 
   test("downloads prior artifacts to a private, named local directory", async () => {
@@ -450,6 +448,7 @@ describe("stage local-phase wrapper", () => {
   test("a rejected app-actor state move surfaces a failed start and releases the claim", async () => {
     const { ctx, calls, issueStatePath } = setup("research", {
       rejectMove: true,
+      keying: "leading",
     });
     expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(2);
     expect(calls.filter((c) => c.path === issueStatePath)).toHaveLength(1);
@@ -463,6 +462,23 @@ describe("stage local-phase wrapper", () => {
               ?.event_name,
         ),
     ).toEqual(["phase.research.started", "phase.research.failed"]);
+  });
+
+  test("leading workflow keying moves the card after the start event", async () => {
+    const { ctx, calls, issueStatePath } = setup("research", { keying: "leading" });
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const startedIndex = calls.findIndex(
+      (call) =>
+        call.path === stageRoutes.coordination &&
+        (call.body as { records?: { event_name?: string }[] }).records?.[0]?.event_name ===
+          "phase.research.started",
+    );
+    const moveIndex = calls.findIndex((call) => call.path === issueStatePath);
+    expect(moveIndex).toBeGreaterThan(startedIndex);
+    expect(calls[moveIndex]?.body).toEqual({
+      issueId: "linear-issue-5742",
+      stateId: "state-research",
+    });
   });
 
   test("a terminal publish failure retains the lease so the same receipt and event can be retried", async () => {
@@ -660,6 +676,33 @@ describe("stage local-phase wrapper", () => {
     ).toHaveLength(0);
     unlinkSync(lock);
     expect(await main(renew, ctx)).toBe(0);
+  });
+
+  test("stale-lock recovery waits for the exclusive recovery lock", async () => {
+    const { home, ctx, calls } = setup();
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const lock = join(
+      home,
+      ".config",
+      "catalyst-cloud",
+      "local-stages",
+      "CTC-5742.json.lock",
+    );
+    writeFileSync(lock, JSON.stringify({ owner: "dead-owner", pid: 99_999_999 }));
+    writeFileSync(`${lock}.recovery`, "another recoverer");
+    const renew = [
+      "stage",
+      "renew",
+      "CTC-5742",
+      "research",
+      "--assertion",
+      "still working",
+    ];
+    expect(await main(renew, ctx)).toBe(2);
+    expect(calls.filter((call) => call.path === stageRoutes.renew)).toHaveLength(0);
+    unlinkSync(`${lock}.recovery`);
+    expect(await main(renew, ctx)).toBe(0);
+    expect(calls.filter((call) => call.path === stageRoutes.renew)).toHaveLength(1);
   });
 
   test("rejects malformed plan scope before publishing the artifact", async () => {
