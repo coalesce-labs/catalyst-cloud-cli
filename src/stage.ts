@@ -539,12 +539,18 @@ function evidenceFor(
     ["scope", "plan"],
     ["ladder", "validate"],
     ["offPlan", "remediate"],
+    ["remediateCapReached", "remediate"],
     ["conflictRouting", "remediate"],
     ["findingsRouting", "remediate"],
   ] as const) {
     if (evidence[field] !== undefined && phase !== allowed)
       throw new UsageError(`${field} is only valid for ${allowed}`);
   }
+  if (
+    evidence.remediateCapReached !== undefined &&
+    typeof evidence.remediateCapReached !== "boolean"
+  )
+    throw new UsageError("remediateCapReached must be a boolean");
   if (phase === "plan") {
     const scope = object(evidence.scope);
     if (
@@ -962,6 +968,9 @@ async function terminal(
         ...(evidence.scope ? { scope: evidence.scope } : {}),
         ...(evidence.ladder ? { ladder: evidence.ladder } : {}),
         ...(evidence.offPlan ? { offPlan: evidence.offPlan } : {}),
+        ...(typeof evidence.remediateCapReached === "boolean"
+          ? { remediateCapReached: evidence.remediateCapReached }
+          : {}),
         ...(evidence.conflictRouting
           ? { conflictRouting: evidence.conflictRouting }
           : {}),

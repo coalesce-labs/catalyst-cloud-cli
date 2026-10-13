@@ -185,6 +185,47 @@ function setup(
 }
 
 describe("stage local-phase wrapper", () => {
+  test("a capped remediate receipt preserves the cap marker", async () => {
+    const { home, ctx, calls } = setup("remediate");
+    expect(await main(["stage", "start", "CTC-5742", "remediate"], ctx)).toBe(
+      0,
+    );
+    const artifact = join(home, "remediation.json");
+    const evidence = join(home, "evidence.json");
+    const bytes = Buffer.from('{"summary":"repaired"}');
+    writeFileSync(artifact, bytes);
+    writeFileSync(
+      evidence,
+      JSON.stringify({
+        artifactSha256: createHash("sha256").update(bytes).digest("hex"),
+        remediateCapReached: true,
+      }),
+    );
+    expect(
+      await main(
+        [
+          "stage",
+          "done",
+          "CTC-5742",
+          "remediate",
+          "--artifact",
+          artifact,
+          "--evidence",
+          evidence,
+        ],
+        ctx,
+      ),
+    ).toBe(0);
+    const artifactCalls = calls.filter(
+      (call) => call.path === stageRoutes.artifact,
+    );
+    expect(artifactCalls.at(-1)?.body).toEqual({
+      version: 1,
+      artifactRef: "r2/remediation.json",
+      remediateCapReached: true,
+    });
+  });
+
   test("start, renew, and done use the claimed lease; receipt follows the exact artifact", async () => {
     const { home, ctx, calls, issueStatePath } = setup();
     expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
