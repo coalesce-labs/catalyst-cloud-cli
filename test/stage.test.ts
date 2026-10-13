@@ -28,6 +28,7 @@ function setup(
     rejectReceiptOnce?: boolean;
     rejectReceiptOnRetry?: boolean;
     keying?: "leading" | "trailing";
+    onTerminalUpload?: (home: string) => void;
   } = {},
 ) {
   const home = tempHome();
@@ -126,6 +127,7 @@ function setup(
         status: 200,
       });
     if (path === stageRoutes.artifact) {
+      if (url.searchParams.get("name") === "relay-done.json") opts.onTerminalUpload?.(home);
       if (url.searchParams.get("name") === "relay-done.json") receiptUploads++;
       if (
         opts.rejectReceiptOnRetry &&
@@ -355,6 +357,30 @@ describe("stage local-phase wrapper", () => {
     expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(2);
     expect(calls.some((c) => c.path === stageRoutes.release)).toBe(true);
     expect(calls.some((c) => c.path === stageRoutes.artifact)).toBe(false);
+  });
+
+  test("a refused mismatch release retains the granted lease proof", async () => {
+    const { home, ctx } = setup("plan", { releaseRefusal: "busy" });
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(2);
+    const state = JSON.parse(readFileSync(join(home, ".config", "catalyst-cloud", "local-stages", "CTC-5742.json"), "utf8"));
+    expect(state).toMatchObject({ phase: "plan", credential: "lease-secret", nonce: 7 });
+  });
+
+  test("a terminal receipt is fenced on disk before its network write", async () => {
+    let fenced = false;
+    const { home, ctx } = setup("research", {
+      onTerminalUpload: (home) => {
+        const state = JSON.parse(readFileSync(join(home, ".config", "catalyst-cloud", "local-stages", "CTC-5742.json"), "utf8"));
+        fenced = state.terminalAttempt?.committedOrAmbiguous === true;
+      },
+    });
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const artifact = join(home, "research.md"), evidence = join(home, "evidence.json");
+    const bytes = Buffer.from("# Research\nVerified.\n");
+    writeFileSync(artifact, bytes);
+    writeFileSync(evidence, JSON.stringify({ artifactSha256: createHash("sha256").update(bytes).digest("hex") }));
+    expect(await main(["stage", "done", "CTC-5742", "research", "--artifact", artifact, "--evidence", evidence], ctx)).toBe(0);
+    expect(fenced).toBe(true);
   });
 
   test("a wrong artifact digest refuses done before any terminal write, so the claim can be corrected", async () => {
@@ -703,6 +729,17 @@ describe("stage local-phase wrapper", () => {
     unlinkSync(`${lock}.recovery`);
     expect(await main(renew, ctx)).toBe(0);
     expect(calls.filter((call) => call.path === stageRoutes.renew)).toHaveLength(1);
+  });
+
+  test("a dead recovery lock can be reclaimed on a later invocation", async () => {
+    const { home, ctx } = setup();
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const lock = join(home, ".config", "catalyst-cloud", "local-stages", "CTC-5742.json.lock");
+    writeFileSync(lock, JSON.stringify({ owner: "dead-owner", pid: 99_999_999 }));
+    writeFileSync(`${lock}.recovery`, JSON.stringify({ owner: "dead-recoverer", pid: 99_999_999 }));
+    const renew = ["stage", "renew", "CTC-5742", "research", "--assertion", "still working"];
+    expect(await main(renew, ctx)).toBe(2);
+    expect(await main(renew, ctx)).toBe(0);
   });
 
   test("rejects malformed plan scope before publishing the artifact", async () => {

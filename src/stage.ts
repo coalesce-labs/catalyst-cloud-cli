@@ -8,6 +8,7 @@ import {
   readFileSync,
   renameSync,
   closeSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -133,12 +134,44 @@ async function withStageLock<T>(
         let recoveryFd: number;
         try {
           recoveryFd = openSync(recoveryPath, "wx", 0o600);
-          closeSync(recoveryFd);
-        } catch {
+        } catch (recoveryError) {
+          if ((recoveryError as NodeJS.ErrnoException).code === "EEXIST") {
+            try {
+              // A process can die between the exclusive create and writing its owner record.
+              // Leave a fresh partial write alone; an old one is safe to recover on retry.
+              const recoveryStat = statSync(recoveryPath);
+              if (recoveryStat.size === 0 && Date.now() - recoveryStat.mtimeMs > 5_000) {
+                unlinkSync(recoveryPath);
+                throw new CliError("stale recovery lock removed; retry", "stage-locked");
+              }
+              const recoverer = JSON.parse(readFileSync(recoveryPath, "utf8")) as {
+                owner?: string;
+                pid?: number;
+              };
+              if (typeof recoverer.owner === "string" && Number.isSafeInteger(recoverer.pid) && recoverer.pid! > 0) {
+                try {
+                  process.kill(recoverer.pid!, 0);
+                } catch (probe) {
+                  if ((probe as NodeJS.ErrnoException).code === "ESRCH") {
+                    const current = JSON.parse(readFileSync(recoveryPath, "utf8")) as typeof recoverer;
+                    if (current.owner === recoverer.owner && current.pid === recoverer.pid)
+                      unlinkSync(recoveryPath);
+                  }
+                }
+              }
+            } catch {
+              // A partial or replaced recovery lock belongs to another invocation.
+            }
+          }
           throw new CliError(
             `another stage command is recovering the lock for ${ticket}; retry when it finishes`,
             "stage-locked",
           );
+        }
+        try {
+          writeFileSync(recoveryFd, JSON.stringify({ owner, pid: process.pid }));
+        } finally {
+          closeSync(recoveryFd);
         }
         try {
           const current = JSON.parse(readFileSync(path, "utf8")) as {
@@ -619,6 +652,7 @@ async function start(
     routes: paths,
   };
   if (a.ticket !== ticket || a.phase !== phase) {
+    saveState(ctx.home, state);
     await release(ctx, cfg, state);
     throw new CliError(
       `cloud granted ${a.ticket}/${a.phase}; requested ${ticket}/${phase}; released unrun grant`,
@@ -852,6 +886,8 @@ async function terminal(
     state.terminalAttempt = { kind, sha256: attemptSha256 };
     saveState(ctx.home, state);
   }
+  const priorAmbiguousAttempt = state.terminalAttempt.committedOrAmbiguous === true;
+  let authoritativeWriteInFlight = false;
   let artifactKey: string | undefined;
   let failure: unknown;
   let terminalCommitted = false;
@@ -878,6 +914,9 @@ async function terminal(
           ? { findingsRouting: evidence.findingsRouting }
           : {}),
       };
+      state.terminalAttempt!.committedOrAmbiguous = true;
+      saveState(ctx.home, state);
+      authoritativeWriteInFlight = true;
       await publishArtifact(
         ctx,
         cfg,
@@ -890,6 +929,9 @@ async function terminal(
       state.terminalAttempt!.committedOrAmbiguous = true;
       saveState(ctx.home, state);
     } else {
+      state.terminalAttempt!.committedOrAmbiguous = true;
+      saveState(ctx.home, state);
+      authoritativeWriteInFlight = true;
       artifactKey = await publishArtifact(
         ctx,
         cfg,
@@ -915,7 +957,8 @@ async function terminal(
     // A lost response or any rejection after the terminal authority is committed keeps the digest.
     if (
       !terminalCommitted &&
-      !state.terminalAttempt?.committedOrAmbiguous &&
+      !priorAmbiguousAttempt &&
+      (!state.terminalAttempt?.committedOrAmbiguous || authoritativeWriteInFlight) &&
       err instanceof CliError &&
       err.code === "stage-http" &&
       [400, 413, 422].includes(err.status ?? 0)
