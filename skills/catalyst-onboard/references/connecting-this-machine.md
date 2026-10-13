@@ -31,5 +31,6 @@ An unmatched Linear identity is the person's to match: `catalyst identity linear
 - **A 403 on the contract naming an older cloud.** The cloud lacks personal-key access: update the cloud, or use the account key until then.
 - **A line naming two contract versions.** `npm install -g @catalyst-cloud/cli@latest && catalyst login` before using the other skills.
 - **A refusal naming `jwt-no-membership`.** The cloud learns of a person at their first sign-in to the app. Hand over the app's sign-in link once, then offer to run `catalyst login` again. If it repeats, their seat is inactive and an owner or admin activates it.
+- **A refusal naming `jwt-org-unmapped`, or "no Catalyst workspace yet".** The sign-in reached Catalyst with no workspace behind it: Catalyst is joined by invitation, not sign-up. The invitation email (or the workspace admin who sends one) is the missing step; once it is accepted, run the install command or `catalyst login` again.
 
 Retry a failed login once, by hand, after the fix. A key goes into the login command or `CATALYST_CLOUD_TOKEN` and nowhere else: never a ticket, a transcript, or a file you write. After a bundle update, the next command prints a one-line notice; read it to the person if they are watching.
