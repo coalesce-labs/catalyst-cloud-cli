@@ -186,7 +186,7 @@ function trimContract(doc, teamKey) {
 }
 
 /**
- * Every ticket in scope, so the board counts are whole (CTC-5622). The cloud caps one page at 500
+ * Every ticket in scope, so the board counts are whole. The cloud caps one page at 500
  * rows, so a single `--limit` read is a window over the most recently updated tickets, and the
  * stages it happens to cover are not the board. `--all` follows the cloud's page cursor to the end.
  * If that read is refused (a scope past the CLI's page ceiling, say), one full page is read instead
