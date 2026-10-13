@@ -113,7 +113,8 @@ async function publishEvent(ctx: Ctx, cfg: CustomerConfig, state: LeaseState, ki
   const result = (await request(ctx, cfg, state.routes.coordination, {
     credential: state.credential, body: { records: [record(state, kind, summary, artifactKey)] },
   })).body as { accepted?: number };
-  if (result?.accepted !== 1) throw new CliError(`cloud did not accept ${kind} event`, "stage-publish");
+  // A retry after a lost response can reach the same deterministic event ID again.
+  if (result?.accepted !== 1 && result?.accepted !== 0) throw new CliError(`cloud did not accept ${kind} event`, "stage-publish");
 }
 async function moveCardToStage(ctx: Ctx, cfg: CustomerConfig, doc: TenantContract, state: LeaseState): Promise<void> {
   const api = apiClient(cfg, ctx);
@@ -272,7 +273,6 @@ async function terminal(ctx: Ctx, cfg: CustomerConfig, state: LeaseState, kind: 
   }
   let artifactKey: string | undefined;
   let failure: unknown;
-  let receiptPublished = false;
   try {
     if (kind === "complete") {
       const evidence = completeEvidence!;
@@ -283,7 +283,6 @@ async function terminal(ctx: Ctx, cfg: CustomerConfig, state: LeaseState, kind: 
         ...(evidence.conflictRouting ? { conflictRouting: evidence.conflictRouting } : {}),
         ...(evidence.findingsRouting ? { findingsRouting: evidence.findingsRouting } : {}) };
       await publishArtifact(ctx, cfg, state, "relay-done.json", JSON.stringify(receipt), "application/json");
-      receiptPublished = true;
     } else {
       const artifactPath = flagString(args, "artifact");
       const diagnostic = state.phase === "intake" || state.phase === "remediate"
@@ -297,13 +296,11 @@ async function terminal(ctx: Ctx, cfg: CustomerConfig, state: LeaseState, kind: 
     try { unlinkSync(statePath(ctx.home, state.ticket)); } catch { /* stale state only */ }
     throw failure;
   }
-  if (failure && !receiptPublished) {
-    try { await publishEvent(ctx, cfg, state, "failed", `publish_refused: ${String(failure)}`, artifactKey); }
-    catch { /* release remains mandatory; the original failure is reported below */ }
-  }
+  // A transport error after the receipt write is ambiguous: the cloud may already have advanced
+  // the phase. Retain the lease so the operator can retry the same deterministic writes safely.
+  if (failure) throw new CliError(`stage ${kind} did not finish: ${String(failure)}; lease retained, retry ${kind === "complete" ? "done" : "fail"} or renew before expiry`, "stage-publish");
   try { await release(ctx, cfg, state); }
-  catch (releaseError) { throw new CliError(`stage ${kind} failed and lease release failed: ${String(releaseError)}`, "stage-release"); }
-  if (failure) throw failure;
+  catch (releaseError) { throw new CliError(`stage ${kind} landed but lease release failed: ${String(releaseError)}; retry ${kind === "complete" ? "done" : "fail"}`, "stage-release"); }
   ctx.stdout(`${state.ticket}/${state.phase}: ${kind === "complete" ? "done" : "failed"}`);
 }
 export async function cmdStage(args: ParsedArgs, ctx: Ctx): Promise<number> {

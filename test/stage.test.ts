@@ -12,12 +12,13 @@ const stageRoutes = {
   release: "/different/agent/local-phase/release", artifact: "/api/v1/artifacts/publish",
   object: "/api/v1/artifacts/object", coordination: "/api/v1/coordination/publish",
 };
-function setup(grantedPhase = "research", opts: { refuseArtifact?: string; priorArtifacts?: string[]; rejectMove?: boolean } = {}) {
+function setup(grantedPhase = "research", opts: { refuseArtifact?: string; priorArtifacts?: string[]; rejectMove?: boolean; failTerminalEventOnce?: boolean } = {}) {
   const home = tempHome();
   mkdirSync(join(home, ".config", "catalyst-cloud"), { recursive: true });
   writeFileSync(configPathFor(home), JSON.stringify({ baseUrl: "https://cloud.example.test", key: "personal-key",
     account: "account-1", slug: "test", name: "Test", principal: "service", joinedAt: "2026-10-12T00:00:00Z" }));
   const calls: { path: string; body: unknown; headers: Headers }[] = [];
+  let terminalEventFailed = false;
   const doc = buildFixtureContract();
   doc.teams[0]!.key = "CTC";
   doc.routes = [...doc.routes, ...(["claim", "renew", "release"] as const).map((key) => ({ method: "POST" as const, path: stageRoutes[key], takesWriteBudgetUnit: false, since: "2.4.0" }))];
@@ -43,7 +44,14 @@ function setup(grantedPhase = "research", opts: { refuseArtifact?: string; prior
       if (url.searchParams.get("name") === opts.refuseArtifact) return json({ reason: "invalid-lease-credential" }, 403);
       return json({ key: `r2/${url.searchParams.get("name")}`, bytes: init?.body ? Buffer.byteLength(init.body as string) : 0 });
     }
-    if (path === stageRoutes.coordination) return json({ accepted: 1, seqStart: 1, seqEnd: 1, headSeq: 1 });
+    if (path === stageRoutes.coordination) {
+      const name = (body as { records?: { event_name?: string }[] })?.records?.[0]?.event_name;
+      if (opts.failTerminalEventOnce && name?.endsWith(".complete") && !terminalEventFailed) {
+        terminalEventFailed = true;
+        return json({ error: "temporary" }, 503);
+      }
+      return json({ accepted: 1, seqStart: 1, seqEnd: 1, headSeq: 1 });
+    }
     return json({ error: "not found" }, 404);
   };
   const ctx = makeCtx(home, { fetch: fetcher as typeof fetch });
@@ -127,5 +135,21 @@ describe("stage local-phase wrapper", () => {
     expect(calls.filter((c) => c.path === stageRoutes.release)).toHaveLength(1);
     expect(calls.filter((c) => c.path === stageRoutes.coordination).map((c) => (c.body as { records: { event_name: string }[] }).records[0]?.event_name))
       .toEqual(["phase.research.started", "phase.research.failed"]);
+  });
+
+  test("a terminal publish failure retains the lease so the same receipt and event can be retried", async () => {
+    const { home, ctx, calls } = setup("research", { failTerminalEventOnce: true });
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const artifact = join(home, "research.md"), evidence = join(home, "evidence.json");
+    const bytes = Buffer.from("# Research\nVerified.\n");
+    writeFileSync(artifact, bytes);
+    writeFileSync(evidence, JSON.stringify({ artifactSha256: createHash("sha256").update(bytes).digest("hex") }));
+    const args = ["stage", "done", "CTC-5742", "research", "--artifact", artifact, "--evidence", evidence];
+    expect(await main(args, ctx)).toBe(2);
+    expect(calls.filter((c) => c.path === stageRoutes.release)).toHaveLength(0);
+    expect(await main(args, ctx)).toBe(0);
+    expect(calls.filter((c) => c.path === stageRoutes.release)).toHaveLength(1);
+    expect(calls.filter((c) => c.path === stageRoutes.coordination &&
+      (c.body as { records?: { event_name?: string }[] })?.records?.[0]?.event_name === "phase.research.complete")).toHaveLength(2);
   });
 });
