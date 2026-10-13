@@ -57,6 +57,12 @@ if (help) {
   process.exit(0);
 }
 
+const perColumn = flags.limit === undefined ? BOARD_CARDS_PER_COLUMN : Number(flags.limit);
+if (!Number.isInteger(perColumn) || perColumn < 1) {
+  process.stderr.write(`--limit must be a positive whole number, got ${flags.limit}\n`);
+  process.exit(1);
+}
+
 const errors = {};
 const section = (name, args) => {
   const r = runCli(args);
@@ -116,11 +122,6 @@ const out = {
 if (flags.accounts) out.accounts = section("accounts", ["accounts", "--json"]);
 
 if (flags.board) {
-  const perColumn = flags.limit === undefined ? BOARD_CARDS_PER_COLUMN : Number(flags.limit);
-  if (!Number.isInteger(perColumn) || perColumn < 1) {
-    process.stderr.write(`--limit must be a positive whole number, got ${flags.limit}\n`);
-    process.exit(1);
-  }
   const read = readBoard(flags.team);
   if (read.error) errors.board = read.error;
   else {
