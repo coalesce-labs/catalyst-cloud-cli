@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { main } from "../src/cli";
@@ -23,6 +23,7 @@ function setup(
     priorBytes?: string;
     rejectMove?: boolean;
     failTerminalEventOnce?: boolean;
+    rejectTerminalArtifactOnce?: boolean;
   } = {},
 ) {
   const home = tempHome();
@@ -41,6 +42,7 @@ function setup(
   );
   const calls: { path: string; body: unknown; headers: Headers }[] = [];
   let terminalEventFailed = false;
+  let terminalArtifactRejected = false;
   const doc = buildFixtureContract();
   doc.teams[0]!.key = "CTC";
   doc.routes = [
@@ -112,6 +114,14 @@ function setup(
         status: 200,
       });
     if (path === stageRoutes.artifact) {
+      if (
+        opts.rejectTerminalArtifactOnce &&
+        url.searchParams.get("name") === "research.md" &&
+        !terminalArtifactRejected
+      ) {
+        terminalArtifactRejected = true;
+        return json({ reason: "too-large" }, 413);
+      }
       if (url.searchParams.get("name") === opts.refuseArtifact)
         return json({ reason: "invalid-lease-credential" }, 403);
       return json({
@@ -489,5 +499,67 @@ describe("stage local-phase wrapper", () => {
             ?.event_name === "phase.research.complete",
       ),
     ).toHaveLength(2);
+  });
+
+  test("a definite first-upload 413 permits a corrected terminal payload", async () => {
+    const { home, ctx, calls } = setup("research", {
+      rejectTerminalArtifactOnce: true,
+    });
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const artifact = join(home, "research.md"),
+      evidence = join(home, "evidence.json");
+    const writeEvidence = (bytes: Buffer) => {
+      writeFileSync(artifact, bytes);
+      writeFileSync(
+        evidence,
+        JSON.stringify({
+          artifactSha256: createHash("sha256").update(bytes).digest("hex"),
+        }),
+      );
+    };
+    writeEvidence(Buffer.from("# Research\nToo large in production.\n"));
+    const args = [
+      "stage",
+      "done",
+      "CTC-5742",
+      "research",
+      "--artifact",
+      artifact,
+      "--evidence",
+      evidence,
+    ];
+    expect(await main(args, ctx)).toBe(2);
+    writeEvidence(Buffer.from("# Research\nCorrected.\n"));
+    expect(await main(args, ctx)).toBe(0);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.release),
+    ).toHaveLength(1);
+  });
+
+  test("a second invocation cannot overwrite lease state during an active command", async () => {
+    const { home, ctx, calls } = setup();
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const lock = join(
+      home,
+      ".config",
+      "catalyst-cloud",
+      "local-stages",
+      "CTC-5742.json.lock",
+    );
+    writeFileSync(lock, JSON.stringify({ owner: "other", pid: process.pid }));
+    const renew = [
+      "stage",
+      "renew",
+      "CTC-5742",
+      "research",
+      "--assertion",
+      "still working",
+    ];
+    expect(await main(renew, ctx)).toBe(2);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.renew),
+    ).toHaveLength(0);
+    unlinkSync(lock);
+    expect(await main(renew, ctx)).toBe(0);
   });
 });

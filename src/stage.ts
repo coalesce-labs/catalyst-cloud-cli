@@ -72,6 +72,61 @@ const slotForPhase: Record<string, string> = {
 function statePath(home: string, ticket: string): string {
   return join(configDirFor(home), "local-stages", `${ticket}.json`);
 }
+async function withStageLock<T>(
+  home: string,
+  ticket: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const path = `${statePath(home, ticket)}.lock`;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const owner = randomUUID();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = openSync(path, "wx", 0o600);
+      try {
+        writeFileSync(fd, JSON.stringify({ owner, pid: process.pid }));
+      } finally {
+        closeSync(fd);
+      }
+      try {
+        return await action();
+      } finally {
+        try {
+          if (JSON.parse(readFileSync(path, "utf8")).owner === owner)
+            unlinkSync(path);
+        } catch {
+          // A missing or replaced lock cannot be safely removed by this invocation.
+        }
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      let stale = false;
+      try {
+        const holder = JSON.parse(readFileSync(path, "utf8")) as {
+          pid?: number;
+        };
+        if (Number.isSafeInteger(holder.pid) && holder.pid! > 0) {
+          try {
+            process.kill(holder.pid!, 0);
+          } catch (probe) {
+            stale = (probe as NodeJS.ErrnoException).code === "ESRCH";
+          }
+        }
+      } catch {
+        // A partial lock write is treated as live; a later invocation can retry.
+      }
+      if (stale && attempt === 0) {
+        unlinkSync(path);
+        continue;
+      }
+      throw new CliError(
+        `another stage command is active for ${ticket}; retry when it finishes`,
+        "stage-locked",
+      );
+    }
+  }
+  throw new CliError(`cannot lock ${ticket}`, "stage-locked");
+}
 function saveState(home: string, state: LeaseState): void {
   const path = statePath(home, state.ticket);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -730,6 +785,7 @@ async function terminal(
   }
   let artifactKey: string | undefined;
   let failure: unknown;
+  let artifactPublished = false;
   try {
     if (kind === "complete") {
       const evidence = completeEvidence!;
@@ -740,6 +796,7 @@ async function terminal(
         artifactNames[state.phase]!,
         terminalBytes,
       );
+      artifactPublished = true;
       const receipt = {
         version: 1,
         artifactRef: artifactKey,
@@ -769,6 +826,7 @@ async function terminal(
         artifactNames[state.phase]!,
         terminalBytes,
       );
+      artifactPublished = true;
     }
     await publishEvent(
       ctx,
@@ -779,6 +837,17 @@ async function terminal(
       artifactKey,
     );
   } catch (err) {
+    // A 413 from the first artifact upload is a definite rejection before publication. Permit a
+    // smaller corrected payload or a failure marker; later/ambiguous writes keep their digest.
+    if (
+      !artifactPublished &&
+      err instanceof CliError &&
+      err.code === "stage-http" &&
+      err.status === 413
+    ) {
+      delete state.terminalAttempt;
+      saveState(ctx.home, state);
+    }
     failure = err;
   }
   if (failure instanceof CliError && failure.code === "stage-dispossessed") {
@@ -826,22 +895,24 @@ export async function cmdStage(args: ParsedArgs, ctx: Ctx): Promise<number> {
       "stage needs a personal API key login; browser sessions cannot publish with a local-phase lease",
       "stage-credential",
     );
-  if (verb === "start") await start(ctx, cfg, ticket, phase);
-  else {
-    const state = readState(ctx, cfg, ticket, phase);
-    if (verb === "renew") {
-      const assertion = flagString(args, "assertion")?.trim();
-      if (!assertion)
-        throw new UsageError("stage renew needs --assertion <work done>");
-      await renew(ctx, cfg, state, assertion);
-    } else
-      await terminal(
-        ctx,
-        cfg,
-        state,
-        verb === "done" ? "complete" : "failed",
-        args,
-      );
-  }
+  await withStageLock(ctx.home, ticket, async () => {
+    if (verb === "start") await start(ctx, cfg, ticket, phase);
+    else {
+      const state = readState(ctx, cfg, ticket, phase);
+      if (verb === "renew") {
+        const assertion = flagString(args, "assertion")?.trim();
+        if (!assertion)
+          throw new UsageError("stage renew needs --assertion <work done>");
+        await renew(ctx, cfg, state, assertion);
+      } else
+        await terminal(
+          ctx,
+          cfg,
+          state,
+          verb === "done" ? "complete" : "failed",
+          args,
+        );
+    }
+  });
   return 0;
 }
