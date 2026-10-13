@@ -15,6 +15,12 @@ import { bearerFor } from "./oauth.js";
 
 export const REQUEST_TIMEOUT_MS = 15_000;
 
+// CTC-5399 — a WorkOS sign-in with no organization behind it is refused with this reason on every
+// route. The person needs the invitation next step, never the raw reason.
+const NO_WORKSPACE_REASON = "jwt-org-unmapped";
+const NO_WORKSPACE_NEXT_STEP =
+  "This sign-in has no Catalyst workspace yet. Ask your admin for an invitation, or accept the one in your email, then run the install command again.";
+
 export interface JsonResponse<T = unknown> {
   status: number;
   body: T;
@@ -191,7 +197,11 @@ export class ApiClient {
     }
     if (res.status === 403) {
       throw new CliError(
-        `${what} failed (403): this key may not reach that route${reason ? ` (${reason})` : ""} — a route that acts as a host (claiming work, publishing artifacts) needs the tenant's account key; every read and write a person makes takes your personal key`,
+        // CTC-5399: a no-workspace sign-in is not a route-permission problem; it maps to the
+        // invitation next step. Every other reason keeps the route line naming its own reason.
+        reason === NO_WORKSPACE_REASON
+          ? `${what} failed (403): ${NO_WORKSPACE_NEXT_STEP}`
+          : `${what} failed (403): this key may not reach that route${reason ? ` (${reason})` : ""} — a route that acts as a host (claiming work, publishing artifacts) needs the tenant's account key; every read and write a person makes takes your personal key`,
         "forbidden",
         2,
         403,
@@ -245,7 +255,9 @@ export async function fetchMe(
     const detail =
       res.status === 401
         ? "credential not accepted. Run catalyst login to sign in again; an unattended machine needs a new personal key from Settings → API keys"
-        : reason || `HTTP ${res.status}`;
+        : reason === NO_WORKSPACE_REASON
+          ? NO_WORKSPACE_NEXT_STEP
+          : reason || `HTTP ${res.status}`;
     throw new MeError(`GET /me failed (${res.status}): ${detail}`, "http", res.status);
   }
   let body: Partial<{
