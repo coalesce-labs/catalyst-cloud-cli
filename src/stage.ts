@@ -1,0 +1,1180 @@
+// A bare local seat holds one cloud phase across CLI invocations. The cloud owns the phase graph;
+// this client only publishes through a live, fenced local-phase claim.
+import { createHash, randomUUID } from "node:crypto";
+import { hostname } from "node:os";
+import {
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  closeSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { flagString, positionals, type ParsedArgs } from "./args.js";
+import {
+  configDirFor,
+  requireConfig,
+  type Ctx,
+  type CustomerConfig,
+} from "./config.js";
+import { loadContract } from "./contract.js";
+import { stageIdForSlot, teamForTicket } from "./contract.js";
+import type { TenantContract } from "./contract-types.js";
+import { CliError, UsageError } from "./errors.js";
+import { bearerFor } from "./oauth.js";
+import { apiClient } from "./transport.js";
+import { postAgent, resolveIssue } from "./write.js";
+
+type Route =
+  "claim" | "renew" | "release" | "artifact" | "object" | "coordination";
+interface LeaseState {
+  version: 1;
+  account: string;
+  baseUrl: string;
+  ticket: string;
+  phase: string;
+  nonce: number;
+  credential: string;
+  runtime: { incarnation: string; nonce: number; expiresAtMs: number };
+  machine: string;
+  node: string;
+  expiresAtMs: number;
+  priorDir?: string;
+  terminalAttempt?: {
+    kind: "complete" | "failed";
+    sha256: string;
+    /** An accepted write or ambiguous response permanently freezes this payload across retries. */
+    committedOrAmbiguous?: boolean;
+    /** The terminal event was acknowledged; retries need only reconcile lease release. */
+    publicationAcknowledged?: boolean;
+  };
+  routes: Record<Route, string>;
+}
+
+const names: Record<Route, string> = {
+  claim: "/local-phase/claim",
+  renew: "/local-phase/renew",
+  release: "/local-phase/release",
+  artifact: "/api/v1/artifacts/publish",
+  object: "/api/v1/artifacts/object",
+  coordination: "/api/v1/coordination/publish",
+};
+const artifactNames: Record<string, string> = {
+  intake: "intake.json",
+  research: "research.md",
+  plan: "plan.md",
+  implement: "implement.md",
+  validate: "validation.md",
+  pr: "pr.md",
+  merge: "merge.md",
+  remediate: "remediation.json",
+};
+const slotForPhase: Record<string, string> = {
+  validate: "verify",
+  merge: "pr",
+};
+
+function statePath(home: string, ticket: string): string {
+  return join(configDirFor(home), "local-stages", `${ticket}.json`);
+}
+async function withStageLock<T>(
+  home: string,
+  ticket: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const path = `${statePath(home, ticket)}.lock`;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const owner = randomUUID();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = openSync(path, "wx", 0o600);
+      try {
+        writeFileSync(fd, JSON.stringify({ owner, pid: process.pid }));
+      } finally {
+        closeSync(fd);
+      }
+      try {
+        return await action();
+      } finally {
+        try {
+          if (JSON.parse(readFileSync(path, "utf8")).owner === owner)
+            unlinkSync(path);
+        } catch {
+          // A missing or replaced lock cannot be safely removed by this invocation.
+        }
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      let staleOwner: string | undefined;
+      let stalePid: number | undefined;
+      let stalePartial:
+        { dev: number; ino: number; mtimeMs: number } | undefined;
+      try {
+        const holder = JSON.parse(readFileSync(path, "utf8")) as {
+          owner?: string;
+          pid?: number;
+        };
+        if (
+          typeof holder.owner === "string" &&
+          Number.isSafeInteger(holder.pid) &&
+          holder.pid! > 0
+        ) {
+          try {
+            process.kill(holder.pid!, 0);
+          } catch (probe) {
+            if ((probe as NodeJS.ErrnoException).code === "ESRCH") {
+              staleOwner = holder.owner;
+              stalePid = holder.pid;
+            }
+          }
+        }
+      } catch {
+        // An interrupted write has no PID to probe. A fresh partial write may still have an
+        // active owner, while an older inode can be recovered under the same exclusive guard.
+        try {
+          const stat = statSync(path);
+          if (Date.now() - stat.mtimeMs > 5_000)
+            stalePartial = {
+              dev: stat.dev,
+              ino: stat.ino,
+              mtimeMs: stat.mtimeMs,
+            };
+        } catch {
+          // The lock disappeared while we inspected it.
+        }
+      }
+      if (
+        (staleOwner !== undefined || stalePartial !== undefined) &&
+        attempt === 0
+      ) {
+        // Only one stale-lock recoverer may inspect and remove the old inode at a time. Without
+        // this second exclusive lock, two readers can both see a dead PID and the second can
+        // unlink the first reader's newly acquired live lock.
+        const recoveryPath = `${path}.recovery`;
+        let recoveryFd: number;
+        try {
+          recoveryFd = openSync(recoveryPath, "wx", 0o600);
+        } catch (recoveryError) {
+          if ((recoveryError as NodeJS.ErrnoException).code === "EEXIST") {
+            try {
+              // A process can die between the exclusive create and writing its owner record.
+              // Leave a fresh partial write alone; an old one is safe to recover on retry.
+              const recoveryStat = statSync(recoveryPath);
+              let recoverer: { owner: string; pid: number } | undefined;
+              try {
+                const parsed: unknown = JSON.parse(
+                  readFileSync(recoveryPath, "utf8"),
+                );
+                if (
+                  parsed !== null &&
+                  typeof parsed === "object" &&
+                  !Array.isArray(parsed) &&
+                  typeof (parsed as { owner?: unknown }).owner === "string" &&
+                  Number.isSafeInteger((parsed as { pid?: unknown }).pid) &&
+                  (parsed as { pid: number }).pid > 0
+                )
+                  recoverer = parsed as { owner: string; pid: number };
+              } catch {
+                // A killed writer can leave nonempty, incomplete JSON.
+              }
+              if (
+                recoverer === undefined &&
+                Date.now() - recoveryStat.mtimeMs > 5_000
+              ) {
+                const current = statSync(recoveryPath);
+                if (
+                  current.dev === recoveryStat.dev &&
+                  current.ino === recoveryStat.ino &&
+                  current.mtimeMs === recoveryStat.mtimeMs
+                )
+                  unlinkSync(recoveryPath);
+              }
+              if (recoverer !== undefined) {
+                try {
+                  process.kill(recoverer.pid, 0);
+                } catch (probe) {
+                  if ((probe as NodeJS.ErrnoException).code === "ESRCH") {
+                    const current = JSON.parse(
+                      readFileSync(recoveryPath, "utf8"),
+                    ) as typeof recoverer;
+                    if (
+                      current.owner === recoverer.owner &&
+                      current.pid === recoverer.pid
+                    )
+                      unlinkSync(recoveryPath);
+                  }
+                }
+              }
+            } catch {
+              // A partial or replaced recovery lock belongs to another invocation.
+            }
+          }
+          throw new CliError(
+            `another stage command is recovering the lock for ${ticket}; retry when it finishes`,
+            "stage-locked",
+          );
+        }
+        try {
+          writeFileSync(
+            recoveryFd,
+            JSON.stringify({ owner, pid: process.pid }),
+          );
+        } finally {
+          closeSync(recoveryFd);
+        }
+        try {
+          if (stalePartial !== undefined) {
+            const stat = statSync(path);
+            if (
+              stat.dev === stalePartial.dev &&
+              stat.ino === stalePartial.ino &&
+              stat.mtimeMs === stalePartial.mtimeMs &&
+              Date.now() - stat.mtimeMs > 5_000
+            )
+              unlinkSync(path);
+          } else {
+            const current = JSON.parse(readFileSync(path, "utf8")) as {
+              owner?: string;
+              pid?: number;
+            };
+            if (current.owner === staleOwner && current.pid === stalePid) {
+              try {
+                process.kill(stalePid!, 0);
+              } catch (probe) {
+                if ((probe as NodeJS.ErrnoException).code === "ESRCH")
+                  unlinkSync(path);
+              }
+            }
+          }
+        } finally {
+          unlinkSync(recoveryPath);
+        }
+        continue;
+      }
+      throw new CliError(
+        `another stage command is active for ${ticket}; retry when it finishes`,
+        "stage-locked",
+      );
+    }
+  }
+  throw new CliError(`cannot lock ${ticket}`, "stage-locked");
+}
+function saveState(home: string, state: LeaseState): void {
+  const path = statePath(home, state.ticket);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temp = `${path}.${randomUUID()}.tmp`;
+  const fd = openSync(temp, "wx", 0o600);
+  try {
+    writeFileSync(fd, JSON.stringify(state) + "\n");
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temp, path);
+}
+function readState(
+  ctx: Ctx,
+  cfg: CustomerConfig,
+  ticket: string,
+  phase: string,
+): LeaseState {
+  let state: LeaseState;
+  try {
+    state = JSON.parse(
+      readFileSync(statePath(ctx.home, ticket), "utf8"),
+    ) as LeaseState;
+  } catch {
+    throw new CliError(
+      `no local stage claim for ${ticket}; run catalyst stage start ${ticket} ${phase}`,
+      "stage-state",
+    );
+  }
+  if (
+    state.version !== 1 ||
+    state.ticket !== ticket ||
+    state.phase !== phase ||
+    state.account !== cfg.account ||
+    state.baseUrl !== cfg.baseUrl
+  )
+    throw new CliError(
+      "local stage claim does not match this ticket, phase, or workspace login",
+      "stage-state",
+    );
+  return state;
+}
+function routes(doc: {
+  routes: readonly { method: string; path: string }[];
+}): Record<Route, string> {
+  const discovered = { ...names };
+  for (const key of ["claim", "renew", "release"] as const) {
+    const suffix = names[key];
+    const path = doc.routes.find(
+      (r) => r.method === "POST" && r.path.endsWith(suffix),
+    )?.path;
+    if (!path)
+      throw new CliError(
+        `tenant contract has no POST ${suffix} route; update the cloud`,
+        "stage-route",
+      );
+    discovered[key] = path;
+  }
+  return discovered;
+}
+async function request(
+  ctx: Ctx,
+  cfg: CustomerConfig,
+  path: string,
+  options: {
+    method?: "GET" | "POST";
+    query?: Record<string, string | number>;
+    body?: unknown;
+    bytes?: Buffer | string;
+    credential?: string;
+    contentType?: string;
+  },
+): Promise<{ body: unknown; bytes: Buffer; status: number }> {
+  const url = new URL(path, cfg.baseUrl);
+  url.searchParams.set("account", cfg.account);
+  for (const [key, value] of Object.entries(options.query ?? {}))
+    url.searchParams.set(key, String(value));
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${await bearerFor(ctx, cfg)}`,
+  };
+  if (options.credential)
+    headers["x-catalyst-lease-credential"] = options.credential;
+  if (options.body !== undefined) headers["content-type"] = "application/json";
+  if (options.bytes !== undefined)
+    headers["content-type"] = options.contentType ?? "application/octet-stream";
+  const res = await ctx.fetch(url, {
+    method: options.method ?? "POST",
+    headers,
+    body:
+      options.bytes ??
+      (options.body === undefined ? undefined : JSON.stringify(options.body)),
+    signal: AbortSignal.timeout(options.bytes === undefined ? 30_000 : 120_000),
+  });
+  const bytes = Buffer.from(await res.arrayBuffer());
+  let body: unknown;
+  try {
+    body = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    body = undefined;
+  }
+  if (!res.ok) {
+    const reason =
+      body && typeof body === "object"
+        ? JSON.stringify(body)
+        : bytes.toString("utf8").slice(0, 200);
+    if (
+      res.status === 403 &&
+      body &&
+      typeof body === "object" &&
+      (body as { reason?: unknown }).reason === "invalid-lease-credential"
+    )
+      throw new CliError(
+        `${options.method ?? "POST"} ${path} refused a stale or superseded lease; publish nothing`,
+        "stage-dispossessed",
+        2,
+        403,
+      );
+    throw new CliError(
+      `${options.method ?? "POST"} ${path} failed (${res.status}): ${reason}`,
+      "stage-http",
+      2,
+      res.status,
+    );
+  }
+  return { body, bytes, status: res.status };
+}
+function record(
+  state: LeaseState,
+  kind: "started" | "complete" | "failed",
+  summary?: string,
+  artifactKey?: string,
+): object {
+  return {
+    host: state.node,
+    event_id: `stage-${state.ticket}-${state.phase}-${state.nonce}-${kind}`,
+    event_name: `phase.${state.phase}.${kind}`,
+    ts: new Date().toISOString(),
+    attributes: {
+      ticket: state.ticket,
+      phase: state.phase,
+      nonce: state.nonce,
+      node: state.node,
+      ...(summary ? { summary } : {}),
+      ...(kind === "failed"
+        ? {
+            failureMode: "phase_failed",
+            ...(summary ? { failureDetail: summary } : {}),
+            ...(artifactKey ? { artifactRef: artifactKey } : {}),
+          }
+        : artifactKey
+          ? { artifactKey }
+          : {}),
+    },
+  };
+}
+async function publishEvent(
+  ctx: Ctx,
+  cfg: CustomerConfig,
+  state: LeaseState,
+  kind: "started" | "complete" | "failed",
+  summary?: string,
+  artifactKey?: string,
+): Promise<void> {
+  const result = (
+    await request(ctx, cfg, state.routes.coordination, {
+      credential: state.credential,
+      body: { records: [record(state, kind, summary, artifactKey)] },
+    })
+  ).body as { accepted?: number };
+  // A retry after a lost response can reach the same deterministic event ID again.
+  if (result?.accepted !== 1 && result?.accepted !== 0)
+    throw new CliError(`cloud did not accept ${kind} event`, "stage-publish");
+}
+async function moveCardToStage(
+  ctx: Ctx,
+  cfg: CustomerConfig,
+  doc: TenantContract,
+  state: LeaseState,
+): Promise<void> {
+  const api = apiClient(cfg, ctx);
+  const issue = await resolveIssue(api, state.ticket);
+  const stageId = stageIdForSlot(
+    teamForTicket(doc, issue.identifier),
+    slotForPhase[state.phase] ?? state.phase,
+  );
+  const result = await postAgent<{ outcome?: string; reason?: string }>(
+    api,
+    doc,
+    "issue-state",
+    {
+      issueId: issue.id,
+      stateId: stageId,
+    },
+  );
+  if (result?.outcome !== "succeeded")
+    throw new CliError(
+      `card move to ${state.phase} was not confirmed: ${result?.reason ?? result?.outcome ?? "missing outcome"}`,
+      "stage-card-move",
+    );
+}
+async function publishArtifact(
+  ctx: Ctx,
+  cfg: CustomerConfig,
+  state: LeaseState,
+  name: string,
+  bytes: Buffer | string,
+  contentType?: string,
+): Promise<string> {
+  const result = (
+    await request(ctx, cfg, state.routes.artifact, {
+      credential: state.credential,
+      query: { ticket: state.ticket, phase: state.phase, name },
+      bytes,
+      contentType,
+    })
+  ).body as { key?: string; bytes?: number };
+  if (!result?.key || !Number.isSafeInteger(result.bytes))
+    throw new CliError(
+      `artifact ${name} publish returned no key or byte count`,
+      "stage-publish",
+    );
+  if (result.bytes !== Buffer.byteLength(bytes))
+    throw new CliError(
+      `artifact ${name} publish acknowledged ${result.bytes} bytes; sent ${Buffer.byteLength(bytes)}`,
+      "stage-publish",
+    );
+  return result.key;
+}
+async function release(
+  ctx: Ctx,
+  cfg: CustomerConfig,
+  state: LeaseState,
+  outcome?: "setup_failed",
+  reason?: string,
+): Promise<void> {
+  const result = (
+    await request(ctx, cfg, state.routes.release, {
+      credential: state.credential,
+      body: {
+        ticket: state.ticket,
+        phase: state.phase,
+        nonce: state.nonce,
+        runtime: state.runtime,
+        machine: state.machine,
+        ...(outcome ? { outcome } : {}),
+        ...(reason ? { reason } : {}),
+      },
+    })
+  ).body as { released?: boolean; refusal?: string };
+  if (result?.released !== true)
+    throw new CliError(
+      `stage release was not confirmed: ${result?.refusal ?? "unknown"}; lease proof retained`,
+      "stage-release",
+    );
+  try {
+    unlinkSync(statePath(ctx.home, state.ticket));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+}
+async function finishTerminalRelease(
+  ctx: Ctx,
+  cfg: CustomerConfig,
+  state: LeaseState,
+  kind: "complete" | "failed",
+): Promise<void> {
+  try {
+    await release(ctx, cfg, state);
+  } catch (releaseError) {
+    if (!(
+      releaseError instanceof CliError &&
+      releaseError.code === "stage-dispossessed"
+    ))
+      throw new CliError(
+        `stage ${kind} landed but lease release is unconfirmed: ${String(releaseError)}; retry ${kind === "complete" ? "done" : "fail"} to reconcile release`,
+        "stage-release",
+      );
+    // The terminal event was acknowledged before release began. A stale credential proves this
+    // tenure no longer holds the lease, including when the first release succeeded but its reply
+    // was lost. Do not republish the terminal payload with that invalidated credential.
+    try {
+      unlinkSync(statePath(ctx.home, state.ticket));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+  ctx.stdout(
+    `${state.ticket}/${state.phase}: ${kind === "complete" ? "done" : "failed"}`,
+  );
+}
+function checkedArtifact(path: string, expectedName: string): Buffer {
+  if (basename(path) !== expectedName)
+    throw new UsageError(`artifact must be named ${expectedName}`);
+  const bytes = readFileSync(path);
+  if (bytes.length === 0 || bytes.toString("utf8").trim() === "")
+    throw new UsageError(`${path} is empty`);
+  return bytes;
+}
+function object(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new UsageError("evidence must be a JSON object");
+  return value as Record<string, unknown>;
+}
+function evidenceFor(
+  phase: string,
+  path: string,
+  bytes: Buffer,
+): Record<string, unknown> {
+  const evidence = object(JSON.parse(readFileSync(path, "utf8")));
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  if (evidence.artifactSha256 !== digest)
+    throw new UsageError(
+      "evidence artifactSha256 does not match the artifact bytes",
+    );
+  for (const [field, allowed] of [
+    ["scope", "plan"],
+    ["ladder", "validate"],
+    ["offPlan", "remediate"],
+    ["remediateCapReached", "remediate"],
+    ["conflictRouting", "remediate"],
+    ["conflictExtraPaths", "remediate"],
+    ["findingsRouting", "remediate"],
+    ["findingsSourcePaths", "remediate"],
+  ] as const) {
+    if (evidence[field] !== undefined && phase !== allowed)
+      throw new UsageError(`${field} is only valid for ${allowed}`);
+  }
+  if (
+    evidence.remediateCapReached !== undefined &&
+    typeof evidence.remediateCapReached !== "boolean"
+  )
+    throw new UsageError("remediateCapReached must be a boolean");
+  for (const [field, routing] of [
+    ["conflictExtraPaths", "conflictRouting"],
+    ["findingsSourcePaths", "findingsRouting"],
+  ] as const) {
+    const paths = evidence[field];
+    if (paths === undefined) continue;
+    if (
+      !["validate", "pr", "unmeasured"].includes(String(evidence[routing])) ||
+      !Array.isArray(paths) ||
+      paths.length > 20 ||
+      !paths.every(
+        (path) =>
+          typeof path === "string" && path.length > 0 && path.length <= 1024,
+      )
+    )
+      throw new UsageError(
+        `${field} needs ${routing} and at most 20 nonempty paths`,
+      );
+  }
+  if (phase === "plan") {
+    const scope = object(evidence.scope);
+    if (
+      !["declared", "truncated"].includes(String(scope.status)) ||
+      !Array.isArray(scope.files) ||
+      scope.files.length > 200 ||
+      !scope.files.every(
+        (file) =>
+          typeof file === "string" &&
+          file.length > 0 &&
+          file.length <= 200 &&
+          !file.startsWith("/") &&
+          !file.split("/").includes(".."),
+      ) ||
+      !Array.isArray(scope.packages) ||
+      scope.packages.length > 32 ||
+      !scope.packages.every((value) => typeof value === "string") ||
+      !Array.isArray(scope.exclusive) ||
+      scope.exclusive.length > 8 ||
+      !scope.exclusive.every((value) => typeof value === "string") ||
+      Buffer.byteLength(
+        JSON.stringify({
+          status: scope.status,
+          files: scope.files,
+          packages: scope.packages,
+          exclusive: scope.exclusive,
+        }),
+      ) >
+        16 * 1024
+    )
+      throw new UsageError(
+        "plan needs a valid evidence.scope with status, files, packages, and exclusive",
+      );
+  }
+  if (phase === "validate") {
+    const ladder = object(evidence.ladder);
+    const expected = [
+      "plan-conformance",
+      "type-safety",
+      "code-review",
+      "security-review",
+      "security-audit",
+    ];
+    const steps = ladder.steps;
+    if (
+      ladder.version !== 1 ||
+      !Array.isArray(steps) ||
+      steps.length !== expected.length ||
+      !expected.every(
+        (step, i) =>
+          object(steps[i]).step === step &&
+          ["PASS", "SKIPPED", "UNAVAILABLE"].includes(
+            String(object(steps[i]).verdict),
+          ),
+      )
+    )
+      throw new UsageError(
+        "validate needs five non-failing ladder verdicts in the canonical order",
+      );
+  }
+  if (
+    phase === "implement" &&
+    (typeof evidence.pushedHeadSha !== "string" ||
+      !/^[a-f0-9]{40}$/.test(evidence.pushedHeadSha) ||
+      typeof evidence.pullRequestUrl !== "string")
+  )
+    throw new UsageError(
+      "implement needs pushedHeadSha and pullRequestUrl evidence",
+    );
+  if (
+    phase === "merge" &&
+    (typeof evidence.mergedHeadSha !== "string" ||
+      !/^[a-f0-9]{40}$/.test(evidence.mergedHeadSha))
+  )
+    throw new UsageError("merge needs mergedHeadSha evidence");
+  if (phase === "intake" || phase === "remediate")
+    JSON.parse(bytes.toString("utf8"));
+  return evidence;
+}
+async function start(
+  ctx: Ctx,
+  cfg: CustomerConfig,
+  ticket: string,
+  phase: string,
+): Promise<void> {
+  if (artifactNames[phase] === undefined)
+    throw new UsageError(`stage ${phase} has no declared artifact`);
+  try {
+    const previous = JSON.parse(
+      readFileSync(statePath(ctx.home, ticket), "utf8"),
+    ) as LeaseState;
+    const deadline = Math.max(
+      previous.expiresAtMs,
+      previous.runtime?.expiresAtMs ?? previous.expiresAtMs,
+    );
+    if (
+      !Number.isSafeInteger(deadline) ||
+      ctx.now().getTime() <= deadline + 30_000
+    )
+      throw new UsageError(`${ticket} already has a local stage claim`);
+    // The saved proof is past both usable deadlines. A fresh cloud claim below is the final
+    // authority: if its lease still exists, the cloud refuses and no new stage begins.
+    unlinkSync(statePath(ctx.home, ticket));
+  } catch (err) {
+    if (err instanceof UsageError) throw err;
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT")
+      throw new CliError(
+        `cannot reconcile the saved local stage for ${ticket}: ${String(err)}`,
+        "stage-state",
+      );
+  }
+  const { doc } = await loadContract(ctx, cfg, { refresh: true });
+  const paths = routes(doc);
+  const machine = hostname();
+  const incarnation = randomUUID();
+  const claimed = (
+    await request(ctx, cfg, paths.claim, {
+      body: { ticket, machine, incarnation, ttlMs: 3_600_000 },
+    })
+  ).body as {
+    claimed?: boolean;
+    refusal?: string;
+    credential?: string;
+    assignment?: {
+      ticket: string;
+      phase: string;
+      lease?: { holder?: string };
+      grant: { nonce: number; expiresAtMs: number; round?: number };
+      priorArtifacts?: string[];
+    };
+    runtime?: { incarnation: string; nonce: number; expiresAtMs: number };
+  };
+  if (
+    !claimed?.claimed ||
+    !claimed.assignment ||
+    !claimed.runtime ||
+    !Number.isSafeInteger(claimed.runtime.expiresAtMs)
+  )
+    throw new CliError(
+      `claim refused: ${claimed?.refusal ?? "invalid answer"}`,
+      "stage-claim",
+    );
+  const a = claimed.assignment;
+  if (!claimed.credential)
+    throw new CliError(
+      `claim granted without a lease credential; it expires at ${new Date(a.grant.expiresAtMs).toISOString()}`,
+      "stage-claim",
+    );
+  const state: LeaseState = {
+    version: 1,
+    account: cfg.account,
+    baseUrl: cfg.baseUrl,
+    ticket: a.ticket,
+    phase: a.phase,
+    nonce: a.grant.nonce,
+    credential: claimed.credential,
+    runtime: claimed.runtime,
+    machine,
+    node: a.lease?.holder ?? `customer-local:${machine}`,
+    expiresAtMs: a.grant.expiresAtMs,
+    routes: paths,
+  };
+  if (a.ticket !== ticket || a.phase !== phase) {
+    saveState(ctx.home, state);
+    await release(ctx, cfg, state);
+    throw new CliError(
+      `cloud granted ${a.ticket}/${a.phase}; requested ${ticket}/${phase}; released unrun grant`,
+      "stage-mismatch",
+    );
+  }
+  try {
+    // Persist the lease proof before any further network I/O, so a killed CLI leaves a claim the
+    // next invocation can renew or release instead of an invisible hour-long ticket lock.
+    saveState(ctx.home, state);
+    await publishArtifact(
+      ctx,
+      cfg,
+      state,
+      `${phase}-round.json`,
+      JSON.stringify({
+        version: 1,
+        ticket,
+        phase,
+        nonce: state.nonce,
+        ...(a.grant.round === undefined ? {} : { round: a.grant.round }),
+        atMs: ctx.now().getTime(),
+        substrate: "local",
+        node: state.node,
+        incarnation,
+      }),
+      "application/json",
+    );
+    for (const ref of a.priorArtifacts ?? []) {
+      const parts = ref.split("/");
+      const name = parts.at(-1),
+        nonce = Number(parts.at(-2)),
+        priorPhase = parts.at(-3),
+        priorTicket = parts.at(-4);
+      if (
+        !name ||
+        !/^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(name) ||
+        !priorPhase ||
+        !/^[a-z][a-z0-9-]*$/.test(priorPhase) ||
+        priorTicket !== ticket ||
+        !Number.isSafeInteger(nonce)
+      )
+        throw new CliError(`invalid prior artifact ref ${ref}`, "stage-prior");
+      const prior = await request(ctx, cfg, state.routes.object, {
+        method: "GET",
+        credential: state.credential,
+        query: { ticket, phase: priorPhase, nonce, name },
+      });
+      if (prior.bytes.length === 0 || prior.bytes.length > 8 * 1024 * 1024)
+        throw new CliError(
+          `prior artifact ${ref} has invalid size`,
+          "stage-prior",
+        );
+      const priorDir = join(
+        configDirFor(ctx.home),
+        "local-stages",
+        "prior",
+        ticket,
+        phase,
+        String(state.nonce),
+      );
+      const path = join(priorDir, priorPhase, String(nonce), name);
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      writeFileSync(path, prior.bytes, { flag: "wx", mode: 0o600 });
+      state.priorDir = priorDir;
+      saveState(ctx.home, state);
+    }
+    await publishEvent(ctx, cfg, state, "started");
+    // Under trailing keying, the accepted terminal receipt moves the card. A start event records
+    // activity and timing but must not present unfinished work as a completed phase.
+    if (doc.ladder.keying === "leading")
+      await moveCardToStage(ctx, cfg, doc, state);
+  } catch (err) {
+    if (err instanceof CliError && err.code === "stage-dispossessed") {
+      try {
+        unlinkSync(statePath(ctx.home, state.ticket));
+      } catch {
+        /* stale state only */
+      }
+      throw err;
+    }
+    // A start event must have a matching terminal event even when the card move fails.
+    // Otherwise the board can show a permanently active seat after this claim is released.
+    try {
+      await publishEvent(
+        ctx,
+        cfg,
+        state,
+        "failed",
+        `stage_start_failed: ${String(err)}`,
+      );
+    } catch {
+      /* release and the original error remain authoritative */
+    }
+    try {
+      await release(ctx, cfg, state, "setup_failed", "stage_start_failed");
+    } catch (releaseError) {
+      throw new CliError(
+        `stage start failed (${String(err)}); release also failed (${String(releaseError)}). Run stage renew or fail before lease expiry.`,
+        "stage-release",
+      );
+    }
+    throw err;
+  }
+  const renewBy = new Date(
+    Math.min(state.expiresAtMs, state.runtime.expiresAtMs),
+  ).toISOString();
+  ctx.stdout(
+    `${ticket}/${phase}: started; renew before ${renewBy}. Renew with catalyst stage renew ${ticket} ${phase} --assertion <work done>.${state.priorDir ? ` Prior artifacts: ${state.priorDir}.` : ""}`,
+  );
+}
+async function renew(
+  ctx: Ctx,
+  cfg: CustomerConfig,
+  state: LeaseState,
+  assertion: string,
+): Promise<void> {
+  let result: {
+    renewed?: boolean;
+    refusal?: string;
+    grant?: { expiresAtMs?: number };
+    runtime?: { expiresAtMs?: number };
+  };
+  try {
+    result = (
+      await request(ctx, cfg, state.routes.renew, {
+        credential: state.credential,
+        body: {
+          ticket: state.ticket,
+          phase: state.phase,
+          nonce: state.nonce,
+          assertion,
+          ttlMs: 3_600_000,
+          runtime: state.runtime,
+          machine: state.machine,
+        },
+      })
+    ).body as typeof result;
+  } catch (err) {
+    if (err instanceof CliError && err.code === "stage-dispossessed") {
+      try {
+        unlinkSync(statePath(ctx.home, state.ticket));
+      } catch {
+        /* stale state only */
+      }
+    }
+    throw err;
+  }
+  if (result?.renewed !== true) {
+    try {
+      unlinkSync(statePath(ctx.home, state.ticket));
+    } catch {
+      /* stale state only */
+    }
+    throw new CliError(
+      `renew refused: ${result?.refusal ?? "unknown"}; do not publish`,
+      "stage-dispossessed",
+    );
+  }
+  if (
+    !Number.isSafeInteger(result.grant?.expiresAtMs) ||
+    !Number.isSafeInteger(result.runtime?.expiresAtMs)
+  )
+    throw new CliError(
+      "renew succeeded without both work and runtime deadlines; retain the claim and retry before its previous deadline",
+      "stage-renew",
+    );
+  state.expiresAtMs = result.grant!.expiresAtMs!;
+  state.runtime.expiresAtMs = result.runtime!.expiresAtMs!;
+  saveState(ctx.home, state);
+  ctx.stdout(
+    `${state.ticket}/${state.phase}: renewed; renew before ${new Date(Math.min(state.expiresAtMs, state.runtime.expiresAtMs)).toISOString()}`,
+  );
+}
+async function terminal(
+  ctx: Ctx,
+  cfg: CustomerConfig,
+  state: LeaseState,
+  kind: "complete" | "failed",
+  args: ParsedArgs,
+): Promise<void> {
+  if (state.terminalAttempt?.publicationAcknowledged === true) {
+    if (state.terminalAttempt.kind !== kind)
+      throw new UsageError(
+        "terminal publication already completed with the other outcome",
+      );
+    await finishTerminalRelease(ctx, cfg, state, kind);
+    return;
+  }
+  const summary = flagString(args, "summary")?.trim();
+  if (kind === "failed" && !summary)
+    throw new UsageError("stage fail needs --summary <reason>");
+  // Validate local evidence before the first terminal write. A corrected file can then be retried
+  // under the same lease, without inventing a failed phase or releasing a live claim.
+  let completeBytes: Buffer | undefined;
+  let completeEvidence: Record<string, unknown> | undefined;
+  if (kind === "complete") {
+    const artifactPath =
+      flagString(args, "artifact") ??
+      (ctx.env.CATALYST_ARTIFACT_DIR
+        ? join(ctx.env.CATALYST_ARTIFACT_DIR, artifactNames[state.phase]!)
+        : undefined);
+    if (!artifactPath)
+      throw new UsageError(
+        "stage done needs --artifact <path> or CATALYST_ARTIFACT_DIR",
+      );
+    const evidencePath = flagString(args, "evidence");
+    if (!evidencePath)
+      throw new UsageError(
+        "stage done needs --evidence <json> with artifactSha256",
+      );
+    completeBytes = checkedArtifact(artifactPath, artifactNames[state.phase]!);
+    completeEvidence = evidenceFor(state.phase, evidencePath, completeBytes);
+  }
+  const failurePath =
+    kind === "failed" ? flagString(args, "artifact") : undefined;
+  const failureDiagnostic =
+    state.phase === "intake" || state.phase === "remediate"
+      ? JSON.stringify({ failed: true, summary })
+      : `# ${state.phase} failed\n\n${summary}\n`;
+  const terminalBytes =
+    kind === "complete"
+      ? completeBytes!
+      : failurePath
+        ? checkedArtifact(failurePath, artifactNames[state.phase]!)
+        : Buffer.from(failureDiagnostic);
+  const attemptSha256 = createHash("sha256")
+    .update(JSON.stringify({ kind, summary, evidence: completeEvidence }))
+    .update(terminalBytes)
+    .digest("hex");
+  if (state.terminalAttempt) {
+    if (
+      state.terminalAttempt.kind !== kind ||
+      state.terminalAttempt.sha256 !== attemptSha256
+    )
+      throw new UsageError(
+        "terminal publication already began with different artifact, evidence, or summary; retry the original payload",
+      );
+  } else {
+    state.terminalAttempt = { kind, sha256: attemptSha256 };
+    saveState(ctx.home, state);
+  }
+  const priorAmbiguousAttempt =
+    state.terminalAttempt.committedOrAmbiguous === true;
+  let authoritativeWriteInFlight = false;
+  let artifactKey: string | undefined;
+  let failure: unknown;
+  let terminalCommitted = false;
+  try {
+    if (kind === "complete") {
+      const evidence = completeEvidence!;
+      artifactKey = await publishArtifact(
+        ctx,
+        cfg,
+        state,
+        artifactNames[state.phase]!,
+        terminalBytes,
+      );
+      const receipt = {
+        version: 1,
+        artifactRef: artifactKey,
+        ...(evidence.scope ? { scope: evidence.scope } : {}),
+        ...(evidence.ladder ? { ladder: evidence.ladder } : {}),
+        ...(evidence.offPlan ? { offPlan: evidence.offPlan } : {}),
+        ...(typeof evidence.remediateCapReached === "boolean"
+          ? { remediateCapReached: evidence.remediateCapReached }
+          : {}),
+        ...(evidence.conflictRouting
+          ? { conflictRouting: evidence.conflictRouting }
+          : {}),
+        ...(evidence.conflictExtraPaths
+          ? { conflictExtraPaths: evidence.conflictExtraPaths }
+          : {}),
+        ...(evidence.findingsRouting
+          ? { findingsRouting: evidence.findingsRouting }
+          : {}),
+        ...(evidence.findingsSourcePaths
+          ? { findingsSourcePaths: evidence.findingsSourcePaths }
+          : {}),
+      };
+      state.terminalAttempt!.committedOrAmbiguous = true;
+      saveState(ctx.home, state);
+      authoritativeWriteInFlight = true;
+      await publishArtifact(
+        ctx,
+        cfg,
+        state,
+        "relay-done.json",
+        JSON.stringify(receipt),
+        "application/json",
+      );
+      terminalCommitted = true;
+      state.terminalAttempt!.committedOrAmbiguous = true;
+      saveState(ctx.home, state);
+    } else {
+      state.terminalAttempt!.committedOrAmbiguous = true;
+      saveState(ctx.home, state);
+      authoritativeWriteInFlight = true;
+      artifactKey = await publishArtifact(
+        ctx,
+        cfg,
+        state,
+        artifactNames[state.phase]!,
+        terminalBytes,
+      );
+      terminalCommitted = true;
+      state.terminalAttempt!.committedOrAmbiguous = true;
+      saveState(ctx.home, state);
+    }
+    await publishEvent(
+      ctx,
+      cfg,
+      state,
+      kind,
+      summary ?? (kind === "complete" ? `${state.phase} completed` : undefined),
+      artifactKey,
+    );
+    state.terminalAttempt!.publicationAcknowledged = true;
+    saveState(ctx.home, state);
+  } catch (err) {
+    // A 400/413/422 before the receipt (or failure artifact) commits is a definite rejection. The
+    // uploaded main artifact has no accepted receipt yet, so a corrected payload can replace it.
+    // A lost response or any rejection after the terminal authority is committed keeps the digest.
+    if (
+      !terminalCommitted &&
+      !priorAmbiguousAttempt &&
+      (!state.terminalAttempt?.committedOrAmbiguous ||
+        authoritativeWriteInFlight) &&
+      err instanceof CliError &&
+      err.code === "stage-http" &&
+      [400, 413, 422].includes(err.status ?? 0)
+    ) {
+      delete state.terminalAttempt;
+      saveState(ctx.home, state);
+    } else if (
+      state.terminalAttempt &&
+      !state.terminalAttempt.committedOrAmbiguous
+    ) {
+      // A transport failure might have committed the terminal write. A later definite rejection
+      // cannot prove that earlier write did not land, so keep its digest fenced.
+      state.terminalAttempt.committedOrAmbiguous = true;
+      saveState(ctx.home, state);
+    }
+    failure = err;
+  }
+  if (failure instanceof CliError && failure.code === "stage-dispossessed") {
+    try {
+      unlinkSync(statePath(ctx.home, state.ticket));
+    } catch {
+      /* stale state only */
+    }
+    throw failure;
+  }
+  // A transport error after the receipt write is ambiguous: the cloud may already have advanced
+  // the phase. Retain the lease so the operator can retry the same deterministic writes safely.
+  if (failure)
+    throw new CliError(
+      `stage ${kind} did not finish: ${String(failure)}; lease retained, retry ${kind === "complete" ? "done" : "fail"} or renew before expiry`,
+      "stage-publish",
+    );
+  await finishTerminalRelease(ctx, cfg, state, kind);
+}
+export async function cmdStage(args: ParsedArgs, ctx: Ctx): Promise<number> {
+  const [verb, ticket, phase, ...extra] = positionals(args);
+  if (
+    !verb ||
+    !ticket ||
+    !phase ||
+    extra.length ||
+    !/^[A-Z][A-Z0-9]+-\d+$/.test(ticket)
+  )
+    throw new UsageError("stage takes start|renew|done|fail <ticket> <phase>");
+  if (!["start", "renew", "done", "fail"].includes(verb))
+    throw new UsageError(`unknown stage verb ${verb}`);
+  const cfg = requireConfig(ctx);
+  if (cfg.principal !== "service" || !cfg.key)
+    throw new CliError(
+      "stage needs a personal API key login; browser sessions cannot publish with a local-phase lease",
+      "stage-credential",
+    );
+  await withStageLock(ctx.home, ticket, async () => {
+    if (verb === "start") await start(ctx, cfg, ticket, phase);
+    else {
+      const state = readState(ctx, cfg, ticket, phase);
+      if (verb === "renew") {
+        const assertion = flagString(args, "assertion")?.trim();
+        if (!assertion)
+          throw new UsageError("stage renew needs --assertion <work done>");
+        await renew(ctx, cfg, state, assertion);
+      } else
+        await terminal(
+          ctx,
+          cfg,
+          state,
+          verb === "done" ? "complete" : "failed",
+          args,
+        );
+    }
+  });
+  return 0;
+}
