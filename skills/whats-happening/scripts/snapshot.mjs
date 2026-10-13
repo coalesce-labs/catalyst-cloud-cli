@@ -10,13 +10,22 @@ import {
   runCli,
 } from "./lib/cli.mjs";
 
+/** Cards listed per board column by default. Counts are never capped by this; the cards are. */
+const BOARD_CARDS_PER_COLUMN = 50;
+/** One page of `query issues` when the whole-scope read fails: the server's page cap. */
+const BOARD_FALLBACK_PAGE = 500;
+const TERMINAL_TYPES = new Set(["completed", "canceled", "cancelled"]);
+
 const SPEC = {
   team: { value: true, help: "limit the queue and the board to this team key" },
   board: {
     value: false,
     help: "also include open tickets grouped by stage, in the contract's slot order",
   },
-  limit: { value: true, help: "board: max tickets to read (default 200)" },
+  limit: {
+    value: true,
+    help: `board: max cards listed per column (default ${BOARD_CARDS_PER_COLUMN}); column counts always cover every ticket read`,
+  },
   "full-contract": {
     value: false,
     help: "include the whole contract instead of the trimmed `tenant` block",
@@ -39,7 +48,8 @@ if (help) {
     [
       "Reads catalyst contract, running, queue and ask list from the cloud (query issues with --board,",
       "accounts with --accounts, optional local diagnostics with --replica).",
-      "Output: one JSON document {takenAt, source, tenant, running, queue, waitingOnHuman, board?, accounts?, errors?}.",
+      "Output: one JSON document {takenAt, source, tenant, running, queue, waitingOnHuman, board?, boardTruncated?, accounts?, errors?}.",
+      "board.counts counts every open ticket in scope; boardTruncated is present whenever a card list or the read itself left tickets out.",
       "A section the cloud refused is reported under errors and the rest still prints; exit 1 in that case.",
       "Every account fact (stage names, thresholds, teams) comes from the contract in this output, never from prose.",
     ],
@@ -106,28 +116,19 @@ const out = {
 if (flags.accounts) out.accounts = section("accounts", ["accounts", "--json"]);
 
 if (flags.board) {
-  const args = [
-    "query",
-    "issues",
-    "--source",
-    "api",
-    "--limit",
-    String(flags.limit ?? 200),
-    "--json",
-  ];
-  if (flags.team) args.push("--team", flags.team);
-  const r = runCli(args);
-  const sourceLine = (r.stderr.match(/^source: .*$/m) ?? [null])[0];
-  // A board read is a window (`--limit` stays the default), and a window the cloud cut short must
-  // say so rather than reading as the whole team.
-  const truncatedLine = (r.stderr.match(/^truncated at .*$/m) ?? [null])[0];
-  if (r.code !== 0)
-    errors.board = (r.stderr || `exit ${r.code}`).trim().split("\n").at(-1);
+  const perColumn = flags.limit === undefined ? BOARD_CARDS_PER_COLUMN : Number(flags.limit);
+  if (!Number.isInteger(perColumn) || perColumn < 1) {
+    process.stderr.write(`--limit must be a positive whole number, got ${flags.limit}\n`);
+    process.exit(1);
+  }
+  const read = readBoard(flags.team);
+  if (read.error) errors.board = read.error;
   else {
-    const rows = parseJson(r.stdout, "issues");
-    out.board = groupByStage(rows, contract, flags.team);
-    if (sourceLine) out.source.board = sourceLine.replace(/^source: /, "");
-    if (truncatedLine) out.source.boardTruncated = truncatedLine;
+    out.board = groupByStage(read.rows, contract, flags.team, perColumn);
+    if (read.sourceLine) out.source.board = read.sourceLine.replace(/^source: /, "");
+    if (read.truncatedLine) out.source.boardTruncated = read.truncatedLine;
+    const truncated = boardTruncation(out.board, read, perColumn);
+    if (truncated) out.boardTruncated = truncated;
   }
 }
 
@@ -135,8 +136,10 @@ if (Object.keys(errors).length) out.errors = errors;
 process.stderr.write(
   `source: api for running/queue/asks; replica ${replica.verdict}${replica.cursor != null ? ` (cursor ${replica.cursor})` : ""}${out.source.board ? `; board from ${out.source.board}` : ""}\n`,
 );
+if (out.boardTruncated) process.stderr.write(`board truncated: ${out.boardTruncated.message}\n`);
 process.stdout.write(JSON.stringify(out, null, 2) + "\n");
-process.exit(Object.keys(errors).length ? 1 : 0);
+// exitCode, not exit(): a whole board is well past a pipe's buffer, and exit() would cut it off.
+process.exitCode = Object.keys(errors).length ? 1 : 0;
 
 /** The contract facts a status reply needs, and nothing a reply should not paste. */
 function trimContract(doc, teamKey) {
@@ -181,9 +184,80 @@ function trimContract(doc, teamKey) {
   };
 }
 
+/**
+ * Every ticket in scope, so the board counts are whole (CTC-5622). The cloud caps one page at 500
+ * rows, so a single `--limit` read is a window over the most recently updated tickets, and the
+ * stages it happens to cover are not the board. `--all` follows the cloud's page cursor to the end.
+ * If that read is refused (a scope past the CLI's page ceiling, say), one full page is read instead
+ * and the result says exactly how much of the scope it covers.
+ */
+function readBoard(teamKey) {
+  const base = ["query", "issues", "--source", "api"];
+  const team = teamKey ? ["--team", teamKey] : [];
+  const lineOf = (stderr, re) => (stderr.match(re) ?? [null])[0];
+  const lastLine = (r) => (r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n").at(-1);
+
+  const all = runCli([...base, "--all", "--json", ...team]);
+  if (all.code === 0) {
+    const rows = parseJson(all.stdout, "issues");
+    return {
+      rows,
+      complete: true,
+      read: { returned: rows.length, total: rows.length },
+      sourceLine: lineOf(all.stderr, /^source: .*$/m),
+      truncatedLine: null,
+    };
+  }
+  const allError = lastLine(all);
+  const page = runCli([...base, "--limit", String(BOARD_FALLBACK_PAGE), "--json", ...team]);
+  if (page.code !== 0) return { error: `${allError}; one page: ${lastLine(page)}` };
+  const rows = parseJson(page.stdout, "issues");
+  const truncatedLine = lineOf(page.stderr, /^truncated at .*$/m);
+  // The CLI's line: "truncated at N of M — …", where M is a count or "an unknown total (…)".
+  const m = truncatedLine?.match(/^truncated at (\d+) of (\d+)?/);
+  return {
+    rows,
+    complete: !truncatedLine,
+    read: {
+      returned: m ? Number(m[1]) : rows.length,
+      total: truncatedLine ? (m?.[2] ? Number(m[2]) : null) : rows.length,
+    },
+    readError: allError,
+    sourceLine: lineOf(page.stderr, /^source: .*$/m),
+    truncatedLine,
+  };
+}
+
+/** The top-level truncation report, or null when the board lists every open ticket in scope. */
+function boardTruncation(board, read, perColumn) {
+  const total = Object.values(board.counts).reduce((a, b) => a + b, 0);
+  const returned = Object.values(board.byStage).reduce((a, cards) => a + cards.length, 0);
+  if (read.complete && returned === total) return null;
+  const n = (v) => (v === null ? "an unknown number of" : v.toLocaleString("en-US"));
+  const parts = [];
+  if (returned < total)
+    parts.push(`lists ${n(returned)} of ${n(total)} open tickets (at most ${perColumn} per column; raise --limit for more)`);
+  parts.push(
+    read.complete
+      ? "column counts cover every ticket"
+      : `column counts cover only the ${n(read.read.returned)} most recently updated of ${n(read.read.total)} tickets read, so they are low`,
+  );
+  return {
+    returned,
+    total,
+    perColumn,
+    countsComplete: read.complete,
+    ...(read.complete ? {} : { read: read.read, reason: read.readError ?? null }),
+    message: `board ${parts.join("; ")}`,
+  };
+}
+
 /** Open tickets by stage name, ordered by the contract's slot order for the ticket's team; unmapped
- *  state names follow, alphabetically. Terminal-typed states are dropped so the board is work only. */
-function groupByStage(rows, doc, teamKey) {
+ *  state names follow, alphabetically. Terminal stages are dropped so the board is work only: a stage
+ *  in the done or canceled slot, a stage the contract types completed or canceled, and any state the
+ *  ticket itself carries a completed or canceled `state_type` for (Duplicate is canceled-typed and
+ *  sits in no slot). `counts` covers every row; `byStage` lists the first `perColumn` per stage. */
+function groupByStage(rows, doc, teamKey, perColumn) {
   const order = [];
   const seen = new Set();
   const terminal = new Set();
@@ -196,9 +270,7 @@ function groupByStage(rows, doc, teamKey) {
       if (
         slot === "done" ||
         slot === "canceled" ||
-        ["completed", "canceled", "cancelled"].includes(
-          String(s.type ?? "").toLowerCase(),
-        )
+        TERMINAL_TYPES.has(String(s.type ?? "").toLowerCase())
       )
         terminal.add(s.name);
       else if (!seen.has(s.name)) {
@@ -207,11 +279,18 @@ function groupByStage(rows, doc, teamKey) {
       }
     }
   }
+  for (const r of rows)
+    if (TERMINAL_TYPES.has(String(r.state_type ?? "").toLowerCase()))
+      terminal.add(String(r.state ?? "unknown"));
+  const counts = {};
   const byStage = {};
   for (const r of rows) {
     const state = String(r.state ?? "unknown");
     if (terminal.has(state)) continue;
-    (byStage[state] ??= []).push({
+    counts[state] = (counts[state] ?? 0) + 1;
+    const cards = (byStage[state] ??= []);
+    if (cards.length >= perColumn) continue;
+    cards.push({
       identifier: r.identifier,
       title: r.title,
       priority: r.priority ?? null,
@@ -223,8 +302,10 @@ function groupByStage(rows, doc, teamKey) {
   const extra = Object.keys(byStage)
     .filter((s) => !seen.has(s))
     .sort();
+  const stageOrder = [...order.filter((s) => !terminal.has(s)), ...extra];
   return {
-    stageOrder: [...order, ...extra],
+    stageOrder,
+    counts: Object.fromEntries(stageOrder.map((s) => [s, counts[s] ?? 0])),
     byStage,
     terminalStagesDropped: [...terminal],
   };
