@@ -541,7 +541,9 @@ function evidenceFor(
     ["offPlan", "remediate"],
     ["remediateCapReached", "remediate"],
     ["conflictRouting", "remediate"],
+    ["conflictExtraPaths", "remediate"],
     ["findingsRouting", "remediate"],
+    ["findingsSourcePaths", "remediate"],
   ] as const) {
     if (evidence[field] !== undefined && phase !== allowed)
       throw new UsageError(`${field} is only valid for ${allowed}`);
@@ -551,6 +553,25 @@ function evidenceFor(
     typeof evidence.remediateCapReached !== "boolean"
   )
     throw new UsageError("remediateCapReached must be a boolean");
+  for (const [field, routing] of [
+    ["conflictExtraPaths", "conflictRouting"],
+    ["findingsSourcePaths", "findingsRouting"],
+  ] as const) {
+    const paths = evidence[field];
+    if (paths === undefined) continue;
+    if (
+      !["validate", "pr", "unmeasured"].includes(String(evidence[routing])) ||
+      !Array.isArray(paths) ||
+      paths.length > 20 ||
+      !paths.every(
+        (path) =>
+          typeof path === "string" && path.length > 0 && path.length <= 1024,
+      )
+    )
+      throw new UsageError(
+        `${field} needs ${routing} and at most 20 nonempty paths`,
+      );
+  }
   if (phase === "plan") {
     const scope = object(evidence.scope);
     if (
@@ -601,11 +622,14 @@ function evidenceFor(
       steps.length !== expected.length ||
       !expected.every(
         (step, i) =>
-          object(steps[i]).step === step && object(steps[i]).verdict === "PASS",
+          object(steps[i]).step === step &&
+          ["PASS", "SKIPPED", "UNAVAILABLE"].includes(
+            String(object(steps[i]).verdict),
+          ),
       )
     )
       throw new UsageError(
-        "validate needs five PASS ladder verdicts in the canonical order",
+        "validate needs five non-failing ladder verdicts in the canonical order",
       );
   }
   if (
@@ -974,8 +998,14 @@ async function terminal(
         ...(evidence.conflictRouting
           ? { conflictRouting: evidence.conflictRouting }
           : {}),
+        ...(evidence.conflictExtraPaths
+          ? { conflictExtraPaths: evidence.conflictExtraPaths }
+          : {}),
         ...(evidence.findingsRouting
           ? { findingsRouting: evidence.findingsRouting }
+          : {}),
+        ...(evidence.findingsSourcePaths
+          ? { findingsSourcePaths: evidence.findingsSourcePaths }
           : {}),
       };
       state.terminalAttempt!.committedOrAmbiguous = true;

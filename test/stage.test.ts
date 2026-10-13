@@ -199,6 +199,10 @@ describe("stage local-phase wrapper", () => {
       JSON.stringify({
         artifactSha256: createHash("sha256").update(bytes).digest("hex"),
         remediateCapReached: true,
+        conflictRouting: "validate",
+        conflictExtraPaths: ["src/conflict.ts"],
+        findingsRouting: "validate",
+        findingsSourcePaths: ["src/finding.ts"],
       }),
     );
     expect(
@@ -223,7 +227,104 @@ describe("stage local-phase wrapper", () => {
       version: 1,
       artifactRef: "r2/remediation.json",
       remediateCapReached: true,
+      conflictRouting: "validate",
+      conflictExtraPaths: ["src/conflict.ts"],
+      findingsRouting: "validate",
+      findingsSourcePaths: ["src/finding.ts"],
     });
+  });
+
+  test("validate forwards skipped and unavailable checks", async () => {
+    const { home, ctx, calls } = setup("validate");
+    expect(await main(["stage", "start", "CTC-5742", "validate"], ctx)).toBe(0);
+    const artifact = join(home, "validation.md");
+    const evidence = join(home, "evidence.json");
+    const bytes = Buffer.from("# Validation\nThree checks passed.\n");
+    const steps = [
+      ["plan-conformance", "PASS"],
+      ["type-safety", "PASS"],
+      ["code-review", "PASS"],
+      ["security-review", "SKIPPED"],
+      ["security-audit", "UNAVAILABLE"],
+    ].map(([step, verdict]) => ({ step, verdict }));
+    writeFileSync(artifact, bytes);
+    const writeEvidence = () =>
+      writeFileSync(
+        evidence,
+        JSON.stringify({
+          artifactSha256: createHash("sha256").update(bytes).digest("hex"),
+          ladder: { version: 1, steps },
+        }),
+      );
+    writeEvidence();
+    expect(
+      await main(
+        [
+          "stage",
+          "done",
+          "CTC-5742",
+          "validate",
+          "--artifact",
+          artifact,
+          "--evidence",
+          evidence,
+        ],
+        ctx,
+      ),
+    ).toBe(0);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.artifact).at(-1)?.body,
+    ).toEqual({
+      version: 1,
+      artifactRef: "r2/validation.md",
+      ladder: { version: 1, steps },
+    });
+  });
+
+  test("validate refuses an explicitly unreported check before publication", async () => {
+    const { home, ctx, calls } = setup("validate");
+    expect(await main(["stage", "start", "CTC-5742", "validate"], ctx)).toBe(0);
+    const artifact = join(home, "validation.md");
+    const evidence = join(home, "evidence.json");
+    const bytes = Buffer.from("# Validation\nOne check was unreported.\n");
+    writeFileSync(artifact, bytes);
+    writeFileSync(
+      evidence,
+      JSON.stringify({
+        artifactSha256: createHash("sha256").update(bytes).digest("hex"),
+        ladder: {
+          version: 1,
+          steps: [
+            "plan-conformance",
+            "type-safety",
+            "code-review",
+            "security-review",
+            "security-audit",
+          ].map((step, index) => ({
+            step,
+            verdict: index === 3 ? "UNREPORTED" : "PASS",
+          })),
+        },
+      }),
+    );
+    expect(
+      await main(
+        [
+          "stage",
+          "done",
+          "CTC-5742",
+          "validate",
+          "--artifact",
+          artifact,
+          "--evidence",
+          evidence,
+        ],
+        ctx,
+      ),
+    ).toBe(1);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.artifact),
+    ).toHaveLength(1);
   });
 
   test("start, renew, and done use the claimed lease; receipt follows the exact artifact", async () => {
