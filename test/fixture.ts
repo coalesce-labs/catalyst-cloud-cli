@@ -69,6 +69,10 @@ export interface FixtureServer {
         linearUserId: string | null;
       }
     | null;
+  /** CTC-5399 — when set, /api/v1/me answers THIS refusal (status + JSON body) before the key
+   *  table: the person is signed in but has no workspace behind them, so the cloud refuses with
+   *  403 `jwt-org-unmapped` on the identity read. */
+  meRefusal?: { status: number; body: unknown };
   writes: RecordedRequest[];
   requests: RecordedRequest[];
   /** Override the issue list the read routes serve. */
@@ -980,6 +984,7 @@ export async function startMeFixture(
       auth.startsWith("Bearer ") &&
       o.issuedAccessTokens.has(auth.slice("Bearer ".length));
     if (path.startsWith("/api/v1/me")) {
+      if (state.meRefusal) return send(state.meRefusal.status, state.meRefusal.body);
       const out =
         handler?.(req.url ?? path) ??
         (auth === `Bearer ${FIXTURE_KEY}`
