@@ -554,6 +554,7 @@ async function start(
         "local-stages",
         "prior",
         ticket,
+        phase,
         String(state.nonce),
       );
       const path = join(priorDir, priorPhase, String(nonce), name);

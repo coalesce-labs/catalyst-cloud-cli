@@ -255,6 +255,48 @@ describe("stage local-phase wrapper", () => {
     expect(ctx.out.join("\n")).toContain(saved.priorDir);
   });
 
+  test("a later phase with the same lease nonce gets its own prior-artifact directory", async () => {
+    const { home, ctx } = setup("plan", {
+      priorArtifacts: ["tenant/CTC-5742/research/6/research.md"],
+    });
+    const earlier = join(
+      home,
+      ".config",
+      "catalyst-cloud",
+      "local-stages",
+      "prior",
+      "CTC-5742",
+      "research",
+      "7",
+      "research",
+      "6",
+    );
+    mkdirSync(earlier, { recursive: true });
+    writeFileSync(join(earlier, "research.md"), "# Earlier copy\n");
+    expect(await main(["stage", "start", "CTC-5742", "plan"], ctx)).toBe(0);
+    const saved = JSON.parse(
+      readFileSync(
+        join(
+          home,
+          ".config",
+          "catalyst-cloud",
+          "local-stages",
+          "CTC-5742.json",
+        ),
+        "utf8",
+      ),
+    );
+    expect(
+      readFileSync(
+        join(saved.priorDir, "research", "6", "research.md"),
+        "utf8",
+      ),
+    ).toBe("# Prior research\n");
+    expect(readFileSync(join(earlier, "research.md"), "utf8")).toBe(
+      "# Earlier copy\n",
+    );
+  });
+
   test("an expired saved claim is reconciled by a fresh cloud claim", async () => {
     const { home, ctx, calls } = setup();
     expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
