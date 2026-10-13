@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.15
+
+Command-line workflows can report stage progress with `catalyst stage start`, `renew`, `done`, and `fail`. Retries reuse the same stage attempt.
+
 ## 0.16.14
 
 Setup uses the updated macOS folder checks and verifies the required release image before starting work. Re-run setup to update this computer.

@@ -4,7 +4,7 @@ description: >-
   The human's decision inbox on Catalyst Cloud, and the one way an agent raises a decision on their behalf. Use when the person asks "what needs me?", "what am I blocking?", or when active work is gated on a choice only they can make. Lists open asks ranked by how much open work each one holds, files an ask through the cloud's ask route with the account's own template, and records the answer so the held work releases. Never answers as the human, never duplicates an open ask.
 allowed-tools: Bash(catalyst:*) Bash(npx -p @catalyst-cloud/cli catalyst:*)
 ---
-<!-- vendored-from: @catalyst-cloud/catalyst-skills@0.16.14 — written in this repository for customer accounts -->
+<!-- vendored-from: @catalyst-cloud/catalyst-skills@0.16.15 — written in this repository for customer accounts -->
 
 # What needs me
 
