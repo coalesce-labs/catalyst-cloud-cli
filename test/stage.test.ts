@@ -24,6 +24,8 @@ function setup(
     rejectMove?: boolean;
     failTerminalEventOnce?: boolean;
     rejectTerminalArtifactOnce?: boolean;
+    releaseRefusal?: string;
+    rejectReceiptOnce?: boolean;
   } = {},
 ) {
   const home = tempHome();
@@ -43,6 +45,7 @@ function setup(
   const calls: { path: string; body: unknown; headers: Headers }[] = [];
   let terminalEventFailed = false;
   let terminalArtifactRejected = false;
+  let receiptRejected = false;
   const doc = buildFixtureContract();
   doc.teams[0]!.key = "CTC";
   doc.routes = [
@@ -102,7 +105,12 @@ function setup(
           expiresAtMs: Date.now() + 900_000,
         },
       });
-    if (path === stageRoutes.release) return json({ released: true });
+    if (path === stageRoutes.release)
+      return json(
+        opts.releaseRefusal
+          ? { released: false, refusal: opts.releaseRefusal }
+          : { released: true },
+      );
     if (path === stageRoutes.renew)
       return json({
         renewed: true,
@@ -114,6 +122,14 @@ function setup(
         status: 200,
       });
     if (path === stageRoutes.artifact) {
+      if (
+        opts.rejectReceiptOnce &&
+        url.searchParams.get("name") === "relay-done.json" &&
+        !receiptRejected
+      ) {
+        receiptRejected = true;
+        return json({ reason: "invalid_receipt_body" }, 400);
+      }
       if (
         opts.rejectTerminalArtifactOnce &&
         url.searchParams.get("name") === "research.md" &&
@@ -536,6 +552,40 @@ describe("stage local-phase wrapper", () => {
     ).toHaveLength(1);
   });
 
+  test("a definitive receipt 400 permits corrected evidence before an accepted receipt", async () => {
+    const { home, ctx } = setup("research", { rejectReceiptOnce: true });
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const artifact = join(home, "research.md"),
+      evidence = join(home, "evidence.json");
+    const bytes = Buffer.from("# Research\nVerified.\n");
+    writeFileSync(artifact, bytes);
+    writeFileSync(
+      evidence,
+      JSON.stringify({
+        artifactSha256: createHash("sha256").update(bytes).digest("hex"),
+      }),
+    );
+    const args = [
+      "stage",
+      "done",
+      "CTC-5742",
+      "research",
+      "--artifact",
+      artifact,
+      "--evidence",
+      evidence,
+    ];
+    expect(await main(args, ctx)).toBe(2);
+    writeFileSync(
+      evidence,
+      JSON.stringify({
+        artifactSha256: createHash("sha256").update(bytes).digest("hex"),
+        note: "corrected",
+      }),
+    );
+    expect(await main(args, ctx)).toBe(0);
+  });
+
   test("a second invocation cannot overwrite lease state during an active command", async () => {
     const { home, ctx, calls } = setup();
     expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
@@ -561,5 +611,69 @@ describe("stage local-phase wrapper", () => {
     ).toHaveLength(0);
     unlinkSync(lock);
     expect(await main(renew, ctx)).toBe(0);
+  });
+
+  test("rejects malformed plan scope before publishing the artifact", async () => {
+    const { home, ctx, calls } = setup("plan");
+    expect(await main(["stage", "start", "CTC-5742", "plan"], ctx)).toBe(0);
+    const artifact = join(home, "plan.md"),
+      evidence = join(home, "evidence.json");
+    const bytes = Buffer.from("# Plan\n");
+    writeFileSync(artifact, bytes);
+    writeFileSync(
+      evidence,
+      JSON.stringify({
+        artifactSha256: createHash("sha256").update(bytes).digest("hex"),
+        scope: {
+          status: "declared",
+          files: [123],
+          packages: [],
+          exclusive: [],
+        },
+      }),
+    );
+    expect(
+      await main(
+        [
+          "stage",
+          "done",
+          "CTC-5742",
+          "plan",
+          "--artifact",
+          artifact,
+          "--evidence",
+          evidence,
+        ],
+        ctx,
+      ),
+    ).toBe(1);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.artifact),
+    ).toHaveLength(1);
+  });
+
+  test("a 200 release refusal retains the local lease proof and reports failure", async () => {
+    const { home, ctx } = setup("research", {
+      releaseRefusal: "stale_runtime",
+    });
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    expect(
+      await main(
+        ["stage", "fail", "CTC-5742", "research", "--summary", "test red"],
+        ctx,
+      ),
+    ).toBe(2);
+    expect(
+      readFileSync(
+        join(
+          home,
+          ".config",
+          "catalyst-cloud",
+          "local-stages",
+          "CTC-5742.json",
+        ),
+        "utf8",
+      ),
+    ).toContain("lease-secret");
   });
 });

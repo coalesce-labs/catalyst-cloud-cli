@@ -362,18 +362,25 @@ async function release(
   outcome?: "setup_failed",
   reason?: string,
 ): Promise<void> {
-  await request(ctx, cfg, state.routes.release, {
-    credential: state.credential,
-    body: {
-      ticket: state.ticket,
-      phase: state.phase,
-      nonce: state.nonce,
-      runtime: state.runtime,
-      machine: state.machine,
-      ...(outcome ? { outcome } : {}),
-      ...(reason ? { reason } : {}),
-    },
-  });
+  const result = (
+    await request(ctx, cfg, state.routes.release, {
+      credential: state.credential,
+      body: {
+        ticket: state.ticket,
+        phase: state.phase,
+        nonce: state.nonce,
+        runtime: state.runtime,
+        machine: state.machine,
+        ...(outcome ? { outcome } : {}),
+        ...(reason ? { reason } : {}),
+      },
+    })
+  ).body as { released?: boolean; refusal?: string };
+  if (result?.released !== true)
+    throw new CliError(
+      `stage release was not confirmed: ${result?.refusal ?? "unknown"}; lease proof retained`,
+      "stage-release",
+    );
   try {
     unlinkSync(statePath(ctx.home, state.ticket));
   } catch (err) {
@@ -419,8 +426,30 @@ function evidenceFor(
     if (
       !["declared", "truncated"].includes(String(scope.status)) ||
       !Array.isArray(scope.files) ||
+      scope.files.length > 200 ||
+      !scope.files.every(
+        (file) =>
+          typeof file === "string" &&
+          file.length > 0 &&
+          file.length <= 200 &&
+          !file.startsWith("/") &&
+          !file.split("/").includes(".."),
+      ) ||
       !Array.isArray(scope.packages) ||
-      !Array.isArray(scope.exclusive)
+      scope.packages.length > 32 ||
+      !scope.packages.every((value) => typeof value === "string") ||
+      !Array.isArray(scope.exclusive) ||
+      scope.exclusive.length > 8 ||
+      !scope.exclusive.every((value) => typeof value === "string") ||
+      Buffer.byteLength(
+        JSON.stringify({
+          status: scope.status,
+          files: scope.files,
+          packages: scope.packages,
+          exclusive: scope.exclusive,
+        }),
+      ) >
+        16 * 1024
     )
       throw new UsageError(
         "plan needs a valid evidence.scope with status, files, packages, and exclusive",
@@ -785,7 +814,7 @@ async function terminal(
   }
   let artifactKey: string | undefined;
   let failure: unknown;
-  let artifactPublished = false;
+  let terminalCommitted = false;
   try {
     if (kind === "complete") {
       const evidence = completeEvidence!;
@@ -796,7 +825,6 @@ async function terminal(
         artifactNames[state.phase]!,
         terminalBytes,
       );
-      artifactPublished = true;
       const receipt = {
         version: 1,
         artifactRef: artifactKey,
@@ -818,6 +846,7 @@ async function terminal(
         JSON.stringify(receipt),
         "application/json",
       );
+      terminalCommitted = true;
     } else {
       artifactKey = await publishArtifact(
         ctx,
@@ -826,7 +855,7 @@ async function terminal(
         artifactNames[state.phase]!,
         terminalBytes,
       );
-      artifactPublished = true;
+      terminalCommitted = true;
     }
     await publishEvent(
       ctx,
@@ -837,13 +866,14 @@ async function terminal(
       artifactKey,
     );
   } catch (err) {
-    // A 413 from the first artifact upload is a definite rejection before publication. Permit a
-    // smaller corrected payload or a failure marker; later/ambiguous writes keep their digest.
+    // A 400/413/422 before the receipt (or failure artifact) commits is a definite rejection. The
+    // uploaded main artifact has no accepted receipt yet, so a corrected payload can replace it.
+    // A lost response or any rejection after the terminal authority is committed keeps the digest.
     if (
-      !artifactPublished &&
+      !terminalCommitted &&
       err instanceof CliError &&
       err.code === "stage-http" &&
-      err.status === 413
+      [400, 413, 422].includes(err.status ?? 0)
     ) {
       delete state.terminalAttempt;
       saveState(ctx.home, state);
