@@ -108,6 +108,7 @@ async function withStageLock<T>(
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       let staleOwner: string | undefined;
       let stalePid: number | undefined;
+      let stalePartial: { dev: number; ino: number; mtimeMs: number } | undefined;
       try {
         const holder = JSON.parse(readFileSync(path, "utf8")) as {
           owner?: string;
@@ -124,9 +125,17 @@ async function withStageLock<T>(
           }
         }
       } catch {
-        // A partial lock write is treated as live; a later invocation can retry.
+        // An interrupted write has no PID to probe. A fresh partial write may still have an
+        // active owner, while an older inode can be recovered under the same exclusive guard.
+        try {
+          const stat = statSync(path);
+          if (Date.now() - stat.mtimeMs > 5_000)
+            stalePartial = { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs };
+        } catch {
+          // The lock disappeared while we inspected it.
+        }
       }
-      if (staleOwner !== undefined && attempt === 0) {
+      if ((staleOwner !== undefined || stalePartial !== undefined) && attempt === 0) {
         // Only one stale-lock recoverer may inspect and remove the old inode at a time. Without
         // this second exclusive lock, two readers can both see a dead PID and the second can
         // unlink the first reader's newly acquired live lock.
@@ -174,15 +183,21 @@ async function withStageLock<T>(
           closeSync(recoveryFd);
         }
         try {
-          const current = JSON.parse(readFileSync(path, "utf8")) as {
-            owner?: string;
-            pid?: number;
-          };
-          if (current.owner === staleOwner && current.pid === stalePid) {
-            try {
-              process.kill(stalePid!, 0);
-            } catch (probe) {
-              if ((probe as NodeJS.ErrnoException).code === "ESRCH") unlinkSync(path);
+          if (stalePartial !== undefined) {
+            const stat = statSync(path);
+            if (stat.dev === stalePartial.dev && stat.ino === stalePartial.ino && stat.mtimeMs === stalePartial.mtimeMs && Date.now() - stat.mtimeMs > 5_000)
+              unlinkSync(path);
+          } else {
+            const current = JSON.parse(readFileSync(path, "utf8")) as {
+              owner?: string;
+              pid?: number;
+            };
+            if (current.owner === staleOwner && current.pid === stalePid) {
+              try {
+                process.kill(stalePid!, 0);
+              } catch (probe) {
+                if ((probe as NodeJS.ErrnoException).code === "ESRCH") unlinkSync(path);
+              }
             }
           }
         } finally {

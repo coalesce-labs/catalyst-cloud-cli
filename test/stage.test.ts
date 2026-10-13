@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { main } from "../src/cli";
@@ -740,6 +740,16 @@ describe("stage local-phase wrapper", () => {
     const renew = ["stage", "renew", "CTC-5742", "research", "--assertion", "still working"];
     expect(await main(renew, ctx)).toBe(2);
     expect(await main(renew, ctx)).toBe(0);
+  });
+
+  test("an old partial stage lock left by a killed process is recoverable", async () => {
+    const { home, ctx, calls } = setup();
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const lock = join(home, ".config", "catalyst-cloud", "local-stages", "CTC-5742.json.lock");
+    writeFileSync(lock, "{");
+    utimesSync(lock, new Date(0), new Date(0));
+    expect(await main(["stage", "renew", "CTC-5742", "research", "--assertion", "still working"], ctx)).toBe(0);
+    expect(calls.filter((call) => call.path === stageRoutes.renew)).toHaveLength(1);
   });
 
   test("rejects malformed plan scope before publishing the artifact", async () => {
