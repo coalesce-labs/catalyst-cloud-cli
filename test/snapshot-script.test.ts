@@ -6,7 +6,9 @@
 //
 // CTC-5622: the board reads the whole scope through `query issues --all`, counts every open ticket
 // per column, lists at most `--limit` cards per column and says so at the top level, and drops
-// canceled-type states (Duplicate) the contract has no slot for.
+// canceled-type states (Duplicate) the contract has no slot for. Terminal is judged per ticket —
+// the ticket's own `state_type`, or its OWN team's contract — so one team's completed `Review`
+// never blacklists another team's open `Review`.
 import { describe, expect, test } from "vitest";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -84,14 +86,14 @@ interface BoardOut {
 }
 
 /** n tickets in one state, as `/issues` rows carry them (state name plus Linear's state type). */
-function issues(state: string, stateType: string, n: number) {
+function issues(state: string, stateType: string, n: number, team = "CQD") {
   const prefix = state.replace(/\W/g, "").slice(0, 3).toUpperCase();
   return Array.from({ length: n }, (_, i) => ({
-    identifier: `CQD-${prefix}${i}`,
+    identifier: `${team}-${prefix}${i}`,
     title: `${state} ${i}`,
     state,
     state_type: stateType,
-    team_key: "CQD",
+    team_key: team,
     updated_at: new Date(Date.UTC(2026, 9, 10) - i * 60_000).toISOString(),
   }));
 }
@@ -116,12 +118,63 @@ const CQD_CONTRACT = {
   ],
 };
 
+/** Two teams sharing the state NAME `Review` with opposite terminal types: CQD's `review` slot is
+ *  an open work column, while ENG has no slot for Review at all and its Review rows are
+ *  completed-typed — the collision the P2 finding reproduced. */
+const TWO_TEAM_CONTRACT = {
+  contractVersion: "1.0.0",
+  account: {},
+  slots: ["backlog", "todo", "inProgress", "review", "done", "canceled"],
+  teams: [
+    {
+      key: "CQD",
+      stages: {
+        backlog: { name: "Backlog", type: "backlog" },
+        todo: { name: "Todo", type: "unstarted" },
+        inProgress: { name: "In Progress", type: "started" },
+        review: { name: "Review", type: "started" },
+        done: { name: "Done", type: "completed" },
+        canceled: { name: "Canceled", type: "canceled" },
+      },
+    },
+    {
+      key: "ENG",
+      stages: {
+        backlog: { name: "Backlog", type: "backlog" },
+        todo: { name: "Todo", type: "unstarted" },
+        inProgress: { name: "In Progress", type: "started" },
+        done: { name: "Done", type: "completed" },
+        canceled: { name: "Canceled", type: "canceled" },
+      },
+    },
+  ],
+};
+
+/** The same shared name, but now ENG's done slot itself is named `Review`: contract-terminal for
+ *  ENG while CQD keeps it as an open column, so the terminal lookup must be scoped by team. */
+const SHARED_NAME_CONTRACT = {
+  ...TWO_TEAM_CONTRACT,
+  teams: TWO_TEAM_CONTRACT.teams.map((t) =>
+    t.key === "ENG"
+      ? {
+          ...t,
+          stages: { ...t.stages, done: { name: "Review", type: "completed" } },
+        }
+      : t,
+  ),
+};
+
 /** A stand-in CLI over a row fixture that follows the real `query issues` contract: `--all` returns
  *  every row (or fails as the CLI does past its page ceiling), a single read returns at most one
  *  500-row page and prints the CLI's truncation line when rows remain. */
-function boardHome(opts: { rows: Record<string, unknown>[]; refuseAll?: boolean }): string {
+function boardHome(opts: {
+  rows: Record<string, unknown>[];
+  refuseAll?: boolean;
+  contract?: Record<string, unknown>;
+}): string {
   const home = homeWith({ baseUrl: "https://x", account: "tenant-3", key: "ctc_user_x" });
   writeFileSync(join(home, "rows.json"), JSON.stringify(opts.rows));
+  const contract = opts.contract ?? CQD_CONTRACT;
   const path = join(home, "fake-cli.mjs");
   writeFileSync(
     path,
@@ -129,7 +182,7 @@ function boardHome(opts: { rows: Record<string, unknown>[]; refuseAll?: boolean 
       'import { appendFileSync, readFileSync } from "node:fs";',
       "const a = process.argv.slice(2);",
       `appendFileSync(${JSON.stringify(join(home, "calls.jsonl"))}, JSON.stringify(a) + "\\n");`,
-      `if (a[0] === "contract") { console.log(${JSON.stringify(JSON.stringify(CQD_CONTRACT))}); process.exit(0); }`,
+      `if (a[0] === "contract") { console.log(${JSON.stringify(JSON.stringify(contract))}); process.exit(0); }`,
       'if (a[0] === "running" || a[0] === "queue") { console.log("{}"); process.exit(0); }',
       'if (a[0] === "ask" && a[1] === "list") { console.log(JSON.stringify({ asks: [] })); process.exit(0); }',
       'if (a[0] === "query" && a[1] === "issues") {',
@@ -300,6 +353,67 @@ describe("snapshot.mjs --board", () => {
       expect.arrayContaining(["Done", "Canceled", "Duplicate"]),
     );
     // Everything open is listed, so there is nothing to report as left out.
+    expect(out.boardTruncated).toBeUndefined();
+  });
+
+  test("one team's completed Review never blacklists another team's open Review", () => {
+    const rows = [
+      ...issues("Todo", "unstarted", 1),
+      ...issues("Review", "started", 2), // CQD: open work in a contract slot
+      ...issues("Review", "completed", 3, "ENG"), // ENG: terminal rows outside its slots
+    ];
+    const home = boardHome({ rows, contract: TWO_TEAM_CONTRACT });
+    const res = run(home, ["--board"]);
+    expect(res.status).toBe(0);
+    const out = JSON.parse(res.stdout) as BoardOut;
+    // CQD's open Review tickets stay on the board, counted and listed.
+    expect(out.board.counts).toEqual({
+      Backlog: 0,
+      Todo: 1,
+      "In Progress": 0,
+      Review: 2,
+    });
+    expect(out.board.stageOrder).toEqual([
+      "Backlog",
+      "Todo",
+      "In Progress",
+      "Review",
+    ]);
+    expect(
+      (out.board.byStage.Review as { identifier: string }[]).map(
+        (c) => c.identifier,
+      ),
+    ).toEqual(["CQD-REV0", "CQD-REV1"]);
+    // ENG's completed Review rows are dropped as terminal, not shown anywhere.
+    expect(out.board.terminalStagesDropped).toEqual(
+      expect.arrayContaining(["Review"]),
+    );
+    expect(out.boardTruncated).toBeUndefined();
+  });
+
+  test("a terminal contract slot named like another team's open column stays scoped to its team", () => {
+    const rows = [
+      ...issues("Review", "started", 2), // CQD: open column
+      ...issues("Review", "started", 1, "ENG"), // ENG: its contract names the done slot Review
+    ];
+    const home = boardHome({ rows, contract: SHARED_NAME_CONTRACT });
+    const res = run(home, ["--board"]);
+    expect(res.status).toBe(0);
+    const out = JSON.parse(res.stdout) as BoardOut;
+    expect(out.board.counts).toEqual({
+      Backlog: 0,
+      Todo: 0,
+      "In Progress": 0,
+      Review: 2,
+    });
+    expect(
+      (out.board.byStage.Review as { identifier: string }[]).map(
+        (c) => c.identifier,
+      ),
+    ).toEqual(["CQD-REV0", "CQD-REV1"]);
+    expect(out.board.terminalStagesDropped).toEqual(
+      expect.arrayContaining(["Review"]),
+    );
     expect(out.boardTruncated).toBeUndefined();
   });
 

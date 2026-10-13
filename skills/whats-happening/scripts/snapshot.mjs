@@ -257,14 +257,18 @@ function boardTruncation(board, read, perColumn) {
  *  state names follow, alphabetically. Terminal stages are dropped so the board is work only: a stage
  *  in the done or canceled slot, a stage the contract types completed or canceled, and any state the
  *  ticket itself carries a completed or canceled `state_type` for (Duplicate is canceled-typed and
- *  sits in no slot). `counts` covers every row; `byStage` lists the first `perColumn` per stage. */
+ *  sits in no slot). Terminal is judged per ticket, from the ticket's own `state_type` or its OWN
+ *  team's contract, never from a name blacklist: team A's open `Review` must survive team B's
+ *  completed `Review`. `counts` covers every row; `byStage` lists the first `perColumn` per stage. */
 function groupByStage(rows, doc, teamKey, perColumn) {
   const order = [];
   const seen = new Set();
   const terminal = new Set();
+  const terminalByTeam = new Map();
   for (const t of doc.teams ?? []) {
     if (teamKey && String(t.key ?? "").toUpperCase() !== teamKey.toUpperCase())
       continue;
+    const names = new Set();
     for (const slot of doc.slots ?? []) {
       const s = t.stages?.[slot];
       if (!s?.name) continue;
@@ -272,22 +276,30 @@ function groupByStage(rows, doc, teamKey, perColumn) {
         slot === "done" ||
         slot === "canceled" ||
         TERMINAL_TYPES.has(String(s.type ?? "").toLowerCase())
-      )
+      ) {
+        names.add(s.name);
         terminal.add(s.name);
-      else if (!seen.has(s.name)) {
+      } else if (!seen.has(s.name)) {
         seen.add(s.name);
         order.push(s.name);
       }
     }
+    terminalByTeam.set(String(t.key ?? "").toUpperCase(), names);
   }
   for (const r of rows)
     if (TERMINAL_TYPES.has(String(r.state_type ?? "").toLowerCase()))
       terminal.add(String(r.state ?? "unknown"));
+  const rowIsTerminal = (r) =>
+    TERMINAL_TYPES.has(String(r.state_type ?? "").toLowerCase()) ||
+    (terminalByTeam
+      .get(String(r.team_key ?? "").toUpperCase())
+      ?.has(String(r.state ?? "unknown")) ??
+      false);
   const counts = {};
   const byStage = {};
   for (const r of rows) {
     const state = String(r.state ?? "unknown");
-    if (terminal.has(state)) continue;
+    if (rowIsTerminal(r)) continue;
     counts[state] = (counts[state] ?? 0) + 1;
     const cards = (byStage[state] ??= []);
     if (cards.length >= perColumn) continue;
@@ -303,7 +315,7 @@ function groupByStage(rows, doc, teamKey, perColumn) {
   const extra = Object.keys(byStage)
     .filter((s) => !seen.has(s))
     .sort();
-  const stageOrder = [...order.filter((s) => !terminal.has(s)), ...extra];
+  const stageOrder = [...order, ...extra];
   return {
     stageOrder,
     counts: Object.fromEntries(stageOrder.map((s) => [s, counts[s] ?? 0])),
