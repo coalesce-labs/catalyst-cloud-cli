@@ -31,6 +31,7 @@ function setup(
     failTerminalEventOnce?: boolean;
     rejectTerminalArtifactOnce?: boolean;
     releaseRefusal?: string;
+    releaseResponseLostOnce?: boolean;
     rejectReceiptOnce?: boolean;
     rejectReceiptOnRetry?: boolean;
     keying?: "leading" | "trailing";
@@ -56,6 +57,7 @@ function setup(
   let terminalArtifactRejected = false;
   let receiptRejected = false;
   let receiptUploads = 0;
+  let releaseResponseLost = false;
   const doc = buildFixtureContract();
   doc.teams[0]!.key = "CTC";
   doc.ladder.keying = opts.keying ?? "trailing";
@@ -116,12 +118,19 @@ function setup(
           expiresAtMs: Date.now() + 900_000,
         },
       });
-    if (path === stageRoutes.release)
+    if (path === stageRoutes.release) {
+      if (opts.releaseResponseLostOnce && !releaseResponseLost) {
+        releaseResponseLost = true;
+        throw new Error("release response lost after commit");
+      }
+      if (opts.releaseResponseLostOnce)
+        return json({ reason: "invalid-lease-credential" }, 403);
       return json(
         opts.releaseRefusal
           ? { released: false, refusal: opts.releaseRefusal }
           : { released: true },
       );
+    }
     if (path === stageRoutes.renew)
       return json({
         renewed: true,
@@ -1110,5 +1119,64 @@ describe("stage local-phase wrapper", () => {
         "utf8",
       ),
     ).toContain("lease-secret");
+  });
+
+  test("a lost release response reconciles without republishing the terminal event", async () => {
+    const { home, ctx, calls } = setup("research", {
+      releaseResponseLostOnce: true,
+    });
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const artifact = join(home, "research.md");
+    const evidence = join(home, "evidence.json");
+    const bytes = Buffer.from("# Research\nVerified.\n");
+    writeFileSync(artifact, bytes);
+    writeFileSync(
+      evidence,
+      JSON.stringify({
+        artifactSha256: createHash("sha256").update(bytes).digest("hex"),
+      }),
+    );
+    expect(
+      await main(
+        [
+          "stage",
+          "done",
+          "CTC-5742",
+          "research",
+          "--artifact",
+          artifact,
+          "--evidence",
+          evidence,
+        ],
+        ctx,
+      ),
+    ).toBe(2);
+    const writes = calls.filter(
+      (call) => call.path === stageRoutes.artifact,
+    ).length;
+    const events = calls.filter(
+      (call) => call.path === stageRoutes.coordination,
+    ).length;
+    expect(await main(["stage", "done", "CTC-5742", "research"], ctx)).toBe(0);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.artifact),
+    ).toHaveLength(writes);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.coordination),
+    ).toHaveLength(events);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.release),
+    ).toHaveLength(2);
+    expect(() =>
+      readFileSync(
+        join(
+          home,
+          ".config",
+          "catalyst-cloud",
+          "local-stages",
+          "CTC-5742.json",
+        ),
+      ),
+    ).toThrow();
   });
 });

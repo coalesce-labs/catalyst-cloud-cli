@@ -48,6 +48,8 @@ interface LeaseState {
     sha256: string;
     /** An accepted write or ambiguous response permanently freezes this payload across retries. */
     committedOrAmbiguous?: boolean;
+    /** The terminal event was acknowledged; retries need only reconcile lease release. */
+    publicationAcknowledged?: boolean;
   };
   routes: Record<Route, string>;
 }
@@ -520,6 +522,36 @@ async function release(
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
 }
+async function finishTerminalRelease(
+  ctx: Ctx,
+  cfg: CustomerConfig,
+  state: LeaseState,
+  kind: "complete" | "failed",
+): Promise<void> {
+  try {
+    await release(ctx, cfg, state);
+  } catch (releaseError) {
+    if (!(
+      releaseError instanceof CliError &&
+      releaseError.code === "stage-dispossessed"
+    ))
+      throw new CliError(
+        `stage ${kind} landed but lease release is unconfirmed: ${String(releaseError)}; retry ${kind === "complete" ? "done" : "fail"} to reconcile release`,
+        "stage-release",
+      );
+    // The terminal event was acknowledged before release began. A stale credential proves this
+    // tenure no longer holds the lease, including when the first release succeeded but its reply
+    // was lost. Do not republish the terminal payload with that invalidated credential.
+    try {
+      unlinkSync(statePath(ctx.home, state.ticket));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+  ctx.stdout(
+    `${state.ticket}/${state.phase}: ${kind === "complete" ? "done" : "failed"}`,
+  );
+}
 function checkedArtifact(path: string, expectedName: string): Buffer {
   if (basename(path) !== expectedName)
     throw new UsageError(`artifact must be named ${expectedName}`);
@@ -926,6 +958,14 @@ async function terminal(
   kind: "complete" | "failed",
   args: ParsedArgs,
 ): Promise<void> {
+  if (state.terminalAttempt?.publicationAcknowledged === true) {
+    if (state.terminalAttempt.kind !== kind)
+      throw new UsageError(
+        "terminal publication already completed with the other outcome",
+      );
+    await finishTerminalRelease(ctx, cfg, state, kind);
+    return;
+  }
   const summary = flagString(args, "summary")?.trim();
   if (kind === "failed" && !summary)
     throw new UsageError("stage fail needs --summary <reason>");
@@ -1054,6 +1094,8 @@ async function terminal(
       summary ?? (kind === "complete" ? `${state.phase} completed` : undefined),
       artifactKey,
     );
+    state.terminalAttempt!.publicationAcknowledged = true;
+    saveState(ctx.home, state);
   } catch (err) {
     // A 400/413/422 before the receipt (or failure artifact) commits is a definite rejection. The
     // uploaded main artifact has no accepted receipt yet, so a corrected payload can replace it.
@@ -1095,17 +1137,7 @@ async function terminal(
       `stage ${kind} did not finish: ${String(failure)}; lease retained, retry ${kind === "complete" ? "done" : "fail"} or renew before expiry`,
       "stage-publish",
     );
-  try {
-    await release(ctx, cfg, state);
-  } catch (releaseError) {
-    throw new CliError(
-      `stage ${kind} landed but lease release failed: ${String(releaseError)}; retry ${kind === "complete" ? "done" : "fail"}`,
-      "stage-release",
-    );
-  }
-  ctx.stdout(
-    `${state.ticket}/${state.phase}: ${kind === "complete" ? "done" : "failed"}`,
-  );
+  await finishTerminalRelease(ctx, cfg, state, kind);
 }
 export async function cmdStage(args: ParsedArgs, ctx: Ctx): Promise<number> {
   const [verb, ticket, phase, ...extra] = positionals(args);
