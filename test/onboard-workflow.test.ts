@@ -275,9 +275,9 @@ function assertInstalled0165() {
     !declaration.dependencies ||
     typeof declaration.dependencies !== "object" ||
     !("@catalyst-cloud/sdk" in declaration.dependencies) ||
-    declaration.dependencies["@catalyst-cloud/sdk"] !== "0.16.5"
+    declaration.dependencies["@catalyst-cloud/sdk"] !== "0.16.6"
   )
-    throw new Error("CLI must declare the exact SDK 0.16.5 dependency");
+    throw new Error("CLI must declare the exact SDK 0.16.6 dependency");
   const require = createRequire(import.meta.url);
   const entry = require.resolve("@catalyst-cloud/sdk");
   const pkg: unknown = JSON.parse(
@@ -287,9 +287,9 @@ function assertInstalled0165() {
     !pkg ||
     typeof pkg !== "object" ||
     !("version" in pkg) ||
-    pkg.version !== "0.16.5"
+    pkg.version !== "0.16.6"
   )
-    throw new Error("actual installed SDK 0.16.5 required");
+    throw new Error("actual installed SDK 0.16.6 required");
 }
 
 describe("existing workflow wire truth", () => {
@@ -427,7 +427,7 @@ describe("actual installed HTTP SDK onboarding verifier", () => {
       expect(readFileSync(configPathFor(f.home))).toEqual(before);
     },
   );
-  test("actual SDK0.16.5 normal HTTP transport verifies only existing mapping, with zero apply/config writes", async () => {
+  test("actual SDK0.16.6 normal HTTP transport verifies only existing mapping, with zero apply/config writes", async () => {
     assertInstalled0165();
     resetSdkCache();
     const actual = await loadHttpSdk();
