@@ -62,7 +62,7 @@
     "@catalyst-cloud/sdk-replica-node": "0.16.6"
   },
   "devDependencies": {
-    "@catalyst-cloud/schema": "0.16.4",
+    "@catalyst-cloud/schema": "0.16.5",
     "@types/node": "^26.3.0",
     "@vitest/coverage-v8": "^4.1.11",
     "typescript": "^7.0.2",
