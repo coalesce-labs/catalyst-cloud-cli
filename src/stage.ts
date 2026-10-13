@@ -108,13 +108,18 @@ async function withStageLock<T>(
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       let staleOwner: string | undefined;
       let stalePid: number | undefined;
-      let stalePartial: { dev: number; ino: number; mtimeMs: number } | undefined;
+      let stalePartial:
+        { dev: number; ino: number; mtimeMs: number } | undefined;
       try {
         const holder = JSON.parse(readFileSync(path, "utf8")) as {
           owner?: string;
           pid?: number;
         };
-        if (typeof holder.owner === "string" && Number.isSafeInteger(holder.pid) && holder.pid! > 0) {
+        if (
+          typeof holder.owner === "string" &&
+          Number.isSafeInteger(holder.pid) &&
+          holder.pid! > 0
+        ) {
           try {
             process.kill(holder.pid!, 0);
           } catch (probe) {
@@ -130,12 +135,19 @@ async function withStageLock<T>(
         try {
           const stat = statSync(path);
           if (Date.now() - stat.mtimeMs > 5_000)
-            stalePartial = { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs };
+            stalePartial = {
+              dev: stat.dev,
+              ino: stat.ino,
+              mtimeMs: stat.mtimeMs,
+            };
         } catch {
           // The lock disappeared while we inspected it.
         }
       }
-      if ((staleOwner !== undefined || stalePartial !== undefined) && attempt === 0) {
+      if (
+        (staleOwner !== undefined || stalePartial !== undefined) &&
+        attempt === 0
+      ) {
         // Only one stale-lock recoverer may inspect and remove the old inode at a time. Without
         // this second exclusive lock, two readers can both see a dead PID and the second can
         // unlink the first reader's newly acquired live lock.
@@ -149,21 +161,38 @@ async function withStageLock<T>(
               // A process can die between the exclusive create and writing its owner record.
               // Leave a fresh partial write alone; an old one is safe to recover on retry.
               const recoveryStat = statSync(recoveryPath);
-              if (recoveryStat.size === 0 && Date.now() - recoveryStat.mtimeMs > 5_000) {
+              if (
+                recoveryStat.size === 0 &&
+                Date.now() - recoveryStat.mtimeMs > 5_000
+              ) {
                 unlinkSync(recoveryPath);
-                throw new CliError("stale recovery lock removed; retry", "stage-locked");
+                throw new CliError(
+                  "stale recovery lock removed; retry",
+                  "stage-locked",
+                );
               }
-              const recoverer = JSON.parse(readFileSync(recoveryPath, "utf8")) as {
+              const recoverer = JSON.parse(
+                readFileSync(recoveryPath, "utf8"),
+              ) as {
                 owner?: string;
                 pid?: number;
               };
-              if (typeof recoverer.owner === "string" && Number.isSafeInteger(recoverer.pid) && recoverer.pid! > 0) {
+              if (
+                typeof recoverer.owner === "string" &&
+                Number.isSafeInteger(recoverer.pid) &&
+                recoverer.pid! > 0
+              ) {
                 try {
                   process.kill(recoverer.pid!, 0);
                 } catch (probe) {
                   if ((probe as NodeJS.ErrnoException).code === "ESRCH") {
-                    const current = JSON.parse(readFileSync(recoveryPath, "utf8")) as typeof recoverer;
-                    if (current.owner === recoverer.owner && current.pid === recoverer.pid)
+                    const current = JSON.parse(
+                      readFileSync(recoveryPath, "utf8"),
+                    ) as typeof recoverer;
+                    if (
+                      current.owner === recoverer.owner &&
+                      current.pid === recoverer.pid
+                    )
                       unlinkSync(recoveryPath);
                   }
                 }
@@ -178,14 +207,22 @@ async function withStageLock<T>(
           );
         }
         try {
-          writeFileSync(recoveryFd, JSON.stringify({ owner, pid: process.pid }));
+          writeFileSync(
+            recoveryFd,
+            JSON.stringify({ owner, pid: process.pid }),
+          );
         } finally {
           closeSync(recoveryFd);
         }
         try {
           if (stalePartial !== undefined) {
             const stat = statSync(path);
-            if (stat.dev === stalePartial.dev && stat.ino === stalePartial.ino && stat.mtimeMs === stalePartial.mtimeMs && Date.now() - stat.mtimeMs > 5_000)
+            if (
+              stat.dev === stalePartial.dev &&
+              stat.ino === stalePartial.ino &&
+              stat.mtimeMs === stalePartial.mtimeMs &&
+              Date.now() - stat.mtimeMs > 5_000
+            )
               unlinkSync(path);
           } else {
             const current = JSON.parse(readFileSync(path, "utf8")) as {
@@ -196,7 +233,8 @@ async function withStageLock<T>(
               try {
                 process.kill(stalePid!, 0);
               } catch (probe) {
-                if ((probe as NodeJS.ErrnoException).code === "ESRCH") unlinkSync(path);
+                if ((probe as NodeJS.ErrnoException).code === "ESRCH")
+                  unlinkSync(path);
               }
             }
           }
@@ -738,7 +776,8 @@ async function start(
     await publishEvent(ctx, cfg, state, "started");
     // Under trailing keying, the accepted terminal receipt moves the card. A start event records
     // activity and timing but must not present unfinished work as a completed phase.
-    if (doc.ladder.keying === "leading") await moveCardToStage(ctx, cfg, doc, state);
+    if (doc.ladder.keying === "leading")
+      await moveCardToStage(ctx, cfg, doc, state);
   } catch (err) {
     if (err instanceof CliError && err.code === "stage-dispossessed") {
       try {
@@ -901,7 +940,8 @@ async function terminal(
     state.terminalAttempt = { kind, sha256: attemptSha256 };
     saveState(ctx.home, state);
   }
-  const priorAmbiguousAttempt = state.terminalAttempt.committedOrAmbiguous === true;
+  const priorAmbiguousAttempt =
+    state.terminalAttempt.committedOrAmbiguous === true;
   let authoritativeWriteInFlight = false;
   let artifactKey: string | undefined;
   let failure: unknown;
@@ -973,14 +1013,18 @@ async function terminal(
     if (
       !terminalCommitted &&
       !priorAmbiguousAttempt &&
-      (!state.terminalAttempt?.committedOrAmbiguous || authoritativeWriteInFlight) &&
+      (!state.terminalAttempt?.committedOrAmbiguous ||
+        authoritativeWriteInFlight) &&
       err instanceof CliError &&
       err.code === "stage-http" &&
       [400, 413, 422].includes(err.status ?? 0)
     ) {
       delete state.terminalAttempt;
       saveState(ctx.home, state);
-    } else if (state.terminalAttempt && !state.terminalAttempt.committedOrAmbiguous) {
+    } else if (
+      state.terminalAttempt &&
+      !state.terminalAttempt.committedOrAmbiguous
+    ) {
       // A transport failure might have committed the terminal write. A later definite rejection
       // cannot prove that earlier write did not land, so keep its digest fenced.
       state.terminalAttempt.committedOrAmbiguous = true;

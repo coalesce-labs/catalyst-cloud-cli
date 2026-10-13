@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { main } from "../src/cli";
@@ -127,7 +133,8 @@ function setup(
         status: 200,
       });
     if (path === stageRoutes.artifact) {
-      if (url.searchParams.get("name") === "relay-done.json") opts.onTerminalUpload?.(home);
+      if (url.searchParams.get("name") === "relay-done.json")
+        opts.onTerminalUpload?.(home);
       if (url.searchParams.get("name") === "relay-done.json") receiptUploads++;
       if (
         opts.rejectReceiptOnRetry &&
@@ -362,24 +369,70 @@ describe("stage local-phase wrapper", () => {
   test("a refused mismatch release retains the granted lease proof", async () => {
     const { home, ctx } = setup("plan", { releaseRefusal: "busy" });
     expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(2);
-    const state = JSON.parse(readFileSync(join(home, ".config", "catalyst-cloud", "local-stages", "CTC-5742.json"), "utf8"));
-    expect(state).toMatchObject({ phase: "plan", credential: "lease-secret", nonce: 7 });
+    const state = JSON.parse(
+      readFileSync(
+        join(
+          home,
+          ".config",
+          "catalyst-cloud",
+          "local-stages",
+          "CTC-5742.json",
+        ),
+        "utf8",
+      ),
+    );
+    expect(state).toMatchObject({
+      phase: "plan",
+      credential: "lease-secret",
+      nonce: 7,
+    });
   });
 
   test("a terminal receipt is fenced on disk before its network write", async () => {
     let fenced = false;
     const { home, ctx } = setup("research", {
       onTerminalUpload: (home) => {
-        const state = JSON.parse(readFileSync(join(home, ".config", "catalyst-cloud", "local-stages", "CTC-5742.json"), "utf8"));
+        const state = JSON.parse(
+          readFileSync(
+            join(
+              home,
+              ".config",
+              "catalyst-cloud",
+              "local-stages",
+              "CTC-5742.json",
+            ),
+            "utf8",
+          ),
+        );
         fenced = state.terminalAttempt?.committedOrAmbiguous === true;
       },
     });
     expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
-    const artifact = join(home, "research.md"), evidence = join(home, "evidence.json");
+    const artifact = join(home, "research.md"),
+      evidence = join(home, "evidence.json");
     const bytes = Buffer.from("# Research\nVerified.\n");
     writeFileSync(artifact, bytes);
-    writeFileSync(evidence, JSON.stringify({ artifactSha256: createHash("sha256").update(bytes).digest("hex") }));
-    expect(await main(["stage", "done", "CTC-5742", "research", "--artifact", artifact, "--evidence", evidence], ctx)).toBe(0);
+    writeFileSync(
+      evidence,
+      JSON.stringify({
+        artifactSha256: createHash("sha256").update(bytes).digest("hex"),
+      }),
+    );
+    expect(
+      await main(
+        [
+          "stage",
+          "done",
+          "CTC-5742",
+          "research",
+          "--artifact",
+          artifact,
+          "--evidence",
+          evidence,
+        ],
+        ctx,
+      ),
+    ).toBe(0);
     expect(fenced).toBe(true);
   });
 
@@ -491,13 +544,15 @@ describe("stage local-phase wrapper", () => {
   });
 
   test("leading workflow keying moves the card after the start event", async () => {
-    const { ctx, calls, issueStatePath } = setup("research", { keying: "leading" });
+    const { ctx, calls, issueStatePath } = setup("research", {
+      keying: "leading",
+    });
     expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
     const startedIndex = calls.findIndex(
       (call) =>
         call.path === stageRoutes.coordination &&
-        (call.body as { records?: { event_name?: string }[] }).records?.[0]?.event_name ===
-          "phase.research.started",
+        (call.body as { records?: { event_name?: string }[] }).records?.[0]
+          ?.event_name === "phase.research.started",
     );
     const moveIndex = calls.findIndex((call) => call.path === issueStatePath);
     expect(moveIndex).toBeGreaterThan(startedIndex);
@@ -672,9 +727,9 @@ describe("stage local-phase wrapper", () => {
     ).length;
     writeEvidence(Buffer.from("# Changed after receipt\n"));
     expect(await main(args, ctx)).toBe(1);
-    expect(calls.filter((call) => call.path === stageRoutes.artifact)).toHaveLength(
-      writesBeforeChangedRetry,
-    );
+    expect(
+      calls.filter((call) => call.path === stageRoutes.artifact),
+    ).toHaveLength(writesBeforeChangedRetry);
   });
 
   test("a second invocation cannot overwrite lease state during an active command", async () => {
@@ -714,7 +769,10 @@ describe("stage local-phase wrapper", () => {
       "local-stages",
       "CTC-5742.json.lock",
     );
-    writeFileSync(lock, JSON.stringify({ owner: "dead-owner", pid: 99_999_999 }));
+    writeFileSync(
+      lock,
+      JSON.stringify({ owner: "dead-owner", pid: 99_999_999 }),
+    );
     writeFileSync(`${lock}.recovery`, "another recoverer");
     const renew = [
       "stage",
@@ -725,19 +783,42 @@ describe("stage local-phase wrapper", () => {
       "still working",
     ];
     expect(await main(renew, ctx)).toBe(2);
-    expect(calls.filter((call) => call.path === stageRoutes.renew)).toHaveLength(0);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.renew),
+    ).toHaveLength(0);
     unlinkSync(`${lock}.recovery`);
     expect(await main(renew, ctx)).toBe(0);
-    expect(calls.filter((call) => call.path === stageRoutes.renew)).toHaveLength(1);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.renew),
+    ).toHaveLength(1);
   });
 
   test("a dead recovery lock can be reclaimed on a later invocation", async () => {
     const { home, ctx } = setup();
     expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
-    const lock = join(home, ".config", "catalyst-cloud", "local-stages", "CTC-5742.json.lock");
-    writeFileSync(lock, JSON.stringify({ owner: "dead-owner", pid: 99_999_999 }));
-    writeFileSync(`${lock}.recovery`, JSON.stringify({ owner: "dead-recoverer", pid: 99_999_999 }));
-    const renew = ["stage", "renew", "CTC-5742", "research", "--assertion", "still working"];
+    const lock = join(
+      home,
+      ".config",
+      "catalyst-cloud",
+      "local-stages",
+      "CTC-5742.json.lock",
+    );
+    writeFileSync(
+      lock,
+      JSON.stringify({ owner: "dead-owner", pid: 99_999_999 }),
+    );
+    writeFileSync(
+      `${lock}.recovery`,
+      JSON.stringify({ owner: "dead-recoverer", pid: 99_999_999 }),
+    );
+    const renew = [
+      "stage",
+      "renew",
+      "CTC-5742",
+      "research",
+      "--assertion",
+      "still working",
+    ];
     expect(await main(renew, ctx)).toBe(2);
     expect(await main(renew, ctx)).toBe(0);
   });
@@ -745,11 +826,31 @@ describe("stage local-phase wrapper", () => {
   test("an old partial stage lock left by a killed process is recoverable", async () => {
     const { home, ctx, calls } = setup();
     expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
-    const lock = join(home, ".config", "catalyst-cloud", "local-stages", "CTC-5742.json.lock");
+    const lock = join(
+      home,
+      ".config",
+      "catalyst-cloud",
+      "local-stages",
+      "CTC-5742.json.lock",
+    );
     writeFileSync(lock, "{");
     utimesSync(lock, new Date(0), new Date(0));
-    expect(await main(["stage", "renew", "CTC-5742", "research", "--assertion", "still working"], ctx)).toBe(0);
-    expect(calls.filter((call) => call.path === stageRoutes.renew)).toHaveLength(1);
+    expect(
+      await main(
+        [
+          "stage",
+          "renew",
+          "CTC-5742",
+          "research",
+          "--assertion",
+          "still working",
+        ],
+        ctx,
+      ),
+    ).toBe(0);
+    expect(
+      calls.filter((call) => call.path === stageRoutes.renew),
+    ).toHaveLength(1);
   });
 
   test("rejects malformed plan scope before publishing the artifact", async () => {
