@@ -26,6 +26,7 @@ function setup(
     rejectTerminalArtifactOnce?: boolean;
     releaseRefusal?: string;
     rejectReceiptOnce?: boolean;
+    rejectReceiptOnRetry?: boolean;
   } = {},
 ) {
   const home = tempHome();
@@ -46,6 +47,7 @@ function setup(
   let terminalEventFailed = false;
   let terminalArtifactRejected = false;
   let receiptRejected = false;
+  let receiptUploads = 0;
   const doc = buildFixtureContract();
   doc.teams[0]!.key = "CTC";
   doc.routes = [
@@ -122,6 +124,13 @@ function setup(
         status: 200,
       });
     if (path === stageRoutes.artifact) {
+      if (url.searchParams.get("name") === "relay-done.json") receiptUploads++;
+      if (
+        opts.rejectReceiptOnRetry &&
+        url.searchParams.get("name") === "relay-done.json" &&
+        receiptUploads === 2
+      )
+        return json({ reason: "invalid_receipt_body" }, 400);
       if (
         opts.rejectReceiptOnce &&
         url.searchParams.get("name") === "relay-done.json" &&
@@ -584,6 +593,46 @@ describe("stage local-phase wrapper", () => {
       }),
     );
     expect(await main(args, ctx)).toBe(0);
+  });
+
+  test("a rejected retry cannot unfreeze a receipt accepted in an earlier invocation", async () => {
+    const { home, ctx, calls } = setup("research", {
+      failTerminalEventOnce: true,
+      rejectReceiptOnRetry: true,
+    });
+    expect(await main(["stage", "start", "CTC-5742", "research"], ctx)).toBe(0);
+    const artifact = join(home, "research.md"),
+      evidence = join(home, "evidence.json");
+    const writeEvidence = (bytes: Buffer) => {
+      writeFileSync(artifact, bytes);
+      writeFileSync(
+        evidence,
+        JSON.stringify({
+          artifactSha256: createHash("sha256").update(bytes).digest("hex"),
+        }),
+      );
+    };
+    writeEvidence(Buffer.from("# Original\n"));
+    const args = [
+      "stage",
+      "done",
+      "CTC-5742",
+      "research",
+      "--artifact",
+      artifact,
+      "--evidence",
+      evidence,
+    ];
+    expect(await main(args, ctx)).toBe(2);
+    expect(await main(args, ctx)).toBe(2);
+    const writesBeforeChangedRetry = calls.filter(
+      (call) => call.path === stageRoutes.artifact,
+    ).length;
+    writeEvidence(Buffer.from("# Changed after receipt\n"));
+    expect(await main(args, ctx)).toBe(1);
+    expect(calls.filter((call) => call.path === stageRoutes.artifact)).toHaveLength(
+      writesBeforeChangedRetry,
+    );
   });
 
   test("a second invocation cannot overwrite lease state during an active command", async () => {

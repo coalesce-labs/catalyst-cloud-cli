@@ -42,7 +42,12 @@ interface LeaseState {
   node: string;
   expiresAtMs: number;
   priorDir?: string;
-  terminalAttempt?: { kind: "complete" | "failed"; sha256: string };
+  terminalAttempt?: {
+    kind: "complete" | "failed";
+    sha256: string;
+    /** An accepted write or ambiguous response permanently freezes this payload across retries. */
+    committedOrAmbiguous?: boolean;
+  };
   routes: Record<Route, string>;
 }
 
@@ -847,6 +852,8 @@ async function terminal(
         "application/json",
       );
       terminalCommitted = true;
+      state.terminalAttempt!.committedOrAmbiguous = true;
+      saveState(ctx.home, state);
     } else {
       artifactKey = await publishArtifact(
         ctx,
@@ -856,6 +863,8 @@ async function terminal(
         terminalBytes,
       );
       terminalCommitted = true;
+      state.terminalAttempt!.committedOrAmbiguous = true;
+      saveState(ctx.home, state);
     }
     await publishEvent(
       ctx,
@@ -871,11 +880,17 @@ async function terminal(
     // A lost response or any rejection after the terminal authority is committed keeps the digest.
     if (
       !terminalCommitted &&
+      !state.terminalAttempt?.committedOrAmbiguous &&
       err instanceof CliError &&
       err.code === "stage-http" &&
       [400, 413, 422].includes(err.status ?? 0)
     ) {
       delete state.terminalAttempt;
+      saveState(ctx.home, state);
+    } else if (state.terminalAttempt && !state.terminalAttempt.committedOrAmbiguous) {
+      // A transport failure might have committed the terminal write. A later definite rejection
+      // cannot prove that earlier write did not land, so keep its digest fenced.
+      state.terminalAttempt.committedOrAmbiguous = true;
       saveState(ctx.home, state);
     }
     failure = err;
