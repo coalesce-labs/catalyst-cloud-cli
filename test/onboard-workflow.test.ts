@@ -264,7 +264,7 @@ function fixture(
     contract,
   };
 }
-function assertInstalled0165() {
+function assertInstalled0166() {
   const declaration: unknown = JSON.parse(
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   );
@@ -428,7 +428,7 @@ describe("actual installed HTTP SDK onboarding verifier", () => {
     },
   );
   test("actual SDK0.16.6 normal HTTP transport verifies only existing mapping, with zero apply/config writes", async () => {
-    assertInstalled0165();
+    assertInstalled0166();
     resetSdkCache();
     const actual = await loadHttpSdk();
     expect(typeof actual.createTenantClient).toBe("function");
@@ -602,7 +602,7 @@ describe("actual installed HTTP SDK onboarding verifier", () => {
 });
 
 test("actual native 30s body deadline joins real cancel/socket closure and held cleanup ACK before canonical unlock", async () => {
-  assertInstalled0165();
+  assertInstalled0166();
   const f = fixture(),
     entered = deferred<void>(),
     cancelled = deferred<void>(),
