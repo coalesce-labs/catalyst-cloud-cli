@@ -2,7 +2,7 @@
 
 ## 0.16.15
 
-Command-line workflows can report stage progress with `catalyst stage start`, `renew`, `done`, and `fail`. Retries reuse the same stage attempt.
+Command-line workflows can report stage progress with `catalyst stage start`, `renew`, `done`, and `fail`, and choose an eligible AI account and model for a local session with `catalyst seat checkout`. Retries reuse the same stage attempt.
 
 ## 0.16.14
 
