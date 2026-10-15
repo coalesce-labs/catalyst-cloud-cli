@@ -73,6 +73,9 @@ export interface FixtureServer {
    *  table: the person is signed in but has no workspace behind them, so the cloud refuses with
    *  403 `jwt-org-unmapped` on the identity read. */
   meRefusal?: { status: number; body: unknown };
+  /** CTC-5871 — when set, an agent write POST answers what this returns (after it is recorded in
+   *  `writes`); `undefined` falls through to the default 200. */
+  agentWriteReply?: (name: string, body: unknown) => { status: number; body: unknown } | undefined;
   writes: RecordedRequest[];
   requests: RecordedRequest[];
   /** Override the issue list the read routes serve. */
@@ -1446,6 +1449,8 @@ export async function startMeFixture(
       }
       state.writes.push({ method: "POST", path, headers: req.headers, body });
       const name = path.split("/").at(-1);
+      const reply = state.agentWriteReply?.(name ?? "", body);
+      if (reply) return send(reply.status, reply.body);
       if (name === "ticket-release") {
         const r = state.release ?? {
           status: 200,
