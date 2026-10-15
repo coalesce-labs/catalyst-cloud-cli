@@ -1,4 +1,5 @@
 import { cmdHosts, type HostsDeps } from "./hosts.js";
+import { cmdSeat } from "./seat.js";
 // cli.ts — the `catalyst` dispatcher (npm: @catalyst-cloud/cli). Verbs live in
 // their own modules; this file keeps every export the 0.1 tests and the bin import.
 import {
@@ -204,6 +205,7 @@ export function usageText(): string {
     "  catalyst onboard [--resume-from <step>] [--only <step>] [--runner|--no-runner] [--yes] [--dry-run] [--json]",
     `  catalyst ${SETUP_USAGE}`,
     "  catalyst status | notice | me | ready | accounts",
+    "  catalyst seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE]",
     "  catalyst hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name>",
     "  catalyst mcp add|list|remove (vault references only)",
     "  catalyst contract [--refresh] [--path <a.b.c>]",
@@ -719,6 +721,8 @@ export async function main(
         return await cmdMcp(args, ctx);
       case "accounts":
         return await cmdAccounts(args, ctx);
+      case "seat":
+        return await cmdSeat(args, ctx);
       case "release":
         return await cmdRelease(args, ctx);
       case "stage":
