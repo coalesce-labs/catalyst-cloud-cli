@@ -1,12 +1,13 @@
 // write.ts — writes to Linear as the app actor through the agent proxy. Every route path comes from
 // the contract's route table (never a literal); every stage id from `teams[].stages` by slot; every
 // label id from `teams[].labels`; the bookkeeping marker from `vocabulary`. `delegate` is never offered.
+// A label the contract does not know goes by its name in `labelNames` unless it is a UUID (CTC-5871).
 import { readFileSync } from "node:fs";
 import { flagBool, flagInt, flagList, flagString, positionals, type ParsedArgs } from "./args.js";
 import { requireConfig, type Ctx, type CustomerConfig } from "./config.js";
 import { bookkeepingPrefix, labelId, loadContract, routePath, stageIdForSlot, teamByKey, teamForTicket } from "./contract.js";
-import type { TenantContract } from "./contract-types.js";
-import { CliError, UsageError } from "./errors.js";
+import type { ContractTeam, TenantContract } from "./contract-types.js";
+import { CliError, MeError, UsageError } from "./errors.js";
 import { apiClient, type ApiClient } from "./transport.js";
 
 export interface WriteDeps {
@@ -83,10 +84,37 @@ export function firstStateOfType(states: WorkflowState[], teamId: string, type: 
   return hit;
 }
 
-/** Post to a contract route by name; a budget refusal names the contract's daily budget. */
+// The shape the mirror refuses in `labelIds` (CTC-5566): Linear label ids are UUIDs.
+const LABEL_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** CTC-5871 — `--label`/`--add`/`--remove` values split for the route: a contract-known name becomes its
+ *  preferred id, a UUID passes through as an id, and anything else is a name the mirror resolves. */
+export function labelFields(team: ContractTeam, values: string[]): { labelIds?: string[]; labelNames?: string[] } {
+  const ids: string[] = [];
+  const names: string[] = [];
+  for (const value of values) {
+    const resolved = labelId(team, value);
+    if (resolved !== value || LABEL_ID_SHAPE.test(value)) ids.push(resolved);
+    else names.push(value);
+  }
+  return { ...(ids.length ? { labelIds: ids } : {}), ...(names.length ? { labelNames: names } : {}) };
+}
+
+/** Post to a contract route by name; a budget refusal names the contract's daily budget. A 2xx whose body
+ *  says the write failed (issue-label answers a batch of failed items with 200) is a failure too. */
 export async function postAgent<T = { id?: string }>(api: ApiClient, doc: TenantContract, routeName: string, body: unknown): Promise<T> {
   try {
     const res = await api.postJson<T>(routePath(doc, routeName), body);
+    const outcome = res.body && typeof res.body === "object" ? (res.body as { outcome?: unknown }).outcome : undefined;
+    if (outcome === "failed" || outcome === "rejected" || outcome === "exhausted") {
+      const reason = (res.body as { reason?: unknown }).reason;
+      throw new CliError(
+        `POST ${routePath(doc, routeName)} answered ${res.status} with outcome "${outcome}"${typeof reason === "string" && reason ? `: ${reason}` : ""}`,
+        "write-failed",
+        2,
+        res.status,
+      );
+    }
     return res.body;
   } catch (err) {
     if (err instanceof CliError && err.code === "budget") {
@@ -102,6 +130,25 @@ export async function postAgent<T = { id?: string }>(api: ApiClient, doc: Tenant
 }
 
 export async function cmdWrite(args: ParsedArgs, ctx: Ctx, deps: WriteDeps = {}): Promise<number> {
+  try {
+    return await runWrite(args, ctx, deps);
+  } catch (err) {
+    // CTC-5871 — a script reading --json stdout learns the write failed; the dispatcher still prints
+    // the reason on stderr and returns the error's exit code.
+    if (args.json && (err instanceof CliError || err instanceof MeError)) {
+      ctx.stdout(
+        JSON.stringify({
+          ok: false,
+          command: `write ${positionals(args)[0] ?? ""}`.trim(),
+          error: { code: err instanceof CliError ? err.code : err.kind, message: err.message, ...(err.status !== undefined ? { status: err.status } : {}) },
+        }),
+      );
+    }
+    throw err;
+  }
+}
+
+async function runWrite(args: ParsedArgs, ctx: Ctx, deps: WriteDeps): Promise<number> {
   const [sub, ...rest] = positionals(args);
   if (!sub) throw new UsageError("write needs a subcommand: comment | state | label | create | reaction | attachment | session");
   const cfg = requireConfig(ctx);
@@ -149,8 +196,8 @@ export async function cmdWrite(args: ParsedArgs, ctx: Ctx, deps: WriteDeps = {})
       const issue = await resolveIssue(api, ticket);
       const team = teamForTicket(doc, issue.identifier);
       const results: unknown[] = [];
-      if (add.length) results.push(await postAgent(api, doc, "issue-label", { issueId: issue.id, labelIds: add.map((n) => labelId(team, n)), mode: "add" }));
-      if (remove.length) results.push(await postAgent(api, doc, "issue-label", { issueId: issue.id, labelIds: remove.map((n) => labelId(team, n)), mode: "remove" }));
+      if (add.length) results.push(await postAgent(api, doc, "issue-label", { issueId: issue.id, ...labelFields(team, add), mode: "add" }));
+      if (remove.length) results.push(await postAgent(api, doc, "issue-label", { issueId: issue.id, ...labelFields(team, remove), mode: "remove" }));
       result = results.length === 1 ? results[0] : results;
       break;
     }
@@ -165,13 +212,13 @@ export async function cmdWrite(args: ParsedArgs, ctx: Ctx, deps: WriteDeps = {})
         if (!description) throw new UsageError("write create --stdin read an empty description");
       }
       const team = teamByKey(doc, teamKey);
-      const labels = flagList(args, "label").map((n) => labelId(team, n));
+      const labels = labelFields(team, flagList(args, "label"));
       const priority = flagString(args, "priority") !== undefined ? flagInt(args, "priority", 0) : undefined;
       result = await postAgent(api, doc, "issue-create", {
         teamId: team.id,
         title,
         ...(description ? { description } : {}),
-        ...(labels.length ? { labelIds: labels } : {}),
+        ...labels,
         ...(priority !== undefined ? { priority } : {}),
         ...(asUser ? { createAsUser: true } : {}),
       });

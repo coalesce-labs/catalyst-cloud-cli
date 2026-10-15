@@ -25,6 +25,7 @@ beforeEach(async () => {
   ctx = makeCtx(home);
   server.writes.length = 0;
   server.budgetExhausted = false;
+  server.agentWriteReply = undefined;
   server.issues = fixtureIssues();
   await seedJoined(home, server);
 });
@@ -63,10 +64,10 @@ describe("write", () => {
     expect(await main(["write", "state", "ENG-1", "--state-type", "frozen"], makeCtx(home))).toBe(2);
   });
   test("label --add <name> posts the resolved id; --remove posts a second call; an absent label refuses", async () => {
-    expect(await main(["write", "label", "ENG-1", "--add", "catalyst-ask", "--remove", "some-raw-id"], ctx)).toBe(0);
+    expect(await main(["write", "label", "ENG-1", "--add", "catalyst-ask", "--remove", LABEL_UUID], ctx)).toBe(0);
     expect(server.writes.map((w) => w.body)).toEqual([
       { issueId: "lin-eng-1", labelIds: ["label-ask-unscoped"], mode: "add" },
-      { issueId: "lin-eng-1", labelIds: ["some-raw-id"], mode: "remove" },
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], mode: "remove" },
     ]);
     expect(await main(["write", "label", "ENG-1"], makeCtx(home))).toBe(1);
     const c = makeCtx(home);
@@ -109,6 +110,95 @@ describe("write", () => {
     expect(code).toBe(0);
     expect(server.writes).toHaveLength(1);
     expect(server.writes[0]!.headers.authorization).toBe("Bearer fixture-user-key");
+  });
+});
+
+// CTC-5871 — the mirror's own rule (CTC-5566): a labelIds entry that is not a UUID is a 400 naming
+// labelNames. The mock answers exactly that, so the pre-fix CLI (every value in labelIds) goes red here.
+const LABEL_UUID = "0f8e5a3c-1b2d-4c6e-9a7b-3d5f7e9a1c2b";
+const MIRROR_LABEL_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function mirrorLabelRule(name: string, body: unknown): { status: number; body: unknown } | undefined {
+  if (name !== "issue-label" && name !== "issue-create") return undefined;
+  // The fixture contract's preferred ids (`label-…`) stand in for the UUIDs a real contract carries.
+  const ids = ((body as { labelIds?: string[] }).labelIds ?? []).filter((id) => !MIRROR_LABEL_ID_SHAPE.test(id) && !id.startsWith("label-"));
+  if (ids.length === 0) return undefined;
+  return { status: 400, body: { outcome: "rejected", reason: `labelIds entry "${ids[0]}" is not a label ID (a UUID); send a label by its name in labelNames` } };
+}
+
+describe("write labels by name or id (CTC-5871)", () => {
+  beforeEach(() => {
+    server.agentWriteReply = mirrorLabelRule;
+  });
+  test("create --label Bug sends Bug in labelNames and succeeds", async () => {
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--priority", "4", "--label", "Bug", "--description", "d", "--json"], ctx)).toBe(0);
+    expect(server.writes[0]!.body).toEqual({ teamId: "team-eng", title: "T", description: "d", labelNames: ["Bug"], priority: 4 });
+    expect(JSON.parse(ctx.out.join("\n"))).toMatchObject({ id: "lin-issue-create-1" });
+  });
+  test("label --add Bug sends Bug in labelNames; --remove Bug does the same with mode remove", async () => {
+    expect(await main(["write", "label", "ENG-1", "--add", "Bug", "--remove", "Feature"], ctx)).toBe(0);
+    expect(server.writes.map((w) => w.body)).toEqual([
+      { issueId: "lin-eng-1", labelNames: ["Bug"], mode: "add" },
+      { issueId: "lin-eng-1", labelNames: ["Feature"], mode: "remove" },
+    ]);
+    expect(ctx.out).toEqual(["label: ok"]);
+  });
+  test("a UUID goes in labelIds on create, add and remove", async () => {
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--label", LABEL_UUID.toUpperCase()], ctx)).toBe(0);
+    expect(server.writes[0]!.body).toEqual({ teamId: "team-eng", title: "T", labelIds: [LABEL_UUID.toUpperCase()] });
+    expect(await main(["write", "label", "ENG-1", "--add", LABEL_UUID, "--remove", LABEL_UUID], makeCtx(home))).toBe(0);
+    expect(server.writes.slice(1).map((w) => w.body)).toEqual([
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], mode: "add" },
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], mode: "remove" },
+    ]);
+  });
+  test("mixed values split: contract-known name → its id, UUID → labelIds, other names → labelNames", async () => {
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--label", "Bug", "--label", "catalyst-ask", "--label", LABEL_UUID, "--label", "Customer"], ctx)).toBe(0);
+    expect(server.writes[0]!.body).toEqual({
+      teamId: "team-eng",
+      title: "T",
+      labelIds: ["label-ask-unscoped", LABEL_UUID],
+      labelNames: ["Bug", "Customer"],
+    });
+    expect(await main(["write", "label", "ENG-1", "--add", "catalyst-ask", "--add", "Bug", "--remove", LABEL_UUID, "--remove", "Feature"], makeCtx(home))).toBe(0);
+    expect(server.writes.slice(1).map((w) => w.body)).toEqual([
+      { issueId: "lin-eng-1", labelIds: ["label-ask-unscoped"], labelNames: ["Bug"], mode: "add" },
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], labelNames: ["Feature"], mode: "remove" },
+    ]);
+  });
+  test("a rejected create exits 2; --json prints one JSON error object on stdout and keeps stderr", async () => {
+    server.agentWriteReply = () => ({ status: 400, body: { outcome: "rejected", reason: "label Bug is not in team ENG" } });
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--label", "Bug", "--json"], ctx)).toBe(2);
+    expect(ctx.out).toHaveLength(1);
+    expect(JSON.parse(ctx.out[0]!)).toEqual({
+      ok: false,
+      command: "write create",
+      error: { code: "http", status: 400, message: `POST ${FIXTURE_ROUTE_PREFIX}/issue-create failed (400): label Bug is not in team ENG` },
+    });
+    expect(ctx.err.join("\n")).toMatch(/issue-create failed \(400\): label Bug is not in team ENG/);
+    const human = makeCtx(home);
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--label", "Bug"], human)).toBe(2);
+    expect(human.out).toEqual([]);
+    expect(human.err.join("\n")).toMatch(/issue-create failed \(400\)/);
+  });
+  test("a rejected add or remove exits 2 with a JSON error on stdout", async () => {
+    server.agentWriteReply = (name, body) => ((body as { mode?: string }).mode === "remove" ? { status: 400, body: { outcome: "rejected", reason: "no such label" } } : undefined);
+    expect(await main(["write", "label", "ENG-1", "--add", "Bug", "--remove", "Nope", "--json"], ctx)).toBe(2);
+    expect(server.writes).toHaveLength(2);
+    expect(ctx.out).toHaveLength(1);
+    expect(JSON.parse(ctx.out[0]!)).toMatchObject({ ok: false, command: "write label", error: { code: "http", status: 400 } });
+    server.agentWriteReply = () => ({ status: 400, body: { outcome: "rejected", reason: "no such label" } });
+    const c = makeCtx(home);
+    expect(await main(["write", "label", "ENG-1", "--add", "Bug", "--json"], c)).toBe(2);
+    expect(JSON.parse(c.out[0]!)).toMatchObject({ ok: false, command: "write label", error: { message: expect.stringMatching(/no such label/) } });
+  });
+  test("a 200 whose body says the label write failed still exits 2", async () => {
+    server.agentWriteReply = () => ({ status: 200, body: { outcome: "failed", code: "operation_failed", reason: "one or more label writes failed", results: [] } });
+    const c = makeCtx(home);
+    expect(await main(["write", "label", "ENG-1", "--add", "Bug", "--json"], c)).toBe(2);
+    expect(JSON.parse(c.out[0]!)).toMatchObject({ ok: false, error: { code: "write-failed", status: 200, message: expect.stringMatching(/one or more label writes failed/) } });
+    const h = makeCtx(home);
+    expect(await main(["write", "label", "ENG-1", "--remove", "Bug"], h)).toBe(2);
+    expect(h.err.join("\n")).toMatch(/outcome "failed"/);
   });
 });
 
