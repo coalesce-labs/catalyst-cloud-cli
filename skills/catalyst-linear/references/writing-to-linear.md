@@ -26,9 +26,9 @@ Every write spends one unit of the per-host daily budget (`thresholds.hostDailyW
 
 `--slot <slot>` resolves to the team's live state id from the contract, and refuses when the slot is unmapped or its state is gone (re-map first: `catalyst team map <KEY>`). Moving to `dispatch` dispatches work. `--state-type backlog` resolves the team's first backlog-type state and parks the card, stopping remediation rounds. Names are display fields that survive re-imports while ids do not, so there is no move by name.
 
-## Labels are by contract id
+## Labels are by name or UUID
 
-A name the contract lists for the team (the ask marker, the hold label, the release label) resolves to that team's preferred id; when the workspace has no such label the CLI refuses rather than inventing one. Any other value is sent as a label id as given, so a label outside Catalyst's own set needs its id, which the ticket record's `labels[]` shows.
+`--label`, `--add` and `--remove` take a label's name or its UUID. A UUID is sent as a label id; every other value is sent as a name, and the proxy resolves it in the ticket's team. When the contract lists one of Catalyst's own labels (the ask marker, the hold label, the release label) as absent from the workspace, the CLI refuses rather than inventing it.
 
 Two labels are a human's, not yours: the release label (which frees a ticket the shape detector held) is applied by a human; the hold labels on a pull request are `catalyst-github`'s subject.
 
