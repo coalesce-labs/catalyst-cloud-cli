@@ -63,10 +63,10 @@ describe("write", () => {
     expect(c.err.join("\n")).toMatch(/not mapped/);
     expect(await main(["write", "state", "ENG-1", "--state-type", "frozen"], makeCtx(home))).toBe(2);
   });
-  test("label --add <name> posts the resolved id; --remove posts a second call; an absent label refuses", async () => {
+  test("label --add <name> posts the name; --remove posts a second call; an absent label refuses", async () => {
     expect(await main(["write", "label", "ENG-1", "--add", "catalyst-ask", "--remove", LABEL_UUID], ctx)).toBe(0);
     expect(server.writes.map((w) => w.body)).toEqual([
-      { issueId: "lin-eng-1", labelIds: ["label-ask-unscoped"], mode: "add" },
+      { issueId: "lin-eng-1", labelNames: ["catalyst-ask"], mode: "add" },
       { issueId: "lin-eng-1", labelIds: [LABEL_UUID], mode: "remove" },
     ]);
     expect(await main(["write", "label", "ENG-1"], makeCtx(home))).toBe(1);
@@ -76,7 +76,7 @@ describe("write", () => {
   });
   test("create, reaction, attachment and session post their bodies", async () => {
     expect(await main(["write", "create", "--team", "ENG", "--title", "New", "--label", "catalyst-ask", "--priority", "2"], ctx)).toBe(0);
-    expect(server.writes[0]!.body).toEqual({ teamId: "team-eng", title: "New", labelIds: ["label-ask-unscoped"], priority: 2 });
+    expect(server.writes[0]!.body).toEqual({ teamId: "team-eng", title: "New", labelNames: ["catalyst-ask"], priority: 2 });
     expect(await main(["write", "reaction", "ENG-1", "--emoji", "👀"], makeCtx(home))).toBe(0);
     expect(server.writes[1]!.body).toEqual({ emoji: "👀", issueId: "lin-eng-1" });
     expect(await main(["write", "reaction", "--comment", "c-9", "--emoji", "👍"], makeCtx(home))).toBe(0);
@@ -119,8 +119,7 @@ const LABEL_UUID = "0f8e5a3c-1b2d-4c6e-9a7b-3d5f7e9a1c2b";
 const MIRROR_LABEL_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function mirrorLabelRule(name: string, body: unknown): { status: number; body: unknown } | undefined {
   if (name !== "issue-label" && name !== "issue-create") return undefined;
-  // The fixture contract's preferred ids (`label-…`) stand in for the UUIDs a real contract carries.
-  const ids = ((body as { labelIds?: string[] }).labelIds ?? []).filter((id) => !MIRROR_LABEL_ID_SHAPE.test(id) && !id.startsWith("label-"));
+  const ids = ((body as { labelIds?: string[] }).labelIds ?? []).filter((id) => !MIRROR_LABEL_ID_SHAPE.test(id));
   if (ids.length === 0) return undefined;
   return { status: 400, body: { outcome: "rejected", reason: `labelIds entry "${ids[0]}" is not a label ID (a UUID); send a label by its name in labelNames` } };
 }
@@ -151,18 +150,27 @@ describe("write labels by name or id (CTC-5871)", () => {
       { issueId: "lin-eng-1", labelIds: [LABEL_UUID], mode: "remove" },
     ]);
   });
-  test("mixed values split: contract-known name → its id, UUID → labelIds, other names → labelNames", async () => {
+  test("a contract-known name goes in labelNames on create, add and remove", async () => {
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--label", "catalyst-ask"], ctx)).toBe(0);
+    expect(server.writes[0]!.body).toEqual({ teamId: "team-eng", title: "T", labelNames: ["catalyst-ask"] });
+    expect(await main(["write", "label", "ENG-1", "--add", "catalyst-ask", "--remove", "catalyst-ask"], makeCtx(home))).toBe(0);
+    expect(server.writes.slice(1).map((w) => w.body)).toEqual([
+      { issueId: "lin-eng-1", labelNames: ["catalyst-ask"], mode: "add" },
+      { issueId: "lin-eng-1", labelNames: ["catalyst-ask"], mode: "remove" },
+    ]);
+  });
+  test("mixed values split: UUID → labelIds, every name (contract-known or not) → labelNames", async () => {
     expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--label", "Bug", "--label", "catalyst-ask", "--label", LABEL_UUID, "--label", "Customer"], ctx)).toBe(0);
     expect(server.writes[0]!.body).toEqual({
       teamId: "team-eng",
       title: "T",
-      labelIds: ["label-ask-unscoped", LABEL_UUID],
-      labelNames: ["Bug", "Customer"],
+      labelIds: [LABEL_UUID],
+      labelNames: ["Bug", "catalyst-ask", "Customer"],
     });
-    expect(await main(["write", "label", "ENG-1", "--add", "catalyst-ask", "--add", "Bug", "--remove", LABEL_UUID, "--remove", "Feature"], makeCtx(home))).toBe(0);
+    expect(await main(["write", "label", "ENG-1", "--add", "catalyst-ask", "--add", "Bug", "--add", LABEL_UUID, "--remove", LABEL_UUID, "--remove", "catalyst-ask", "--remove", "Feature"], makeCtx(home))).toBe(0);
     expect(server.writes.slice(1).map((w) => w.body)).toEqual([
-      { issueId: "lin-eng-1", labelIds: ["label-ask-unscoped"], labelNames: ["Bug"], mode: "add" },
-      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], labelNames: ["Feature"], mode: "remove" },
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], labelNames: ["catalyst-ask", "Bug"], mode: "add" },
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], labelNames: ["catalyst-ask", "Feature"], mode: "remove" },
     ]);
   });
   test("a rejected create exits 2; --json prints one JSON error object on stdout and keeps stderr", async () => {

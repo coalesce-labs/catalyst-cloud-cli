@@ -1,7 +1,7 @@
 // write.ts — writes to Linear as the app actor through the agent proxy. Every route path comes from
 // the contract's route table (never a literal); every stage id from `teams[].stages` by slot; every
 // label id from `teams[].labels`; the bookkeeping marker from `vocabulary`. `delegate` is never offered.
-// A label the contract does not know goes by its name in `labelNames` unless it is a UUID (CTC-5871).
+// A label goes by its name in `labelNames` unless the value itself is a UUID (CTC-5871).
 import { readFileSync } from "node:fs";
 import { flagBool, flagInt, flagList, flagString, positionals, type ParsedArgs } from "./args.js";
 import { requireConfig, type Ctx, type CustomerConfig } from "./config.js";
@@ -87,15 +87,19 @@ export function firstStateOfType(states: WorkflowState[], teamId: string, type: 
 // The shape the mirror refuses in `labelIds` (CTC-5566): Linear label ids are UUIDs.
 const LABEL_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** CTC-5871 — `--label`/`--add`/`--remove` values split for the route: a contract-known name becomes its
- *  preferred id, a UUID passes through as an id, and anything else is a name the mirror resolves. */
+/** CTC-5871 — `--label`/`--add`/`--remove` values split for the route: a UUID goes in labelIds and every
+ *  other value, a contract-known name included, goes in labelNames for the mirror to resolve. A Catalyst
+ *  label the contract lists as absent from the workspace still refuses before any write. */
 export function labelFields(team: ContractTeam, values: string[]): { labelIds?: string[]; labelNames?: string[] } {
   const ids: string[] = [];
   const names: string[] = [];
   for (const value of values) {
-    const resolved = labelId(team, value);
-    if (resolved !== value || LABEL_ID_SHAPE.test(value)) ids.push(resolved);
-    else names.push(value);
+    if (LABEL_ID_SHAPE.test(value)) {
+      ids.push(value);
+      continue;
+    }
+    labelId(team, value); // throws label-absent for a Catalyst label this workspace lacks
+    names.push(value);
   }
   return { ...(ids.length ? { labelIds: ids } : {}), ...(names.length ? { labelNames: names } : {}) };
 }
