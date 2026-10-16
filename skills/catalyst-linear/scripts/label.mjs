@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// label.mjs — add or remove labels on a ticket. A Catalyst label name (ask, hold, release) resolves
-// to the id the contract lists for this team; anything else is passed through as a label id.
+// label.mjs — add or remove labels on a ticket. A value shaped like a UUID goes as a label id; any other
+// value goes as a label name for the proxy to resolve in the ticket's team.
 import { exitOnFailure, parseFlags, parseJson, relayStderr, runCli, usage, wantsHelp } from "./lib/cli.mjs";
 
 const HELP = `Usage: node scripts/label.mjs <ticket> [--add <name|id>]... [--remove <name|id>]... [--json]
@@ -13,9 +13,10 @@ direction (add, remove), whatever the label count.
   --remove <name|id>    a label to remove (repeatable)
   --json                print the CLI's JSON result
 
-Names the contract knows (the ask marker, the hold label, the release label) resolve to this team's
-label id; a name the workspace lacks is refused rather than guessed. Any other value is sent as a
-label id unchanged.
+A value shaped like a UUID is sent as a label id. Any other value, Catalyst's own labels (the ask
+marker, the hold label, the release label) and the workspace's custom labels alike, is sent as a
+label name, and the proxy resolves it in the ticket's team. When the contract lists one of
+Catalyst's own labels as absent from the workspace, the CLI refuses before any write.
 
 Exit 0 written, 1 on a usage error, 2 when this machine is not connected to a tenant or the write
 was refused (a Catalyst label the workspace lacks, the daily budget spent; the line says which).`;
