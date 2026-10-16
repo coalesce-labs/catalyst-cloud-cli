@@ -21,6 +21,7 @@ import {
   setupPartHeading,
   setupPartProgress,
   setupTrackerRows,
+  unattendedSkipLines,
   SETUP_PART_NUMBERS,
   SETUP_PART_OF,
   SETUP_PARTS,
@@ -541,6 +542,9 @@ export function createClackOnboardUi(
     renderer.tracker(
       setupTrackerRows(setupPartProgress(journal, planned.scope), "end"),
     );
+    // CTC-5932: with no one to ask, setup says what it left out instead of letting it pass unsaid.
+    if (!interactive && !screen.paused)
+      for (const line of unattendedSkipLines(journal, planned)) renderer.line(line);
     if (screen.readinessCause) renderer.line(say(screen.readinessCause));
     if (mine.length) {
       renderer.line(

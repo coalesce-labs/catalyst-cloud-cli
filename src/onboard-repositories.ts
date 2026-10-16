@@ -8,6 +8,7 @@ import {
 } from "./config.js";
 import { contractVersionInRange } from "./contract.js";
 import {
+  choiceList,
   readExistingOnboardJson,
   selectedOnboardTeam,
 } from "./onboard-existing.js";
@@ -52,6 +53,16 @@ const waiting = (reason: string): OnboardStepResult => ({
   state: "waiting",
   reason,
 });
+/** CTC-5932: a choice no one was there to make, with the repositories it could have been. */
+export const repositoryChoiceWait = (
+  rows: ReadonlyArray<{ owner: string; name: string }>,
+): OnboardStepResult =>
+  rows.length
+    ? {
+        ...waiting("repository_choice_required"),
+        evidence: { choices: choiceList(rows.map((row) => `${row.owner}/${row.name}`)) },
+      }
+    : waiting("repository_choice_required");
 const valid = (value: unknown): value is ExistingOnboardRepository => {
   const row = object(value);
   return (
@@ -492,7 +503,7 @@ export function existingRepositoryAdapter(
         ? waiting("repository_selection_unverified")
         : choose
           ? { state: "pending" }
-          : waiting("repository_choice_required");
+          : repositoryChoiceWait(list.repositories);
     return {
       state: "done",
       evidence: {
@@ -511,7 +522,7 @@ export function existingRepositoryAdapter(
       if ("reason" in list) return waiting(list.reason);
       if (!list.repositories.length)
         return waiting("repository_inventory_empty");
-      if (!choose) return waiting("repository_choice_required");
+      if (!choose) return repositoryChoiceWait(list.repositories);
       const teamId = list.repositories[0]!.teamId;
       const offers = list.canRegister
         ? await offeredRepositories(ctx, journal, teamId, list.repositories, signal)

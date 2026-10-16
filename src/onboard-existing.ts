@@ -33,6 +33,9 @@ const waiting = (reason: string): OnboardStepResult => ({
   state: "waiting",
   reason,
 });
+/** CTC-5932: at most 20 choices, so the advice stays one readable line. */
+export const choiceList = (values: string[]): string =>
+  [...new Set(values)].sort().slice(0, 20).join(",");
 const object = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -266,8 +269,9 @@ export function existingLinearAdapters(
           evidence: { teamKey: uncertain.key },
         }
       : undefined;
-  const stopTeam = (reason: string): OnboardStepResult =>
-    uncertainResult() ?? waiting(reason);
+  const stopTeam = (reason: string, teams?: ExistingOnboardTeam[]): OnboardStepResult =>
+    uncertainResult() ??
+    (teams?.length ? { ...waiting(reason), evidence: { choices: choiceList(teams.map((team) => team.key)) } } : waiting(reason));
   const requested = (teams: ExistingOnboardTeam[], journal: OnboardJournal) => {
     const explicit = args.flags.team;
     if (typeof explicit === "string") {
@@ -303,7 +307,7 @@ export function existingLinearAdapters(
         return stopTeam("team_selection_unverified");
       return choose
         ? (uncertainResult("pending") ?? { state: "pending" })
-        : stopTeam("team_choice_required");
+        : stopTeam("team_choice_required", list.teams);
     }
     const result = await observe(ctx, team.id, signal);
     if (!result || result.checks.get("team_visible") !== "pass")
@@ -349,6 +353,7 @@ export function existingLinearAdapters(
         if (!choose)
           return stopTeam(
             list.teams.length ? "team_choice_required" : "team_inventory_empty",
+            list.teams,
           );
         let offer =
           nameNewTeam && typeof args.flags.team !== "string"

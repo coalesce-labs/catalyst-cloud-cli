@@ -1,5 +1,6 @@
 import {
   dependencySettled,
+  stepSatisfied,
   ONBOARD_DEPENDENCIES,
   ONBOARD_STEPS,
   ONBOARD_TITLES,
@@ -412,7 +413,10 @@ export function setupPartProgress(
   type Kind = "admin" | "aside" | "own";
   const readinessPassed =
     journal.steps.find((s) => s.id === "ready")?.state === "done";
-  const rows = new Map<string, Array<{ mark: StepMark; kind: Kind; working: boolean }>>();
+  const rows = new Map<
+    string,
+    Array<{ mark: StepMark; kind: Kind; working: boolean; settled: boolean }>
+  >();
   for (const id of ONBOARD_STEPS) {
     const number = SETUP_PART_NUMBERS[id];
     if (number === undefined || (scope && !scope.includes(id))) continue;
@@ -426,6 +430,9 @@ export function setupPartProgress(
       {
         // A member's own skip (no --team) is theirs to finish, so it is never counted done.
         mark: memberOwnSkip(step) ? "act" : setupStepView(step, journal).mark,
+        // CTC-5932: a skipped step finishes its row only when it was skipped by choice. A skipped
+        // connection is still owed, so a part never reads "done" over it.
+        settled: step.state !== "skipped" || stepSatisfied(step),
         working: step.state !== "done" && CLOUD_WORK.has(step.reason ?? ""),
         kind: setupWaitsOnAdmin(step, journal)
           ? "admin"
@@ -441,7 +448,10 @@ export function setupPartProgress(
     const part = progress[Number(key.split(":")[0]) as SetupPart];
     part.total++;
     const own = steps.filter((s) => s.kind === "own");
-    if (own.length === steps.length && own.every((s) => s.mark === "done" || s.mark === "skip"))
+    if (
+      own.length === steps.length &&
+      own.every((s) => s.mark === "done" || (s.mark === "skip" && s.settled))
+    )
       part.done++;
     else if (own.some((s) => s.mark === "act" || s.mark === "fail")) {
       part.needs++;
@@ -451,6 +461,48 @@ export function setupPartProgress(
     else if (steps.some((s) => s.kind === "aside")) part.aside++;
   }
   return progress;
+}
+/** The connections part 2 makes, each approved by a person in a browser. */
+const BROWSER_CONNECTIONS: readonly OnboardStepId[] = [
+  "linear.workspace",
+  "linear.personal",
+  "github.install",
+  "github.personal",
+];
+/**
+ * CTC-5932: what a run that could not ask anyone left out, said plainly, with the command that
+ * resumes it. Empty when nothing was left out. A runner chosen or declined by flag is the person's
+ * choice and is not repeated back.
+ */
+export function unattendedSkipLines(
+  journal: OnboardJournal,
+  options: { runner?: boolean; scope?: readonly OnboardStepId[] } = {},
+): string[] {
+  const inScope = (id: OnboardStepId) => !options.scope || options.scope.includes(id);
+  const step = (id: OnboardStepId) => journal.steps.find((s) => s.id === id);
+  const lines: string[] = [];
+  const runner = step("runner");
+  if (
+    options.runner === undefined &&
+    inScope("runner") &&
+    runner?.state === "skipped" &&
+    runner.reason === "runner_not_selected"
+  )
+    lines.push(
+      "Setup ran without questions, so it chose no runner: this computer will not run tickets.",
+      "To add one, run in a terminal: catalyst setup --runner",
+    );
+  const open = BROWSER_CONNECTIONS.filter(
+    (id) => inScope(id) && step(id)?.state !== "done",
+  );
+  if (open.length)
+    lines.push(
+      `Linear and GitHub were skipped, because they need you in a browser. Not connected: ${open
+        .map((id) => TITLES[id] ?? ONBOARD_TITLES[id])
+        .join(", ")}.`,
+      "To connect them, run in a terminal: catalyst setup",
+    );
+  return lines;
 }
 /**
  * The tracker's rows: on the first screen (`plan`, the part about to start), at a boundary

@@ -40,7 +40,7 @@ afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: 
 describe("explicit repository selection", () => {
   test("even one accessible repository needs an explicit answer in unattended mode", async () => {
     const f = fixture();
-    expect(await f.adapter.check(f.ctx, f.journal)).toEqual({ state: "waiting", reason: "repository_choice_required" });
+    expect(await f.adapter.check(f.ctx, f.journal)).toEqual({ state: "waiting", reason: "repository_choice_required", evidence: { choices: "example/service" } });
     expect(f.journal.steps).toHaveLength(1);
   });
   test("fresh ACL binding joins the real repo ID, never the project ID or cached inventory", async () => {
@@ -133,7 +133,7 @@ describe("explicit repository selection", () => {
   test("malformed saved choices do not become unattended defaults", async () => {
     const f = fixture(); f.journal.steps.push({ id: "github.repos", state: "done", evidence: { repository: '[{"owner":"example","name":"service","repoId":"actual-repo-a"}]' } });
     expect(selectedOnboardRepositories(f.journal)).toEqual([]);
-    expect(await f.adapter.check(f.ctx, f.journal)).toEqual({ state: "waiting", reason: "repository_choice_required" });
+    expect(await f.adapter.check(f.ctx, f.journal)).toEqual({ state: "waiting", reason: "repository_choice_required", evidence: { choices: "example/service" } });
   });
   test("unsupported GitHub installation prevents repository selection from claiming progress", async () => {
     const f = fixture(["--only", "github.repos", "--repo", "example/service"]);
