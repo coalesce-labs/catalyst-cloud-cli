@@ -19,6 +19,10 @@ import { runnerAdmission, issueRunnerOrgKey, verifyRunnerRoutes } from "./onboar
 import { verifyOnboardRoutes } from "./onboard-capabilities.js";
 import { liveTeamKey, onboardTeamAdmission } from "./onboard-capacity.js";
 import { runnerVmCapabilities, type RunnerVmCapability } from "./onboard-runner-probes.js";
+import {
+  dockerRootAvailableBytes, hostDiskSamplerStatus, installHostDiskSampler, runnerDiskVerdict, HOST_DISK_SAMPLE_FILE,
+  type HostDiskSamplerResult, type HostDiskSamplerStatus, type RunnerDiskVerdict,
+} from "./onboard-runner-disk.js";
 import { darwinThoughtsInstallException, darwinThoughtsInstallRefusal, installDarwinThoughtsCustody, type DarwinThoughtsInstallResult } from "./onboard-runner-custody.js";
 import { emitCustodyFailure, type CustodyFailureCase, type CustodyFailureDetails } from "./onboard-runner-telemetry.js";
 import { canonicalDarwinThoughtsJson, parseDarwinThoughtsAuthority } from "../vendor/self-host/darwin-thoughts-custody/verifier.mjs";
@@ -171,6 +175,11 @@ export interface RunnerEngine {
   ): Promise<boolean>;
   composeUp(dir: string, signal?: AbortSignal): Promise<RunnerComposeUp>;
   composeRunning(dir: string, signal?: AbortSignal): Promise<boolean>;
+  /** Mac only (CTC-5929): the native LaunchAgent that publishes the physical disk sample. */
+  hostDiskSamplerStatus?(dir: string): Promise<HostDiskSamplerStatus>;
+  installHostDiskSampler?(dir: string): Promise<HostDiskSamplerResult>;
+  /** The supervisor's disk admission verdict, measured from this machine; null when unknown. */
+  hostDisk?(dir: string, vm: boolean): Promise<RunnerDiskVerdict | null>;
 }
 
 export interface RunnerExecOptions {
@@ -625,6 +634,18 @@ export function dockerRunnerEngine(
         read.stdout.split("\n").some((line) => line.trim() === "supervisor")
       );
     },
+    async hostDisk(dir, vm) {
+      return runnerDiskVerdict({ dir, saved: readEnvFile(join(dir, ".env")), vm, nowMs: Date.now(),
+        nativeAvailableBytes: () => dockerRootAvailableBytes(env) });
+    },
+    ...((deps.platform ?? process.platform) === "darwin" ? {
+      async hostDiskSamplerStatus(dir: string) {
+        return hostDiskSamplerStatus(dir, { home: deps.env?.HOME ?? process.env.HOME ?? "", uid: process.getuid?.() ?? 0, now: Date.now });
+      },
+      async installHostDiskSampler(dir: string) {
+        return installHostDiskSampler(dir, { home: deps.env?.HOME ?? process.env.HOME ?? "", uid: process.getuid?.() ?? 0, now: Date.now });
+      },
+    } : {}),
   };
 }
 
@@ -634,6 +655,8 @@ interface ListedHost {
   team: string;
   revoked: boolean;
   capacity: number | null;
+  /** The runtime is live, so a zero capacity is the supervisor's own count. */
+  live: boolean;
   failing: string[];
 }
 const object = (value: unknown): Record<string, unknown> | null =>
@@ -675,6 +698,7 @@ function parseHosts(body: unknown): ListedHost[] | null {
       capacity: capability ? capability.runtimeLive
           ? (capability.placeableCapacity as number)
           : 0 : null,
+      live: capability?.runtimeLive === true,
       failing: capability ? (capability.failingRequired as string[]) : [],
     });
   }
@@ -682,7 +706,7 @@ function parseHosts(body: unknown): ListedHost[] | null {
 }
 
 /** `KEY=value` lines; a single-quoted value is unquoted. Anything else is ignored. */
-function readEnvFile(path: string): Record<string, string> | null {
+export function readEnvFile(path: string): Record<string, string> | null {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
@@ -903,6 +927,7 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
     const name = p.installedName || saved.CATALYST_HOST_NAME || chosenName || (input.hostName ?? runnerDefaultHostName)();
     const gid = p.info.vm ? 0 : await engine.socketGid();
     if (!HOST_NAME.test(name) || gid === null) return null;
+    const sampler = samplerManaged(p, ctx, saved);
     return {
       DOCKER_SOCKET_PATH: "/var/run/docker.sock",
       DOCKER_SOCKET_GID: String(gid),
@@ -921,11 +946,20 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
         CATALYST_THOUGHTS_CUSTODY_RESPONSES_DIR: receivedCustody.result.responsesRoot,
       } : {}),
       CATALYST_SESSION_EGRESS_DIR: p.info.vm ? join(p.dir, "session-egress") : NATIVE_EGRESS_DIR,
+      ...(sampler ? { CATALYST_HOST_DISK_SAMPLE_FILE: HOST_DISK_SAMPLE_FILE } : {}),
       // Saved policy stays in merged(). An explicit value in this run overrides it.
       ...Object.fromEntries(DISK_POLICY_KEYS.flatMap(key =>
         ctx.env[key] === undefined ? [] : [[key, ctx.env[key]!]],
       )),
     };
+  }
+  /** CTC-5929: setup publishes the Mac's disk sample into the install's own `host-disk` bind. A
+   * custom sample directory or file belongs to its operator, who also runs its publisher. */
+  function samplerManaged(p: Prepared, ctx: Ctx, saved: Record<string, string> | null): boolean {
+    const custom = (key: "CATALYST_HOST_DISK_SAMPLE_DIR" | "CATALYST_HOST_DISK_SAMPLE_FILE") =>
+      (ctx.env[key] ?? saved?.[key] ?? "").trim();
+    return p.info.vm && engine.installHostDiskSampler !== undefined && custom("CATALYST_HOST_DISK_SAMPLE_DIR") === "" &&
+      ["", HOST_DISK_SAMPLE_FILE].includes(custom("CATALYST_HOST_DISK_SAMPLE_FILE"));
   }
   /** The step owns its own keys only; a person's tuning (CATALYST_SLOTS and the rest) is kept. */
   const merged = (saved: Record<string, string> | null, want: Record<string, string>) => ({
@@ -1025,6 +1059,13 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
       if (p.info.vm && persistedCustody(p.dir, saved) !== "installed")
         return mayAct && !afterAct ? { state: "pending" } : waiting(
           mayAct ? "runner_thoughts_custody_unavailable" : "runner_needs_runner_flag", { ...selected, hostName: name });
+      if (samplerManaged(p, ctx, saved) && engine.hostDiskSamplerStatus) {
+        const sampler = await engine.hostDiskSamplerStatus(p.dir);
+        if (sampler !== "installed")
+          return mayAct && !afterAct ? { state: "pending" } : waiting(
+            !mayAct ? "runner_needs_runner_flag" : sampler === "missing" ? "runner_host_disk_sampler_failed" : sampler,
+            { ...selected, hostName: name });
+      }
       let enrolled: RunnerEnrollment | null = null;
       const live = (hosts: ListedHost[] | null) =>
         hosts?.find(
@@ -1109,6 +1150,15 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
       if(keyStatus==="missing" && p.cloud && mayAct && !afterAct)return pending();
       if (keyStatus !== "valid")
         return waiting(keyStatus === "missing" ? "runner_org_key_missing" : keyStatus === "invalid" ? "runner_org_key_invalid" : "runner_org_key_unavailable", evidence);
+      if (host.capacity === 0 && host.live && host.failing.length === 0) {
+        // The supervisor advertises zero slots when disk admission refuses; its reason stays in its log.
+        const disk = await engine.hostDisk?.(p.dir, p.info.vm);
+        if (disk && disk.state !== "measured")
+          return waiting(disk.state === "below_floor" ? "runner_host_disk_below_floor" : "runner_host_disk_unmeasured", {
+            ...evidence, floorGiB: disk.floorGiB, vm: p.info.vm,
+            ...(disk.state === "below_floor" ? { availableGiB: disk.availableGiB } : { diskDetail: disk.detail }),
+          });
+      }
       if (host.capacity === 0 || host.failing.length > 0)
         return waiting("runner_host_not_ready", { ...evidence, failing: host.failing.join(",") });
       if(p.cloud){
@@ -1227,6 +1277,10 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
             `Setup could not verify local storage: ${custodyReturned ? "recording the result failed" : "the native check threw"} (${details.custodyErrorClass}: ${details.custodyErrorMessage}).`,
             details, signal);
         }
+      }
+      if (samplerManaged(p, ctx, readEnvFile(join(p.dir, ".env"))) && engine.installHostDiskSampler) {
+        const sampler = await engine.installHostDiskSampler(p.dir);
+        if (sampler !== "ready") return waiting(sampler, selected);
       }
       if (!writeEnv(want))
         return { state: "failed", reason: "runner_directory_unavailable", evidence: selected };

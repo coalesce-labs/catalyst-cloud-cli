@@ -14,6 +14,8 @@
     "deploy/self-host/linux-session-egress/session-egress.py": "a20cedfa1e883127ec461e4b7f9588d379fe1633b8244ecd703c81f589d3f142",
     "deploy/self-host/linux-session-egress/catalyst-session-egress.service": "703c150ab23ec87aea47cfc394f63e061b66c4b8c1454a88a9be879c161ce2a5",
     "deploy/self-host/linux-session-egress/catalyst-session-egress-attest.service": "94fa75ea0616f6a1172fc20ca637a5727c36456357e4a977d5bdd65f2fad2e8d",
-    "deploy/self-host/linux-session-egress/catalyst-session-egress-attest.timer": "176622c11c835601b95f36e375ba3c2e993136976c67e5d49559f13a3454fef9"
+    "deploy/self-host/linux-session-egress/catalyst-session-egress-attest.timer": "176622c11c835601b95f36e375ba3c2e993136976c67e5d49559f13a3454fef9",
+    "deploy/self-host/host-disk-sample.py": "9bdc80ec39a0cc2c1f6cb93c4fb2bce5f141ff65f4ee79c2366c06da24dbfbd3",
+    "deploy/self-host/launchd/dev.catalystcloud.host-disk.plist": "51be761ed03c72842674b89bc66f8a3603f730bf03df794e4542428256eac2ce"
   }
 }

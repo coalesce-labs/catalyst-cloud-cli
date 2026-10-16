@@ -156,6 +156,27 @@ describe("ready", () => {
     );
     expect(text).toMatch(/^note {2}team OPS: Catalyst hasn't checked this team yet/m);
   });
+  test("CTC-5929: a runner with no disk measurement is not ready for work, and says why", async () => {
+    await seedJoined(home, server);
+    installSkills(defaultSkillsDirFor(home), {});
+    const unmeasured = await readyReport(ctx, { skillNames: CUSTOMER_SKILLS, offline: true,
+      runnerDisk: () => ({ vm: true, verdict: { state: "unmeasured", detail: "physical_host_disk_sample_required", floorGiB: 25 } }) });
+    expect(unmeasured.ready).toBe(false);
+    expect(unmeasured.checks.find((check) => check.id === "runner:disk")).toMatchObject({
+      ok: false, who: "you",
+      line: expect.stringContaining("no fresh measurement of this Mac's disk"),
+      fix: expect.stringContaining("catalyst setup --runner"),
+    });
+    const low = await readyReport(ctx, { skillNames: CUSTOMER_SKILLS, offline: true,
+      runnerDisk: () => ({ vm: false, verdict: { state: "below_floor", availableGiB: 15.62, floorGiB: 25 } }) });
+    expect(low.ready).toBe(false);
+    expect(low.checks.find((check) => check.id === "runner:disk")?.line).toContain("15.62 GiB of disk is free and it needs 25 GiB");
+    const measured = await readyReport(ctx, { skillNames: CUSTOMER_SKILLS, offline: true,
+      runnerDisk: () => ({ vm: true, verdict: { state: "measured", availableGiB: 80, floorGiB: 25 } }) });
+    expect(measured.checks.find((check) => check.id === "runner:disk")).toMatchObject({ ok: true });
+    const none = await readyReport(ctx, { skillNames: CUSTOMER_SKILLS, offline: true, runnerDisk: () => null });
+    expect(none.checks.some((check) => check.id === "runner:disk")).toBe(false);
+  });
   test("a fresh replica reads ok", async () => {
     await seedJoined(home, server);
     installSkills(defaultSkillsDirFor(home), {});

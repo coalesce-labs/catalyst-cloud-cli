@@ -4,6 +4,7 @@ import { INSTALL_COMMAND, loadConfig, normalizeBaseUrl } from "./config.js";
 import type { OnboardJournal, OnboardStep } from "./onboard.js";
 import { githubInstallationPage } from "./onboard-permissions.js";
 import { valuesFacts, valuesFix } from "./ready-copy.js";
+import { DEFAULT_HOST_FREE_FLOOR_GIB, isRunnerDiskUnmeasured, runnerDiskCopy } from "./onboard-runner-disk.js";
 
 /** What a person reads for a step that is not done. Each line ends in an action they can take. */
 const REASONS: Record<string, string> = {
@@ -293,6 +294,12 @@ const REASONS: Record<string, string> = {
     "The runner started but has not enrolled yet. Run docker compose -p catalyst-host logs supervisor to see why, or run catalyst onboard again in a minute.",
   runner_needs_runner_flag:
     "This machine was set up to run Catalyst's work, but its runner is not running or not enrolled. To bring it up, run catalyst onboard --runner.",
+  runner_host_disk_sampler_python_missing:
+    "Setup needs Python 3 to measure this Mac's disk for the runner. Install Apple's Command Line Tools with xcode-select --install, or python3 from Homebrew, then run catalyst setup --runner.",
+  runner_host_disk_sampler_conflict:
+    "Another dev.catalystcloud.host-disk LaunchAgent on this Mac writes its disk sample somewhere else, so setup left it alone and the runner has no disk measurement. Either point the runner at that sample with CATALYST_HOST_DISK_SAMPLE_DIR, or remove the other agent (launchctl bootout gui/$(id -u)/dev.catalystcloud.host-disk, then delete ~/Library/LaunchAgents/dev.catalystcloud.host-disk.plist). Then run catalyst setup --runner.",
+  runner_host_disk_sampler_failed:
+    "Setup could not start the dev.catalystcloud.host-disk LaunchAgent that measures this Mac's disk, so the runner will advertise zero free slots. Run launchctl print gui/$(id -u)/dev.catalystcloud.host-disk to see why, then run catalyst setup --runner.",
   runner_capability_pending:
     "The runner enrolled but has not reported its capacity yet. Run catalyst onboard again in a minute.",
   runner_admission_unverified:
@@ -646,6 +653,16 @@ export function onboardReasonText(
       ? `at ${normalizeBaseUrl(context.baseUrl)}/settings/account-keys`
       : "on the web app's Account API keys page";
     return `The runner is enrolled, but it takes no work without an organization key. A workspace owner or administrator runs catalyst onboard --runner on this machine; it mints the key and stores it for the runner. If their cloud cannot mint one yet, they create one with the mirror:read, mirror:write and mirror:feed scopes ${where}, save it in a file only they can read, and run catalyst onboard --runner with CATALYST_RUNNER_ORG_KEY_FILE set to that file.`;
+  }
+  if (reason === "runner_host_disk_below_floor" || reason === "runner_host_disk_unmeasured") {
+    const e = step.evidence ?? {};
+    const num = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+    const floorGiB = num(e.floorGiB) ?? DEFAULT_HOST_FREE_FLOOR_GIB, availableGiB = num(e.availableGiB);
+    const detail = typeof e.diskDetail === "string" && isRunnerDiskUnmeasured(e.diskDetail) ? e.diskDetail : "physical_host_disk_sample_required";
+    const copy = runnerDiskCopy(reason === "runner_host_disk_below_floor" && availableGiB !== null
+      ? { state: "below_floor", availableGiB, floorGiB }
+      : { state: "unmeasured", detail, floorGiB }, e.vm === true);
+    return `${copy.line} ${copy.fix}`;
   }
   if (reason === "runner_host_not_ready") {
     const failing = step.evidence?.failing;
