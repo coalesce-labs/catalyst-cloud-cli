@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { darwinThoughtsInstallException, darwinThoughtsInstallRefusal, receiveDarwinThoughtsBootstrapForTest } from "../src/onboard-runner-custody.js";
+import { darwinThoughtsInstallAdvice, darwinThoughtsInstallException, darwinThoughtsInstallRefusal, receiveDarwinThoughtsBootstrapForTest } from "../src/onboard-runner-custody.js";
 import {
   canonicalDarwinThoughtsJson,
   deriveDarwinThoughtsTargets,
@@ -20,9 +20,12 @@ const IMAGE = "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:" + "a".repeat(6
 const IMAGE_ID = "sha256:" + "d".repeat(64);
 const CID = "c".repeat(64);
 const LABEL = "dev.catalystcloud.custody-token";
+const VENDORED_VERIFIER = join(import.meta.dirname, "..", "vendor", "self-host", "darwin-thoughts-custody", "verifier.mjs");
+// Docker Desktop's own words when a bind source sits outside its file sharing (npm under Homebrew).
+const MOUNTS_DENIED = "docker: Error response from daemon: mounts denied: \nThe path /opt/homebrew/lib/node_modules/@catalyst-cloud/cli/vendor/self-host/darwin-thoughts-custody/verifier.mjs is not shared from the host and is not known to Docker.\nYou can configure shared paths from Docker -> Preferences... -> Resources -> File Sharing.";
 type Mode = "complete" | "ack-timeout" | "ack-invalid" | "foreign-label" |
   "foreign-image" | "foreign-name" | "foreign-cache" | "foreign-daemon" |
-  "rm-noop" | "late-create" | "proof-refused" | "unknown-refusal";
+  "rm-noop" | "late-create" | "proof-refused" | "unknown-refusal" | "create-refused" | "create-refused-persisted" | "create-transport-eof";
 interface State {
   mode: Mode; calls: string[][]; created?: string[]; removed: boolean; inspectCount: number;
   row?: { Id: string; Name: string; Image: string; Config: { Image: string; Labels: Record<string, string> } };
@@ -80,14 +83,18 @@ describe("production custody bootstrap helper ACK and cleanup", () => {
       else if(args[0]==='info')out(state.row&&state.mode==='foreign-daemon'?'foreign-daemon':${JSON.stringify(authority.daemonId)});
       else if(args[0]==='create'){
         const labels={};for(let i=0;i<args.length;i++)if(args[i]==='--label'){const value=args[++i],at=value.indexOf('=');labels[value.slice(0,at)]=value.slice(at+1)}
-        state.created=args;state.row={Id:${JSON.stringify(CID)},Name:'/'+args[args.indexOf('--name')+1],Image:${JSON.stringify(IMAGE_ID)},Config:{Image:${JSON.stringify(IMAGE)},Labels:labels}};save();
+        state.created=args;
+        if(state.mode==='create-refused'){save();process.stderr.write(${JSON.stringify(MOUNTS_DENIED)}+'\\n');process.exit(125);}
+        state.row={Id:${JSON.stringify(CID)},Name:'/'+args[args.indexOf('--name')+1],Image:${JSON.stringify(IMAGE_ID)},Config:{Image:${JSON.stringify(IMAGE)},Labels:labels}};save();
+        if(state.mode==='create-transport-eof'){save();process.stderr.write('error during connect: Post "http://%2Fvar%2Frun%2Fdocker.sock/v1.47/containers/create": unexpected EOF\\n');process.exit(1);}
+        if(state.mode==='create-refused-persisted'){save();process.stderr.write('Error response from daemon: unexpected engine failure\\n');process.exit(125);}
         if(state.mode==='ack-timeout'){setInterval(()=>{},100);setTimeout(()=>process.exit(0),5000);}
         else if(['ack-invalid','late-create','foreign-label','foreign-image','foreign-name','foreign-cache','foreign-daemon'].includes(state.mode))out('invalid-create-ack');
         else out(${JSON.stringify(CID)});
       }
       else if(args[0]==='inspect'){
         const target=args.at(-1);state.inspectCount++;
-        if(!state.row||state.removed||![state.row.Id,state.row.Name,state.row.Name.slice(1)].includes(target)||(state.mode==='late-create'&&state.inspectCount===1)){
+        if(!state.row||state.removed||![state.row.Id,state.row.Name,state.row.Name.slice(1)].includes(target)||(['late-create','create-transport-eof'].includes(state.mode)&&state.inspectCount===1)){
           save();process.stderr.write('Error: No such container: '+target+'\\n');process.exit(1);
         }
         const row=JSON.parse(JSON.stringify(state.row));
@@ -97,7 +104,7 @@ describe("production custody bootstrap helper ACK and cleanup", () => {
         if(args.includes('--format'))out(row.Id+' '+row.Config.Labels[${JSON.stringify(LABEL)}]);
         else out(JSON.stringify([row]));
       }
-      else if(args[0]==='ps')out(state.row&&!state.removed?state.row.Id:'');
+      else if(args[0]==='ps')out(state.row&&!state.removed&&!(state.mode==='create-transport-eof'&&state.inspectCount<2)?state.row.Id:'');
       else if(args[0]==='start'){
         if(args.at(-1)!==${JSON.stringify(CID)})throw Error('fixture_foreign_start');
         if(state.mode==='proof-refused'||state.mode==='unknown-refusal'){
@@ -115,8 +122,10 @@ describe("production custody bootstrap helper ACK and cleanup", () => {
     const configPath = join(stateRoot, "producer.json");
     fs.writeFileSync(configPath, canonicalDarwinThoughtsJson({ version: 1, authority,
       dockerExecutable, dockerExecutableSha256: createHash("sha256").update(fs.readFileSync(dockerExecutable)).digest("hex") }), { mode: 0o600 });
+    const verifierPath = join(stateRoot, "verifier.mjs");
+    fs.copyFileSync(VENDORED_VERIFIER, verifierPath); fs.chmodSync(verifierPath, 0o600);
     const state = (): State => JSON.parse(fs.readFileSync(statePath, "utf8")) as State;
-    return { authority, request, targets, state, input: { authority, configPath, supervisorImage: IMAGE,
+    return { authority, request, targets, state, input: { authority, configPath, verifierPath, supervisorImage: IMAGE,
       deadlineMs, nodeExecutable: fs.realpathSync(process.execPath), dockerExecutable } };
   }
   function commands(state: State) { return state.calls.map(call => call.slice(4)); }
@@ -178,6 +187,49 @@ describe("production custody bootstrap helper ACK and cleanup", () => {
     const mounts = args.flatMap((arg, index) => arg === "--mount" ? [args[index + 1]!] : []);
     expect(mounts).toContain("type=bind,src=" + f.authority.responsesRoot + ",dst=" + f.authority.responsesRoot + ",readonly");
     expect(mounts).toContain("type=bind,src=" + f.authority.requestsRoot + ",dst=" + f.authority.requestsRoot);
+  });
+  it("mounts the verifier copy from custody state, never from the package install path", async () => {
+    const f = fixture("complete"); await receiveDarwinThoughtsBootstrapForTest(f.input);
+    const args = f.state().created!;
+    const mounts = args.flatMap((arg, index) => arg === "--mount" ? [args[index + 1]!] : []);
+    expect(mounts).toContain("type=bind,src=" + f.input.verifierPath + ",dst=/custody-verifier.mjs,readonly");
+    expect(mounts.some(mount => mount.includes("/vendor/"))).toBe(false);
+  });
+  it("refuses a verifier copy that no longer matches the vendored hash, before any create", async () => {
+    const f = fixture("complete"); fs.appendFileSync(f.input.verifierPath, "\n// substituted");
+    await expect(receiveDarwinThoughtsBootstrapForTest(f.input)).rejects.toThrow(/bootstrap_verifier_unreceived/);
+    expect(f.state().calls).toEqual([]);
+  });
+  it("keeps Docker's create refusal once it proves nothing persisted", async () => {
+    const f = fixture("create-refused");
+    let error: unknown;
+    try { await receiveDarwinThoughtsBootstrapForTest(f.input); } catch (caught) { error = caught; }
+    expect(darwinThoughtsInstallRefusal(error)).toBe("bootstrap_create_refused:file_sharing");
+    expect(darwinThoughtsInstallAdvice(error)).toMatch(/File sharing/);
+    expect(String(error)).not.toContain("/opt/homebrew");
+    const state = f.state(); const calls = commands(state);
+    const label = state.created![state.created!.indexOf("--label") + 1]!;
+    const create = calls.findIndex(args => args[0] === "create");
+    expect(calls.slice(create + 1)).toContainEqual(["ps", "--all", "--no-trunc", "--quiet", "--filter", "label=" + label]);
+    expect(state.row).toBeUndefined();
+    expect(calls.filter(args => ["start", "rm"].includes(args[0]!))).toEqual([]);
+  });
+  it("treats a create transport failure as unreceived and recovers a helper the daemon persisted late", async () => {
+    const f = fixture("create-transport-eof");
+    let error: unknown;
+    try { await receiveDarwinThoughtsBootstrapForTest(f.input); } catch (caught) { error = caught; }
+    expect(darwinThoughtsInstallRefusal(error)).toBe("bootstrap_create_unreceived");
+    expect(darwinThoughtsInstallAdvice(error)).toBeUndefined();
+    const state = f.state(); receivedIdentity(state); removedAndAbsent(state);
+    expect(state.inspectCount).toBeGreaterThanOrEqual(2);
+  });
+  it("still recovers and removes a helper the Engine persisted despite a create refusal", async () => {
+    const f = fixture("create-refused-persisted");
+    let error: unknown;
+    try { await receiveDarwinThoughtsBootstrapForTest(f.input); } catch (caught) { error = caught; }
+    expect(darwinThoughtsInstallRefusal(error)).toBe("bootstrap_create_refused");
+    expect(darwinThoughtsInstallAdvice(error)).toBeUndefined();
+    const state = f.state(); receivedIdentity(state); removedAndAbsent(state);
   });
   it.each(["proof-refused", "unknown-refusal"] as const)("receives only a closed refusal code and still removes its helper: %s", async mode => {
     const f = fixture(mode);

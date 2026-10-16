@@ -55,7 +55,7 @@ describe("native Darwin custody installer", () => {
       executables: () => executables,
       artifacts: () => ({
         producer: Buffer.from("// generated producer"), watchdog: Buffer.from("// generated watchdog"),
-        deadline: Buffer.from("// generated deadline"),
+        deadline: Buffer.from("// generated deadline"), verifier: Buffer.from("// generated verifier"),
         serviceTemplate: "<plist>@@NODE_EXECUTABLE@@ @@WATCHDOG_FILE@@ @@PRODUCER_FILE@@ @@CONFIG_FILE@@</plist>",
       }),
       engineIdentity: async (input: Record<string, unknown>) => {
@@ -65,7 +65,7 @@ describe("native Darwin custody installer", () => {
       },
       service: async (input: Record<string, unknown>) => { calls.push({ kind: "service", ...input }); },
       receiveBootstrap: async input => {
-        calls.push({ kind: "bootstrap", supervisorImage: input.supervisorImage });
+        calls.push({ kind: "bootstrap", supervisorImage: input.supervisorImage, verifierPath: input.verifierPath });
         const config = JSON.parse(fs.readFileSync(input.configPath, "utf8"));
         const authority = input.authority;
         const checkout = join(authority.thoughtsRoot, "custody-bootstrap", "catalyst", "custody-probe");
@@ -164,9 +164,10 @@ describe("native Darwin custody installer", () => {
       expect(fs.lstatSync(executable).mode & 0o7777).toBe(0o700);
     }
     expect(fs.lstatSync(f.state).mode & 0o7777).toBe(0o700);
-    for (const file of ["producer.json", "private-key.der", "producer.mjs", "watchdog.mjs", "watchdog-deadline.mjs"])
+    for (const file of ["producer.json", "private-key.der", "producer.mjs", "watchdog.mjs", "watchdog-deadline.mjs", "verifier.mjs"])
       expect(fs.lstatSync(join(f.state, file)).mode & 0o7777).toBe(0o600);
     expect(f.calls.map(call => call.kind)).toEqual(["engine", "service", "bootstrap"]);
+    expect(f.calls.find(call => call.kind === "bootstrap")).toMatchObject({ verifierPath: join(f.state, "verifier.mjs") });
   });
   it("reuses the same config/key and receives another fresh nonce on recovery", async () => {
     const f = fixture(); const first = await f.harness.install(f.input);
@@ -177,6 +178,18 @@ describe("native Darwin custody installer", () => {
     expect(second.authority).toEqual(first.authority);
     expect(fs.readFileSync(first.configPath)).toEqual(config); expect(fs.readFileSync(keyFile)).toEqual(key);
     expect(f.calls.filter(call => call.kind === "bootstrap")).toHaveLength(2);
+  });
+  it("gives state enrolled before the verifier copy existed its copy, and refuses a changed one", async () => {
+    const f = fixture(); await f.harness.install(f.input);
+    const verifier = join(f.state, "verifier.mjs");
+    fs.unlinkSync(verifier);
+    await f.harness.install(f.input);
+    expect(fs.readFileSync(verifier, "utf8")).toBe("// generated verifier");
+    expect(fs.lstatSync(verifier).mode & 0o7777).toBe(0o600);
+    fs.writeFileSync(verifier, "// substituted verifier");
+    f.calls.length = 0;
+    await expect(f.harness.install(f.input)).rejects.toThrow(/artifact_custody_mismatch/);
+    expect(f.calls.filter(call => call.kind === "bootstrap")).toEqual([]);
   });
   it("re-attests an older enrolled helper on the current pin, replacing only the recorded image", async () => {
     const f = fixture(); const first = await f.harness.install(f.input);

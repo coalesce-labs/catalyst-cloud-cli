@@ -19,7 +19,7 @@ import { runnerAdmission, issueRunnerOrgKey, verifyRunnerRoutes } from "./onboar
 import { verifyOnboardRoutes } from "./onboard-capabilities.js";
 import { liveTeamKey, onboardTeamAdmission } from "./onboard-capacity.js";
 import { runnerVmCapabilities, type RunnerVmCapability } from "./onboard-runner-probes.js";
-import { darwinThoughtsInstallException, darwinThoughtsInstallRefusal, installDarwinThoughtsCustody, type DarwinThoughtsInstallResult } from "./onboard-runner-custody.js";
+import { darwinThoughtsInstallAdvice, darwinThoughtsInstallException, darwinThoughtsInstallRefusal, installDarwinThoughtsCustody, type DarwinThoughtsInstallResult } from "./onboard-runner-custody.js";
 import { emitCustodyFailure, type CustodyFailureCase, type CustodyFailureDetails } from "./onboard-runner-telemetry.js";
 import { canonicalDarwinThoughtsJson, parseDarwinThoughtsAuthority } from "../vendor/self-host/darwin-thoughts-custody/verifier.mjs";
 import {
@@ -1223,8 +1223,10 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
           const custodyReason = darwinThoughtsInstallRefusal(error);
           const failureCase = custodyReturned ? "result_unverified" : "call_threw";
           const details = { ...darwinThoughtsInstallException(error), ...(custodyReason ? { custodyReason } : {}) };
+          const advice = darwinThoughtsInstallAdvice(error);
           return refuseCustody(ctx, journal, failureCase,
-            `Setup could not verify local storage: ${custodyReturned ? "recording the result failed" : "the native check threw"} (${details.custodyErrorClass}: ${details.custodyErrorMessage}).`,
+            `Setup could not verify local storage: ${custodyReturned ? "recording the result failed" : "the native check threw"} (${details.custodyErrorClass}: ${details.custodyErrorMessage}).` +
+              (advice ? " " + advice : ""),
             details, signal);
         }
       }

@@ -33,7 +33,7 @@ interface Principal {
 interface Executables { readonly nodeExecutable: string; readonly dockerExecutable: string; }
 interface Artifacts {
   readonly producer: Buffer; readonly watchdog: Buffer; readonly deadline: Buffer;
-  readonly serviceTemplate: string;
+  readonly verifier: Buffer; readonly serviceTemplate: string;
 }
 interface EngineInput extends Executables {
   readonly [key: string]: unknown;
@@ -48,6 +48,8 @@ interface EngineIdentity {
 }
 interface BootstrapInput extends Executables {
   readonly authority: Authority; readonly configPath: string;
+  /** The hash-checked verifier copy in custody state, which Docker Desktop shares from the home. */
+  readonly verifierPath: string;
   readonly supervisorImage: string; readonly deadlineMs: number;
   readonly signal?: AbortSignal;
 }
@@ -87,6 +89,26 @@ export function darwinThoughtsInstallException(error: unknown): { custodyErrorCl
     custodyErrorMessageRedacted: !known };
 }
 function fail(reason: string): never { throw new CustodyInstallError(reason); }
+const CREATE_REFUSAL_ADVICE: Readonly<Record<string, string>> = {
+  file_sharing: "Docker Desktop refused to share a storage folder with the check container. In Docker Desktop, open Settings, then Resources, then File sharing, make sure your home folder is listed, apply, and run setup again.",
+  image_not_cached: "The pinned supervisor image is not in this engine's cache. Run setup again so it fetches the pinned images first.",
+};
+/** One fixed next step for a known installer refusal; undefined when there is none to give. */
+export function darwinThoughtsInstallAdvice(error: unknown): string | undefined {
+  const reason = darwinThoughtsInstallRefusal(error);
+  const kind = reason?.startsWith("bootstrap_create_refused:") ? reason.slice("bootstrap_create_refused:".length) : undefined;
+  return kind === undefined ? undefined : CREATE_REFUSAL_ADVICE[kind];
+}
+/** Classify the daemon's own create refusal into a closed code; its text never reaches output.
+ * Only an HTTP error response from the daemon proves it rejected the create. A CLI or transport
+ * failure (unexpected EOF, reset, timeout) is ambiguous: the daemon may still persist the helper,
+ * so it returns undefined and cleanup recovers exactly as for an absent ACK. */
+function createRefusal(stderr: string): string | undefined {
+  if (!/(?:^|\n)(?:docker: )?Error response from daemon: /.test(stderr)) return undefined;
+  if (/mounts denied|is not shared from the host|not known to Docker/i.test(stderr)) return "bootstrap_create_refused:file_sharing";
+  if (/No such image|pull access denied|manifest unknown/i.test(stderr)) return "bootstrap_create_refused:image_not_cached";
+  return "bootstrap_create_refused";
+}
 const VERIFIER_REFUSALS = new Set([
   "ancestor", "ancestor_identity", "bootstrap_directory", "bootstrap_owner", "bootstrap_path",
   "channel_identity", "cleanup", "deadline", "directory", "engine_identity", "exchange",
@@ -329,6 +351,17 @@ function factory(ports: Ports) {
         if (existing) { if (!custody.read(file, 1048576).equals(bytes)) fail("artifact_custody_mismatch"); }
         else custody.create(file, bytes);
       }
+      // The helper mounts its verifier from custody state, never from the package: an npm prefix
+      // such as /opt/homebrew or /usr/local is outside Docker Desktop's default file sharing.
+      // State written before this copy existed receives it once, under the same custody.
+      const verifierPath = join(state, "verifier.mjs");
+      let verifierPresent = existing;
+      if (existing) try { fs.lstatSync(verifierPath); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") fail("state_custody_unsafe");
+        verifierPresent = false;
+      }
+      if (verifierPresent) { if (!custody.read(verifierPath, 1048576).equals(artifacts.verifier)) fail("artifact_custody_mismatch"); }
+      else custody.create(verifierPath, artifacts.verifier);
       const agentDirectory = join(principal.home, "Library", "LaunchAgents");
       custody.walk(agentDirectory, true, 0o700, false, true);
       const plistPath = join(agentDirectory, LABEL + ".plist");
@@ -344,7 +377,7 @@ function factory(ports: Ports) {
       alive();
       await ports.service({ ...executables, uid: principal.uid, serviceLabel: LABEL, plistPath, deadlineMs: input.deadlineMs, signal });
       alive();
-      const receipt = await ports.receiveBootstrap({ ...executables, authority, configPath,
+      const receipt = await ports.receiveBootstrap({ ...executables, authority, configPath, verifierPath,
         supervisorImage: input.supervisorImage, deadlineMs: input.deadlineMs, signal });
       alive();
       if (ports.now() >= input.deadlineMs) fail("startup_proof_expired");
@@ -486,8 +519,8 @@ function actualArtifacts(): Artifacts {
     return bytes;
   };
   const sourceHash = (name: string) => manifest.inputs["deploy/self-host/darwin-thoughts-custody/" + name];
-  read("verifier.mjs", manifest.verifierSha256);
   return { producer: read("producer.mjs", manifest.artifactSha256),
+    verifier: read("verifier.mjs", manifest.verifierSha256),
     watchdog: read("watchdog.mjs", sourceHash("watchdog.mjs")),
     deadline: read("watchdog-deadline.mjs", sourceHash("watchdog-deadline.mjs")),
     serviceTemplate: read("service.plist.in", sourceHash("service.plist.in")).toString("utf8") };
@@ -520,6 +553,18 @@ async function actualBootstrap(input: BootstrapInput): Promise<BootstrapReceipt>
     [authority.thoughtsRoot, authority.locksRoot, authority.requestsRoot, authority.responsesRoot]);
   if (installed.dockerExecutable !== input.dockerExecutable || installed.dockerExecutableSha256 !== digest)
     fail("bootstrap_executable_unreceived");
+  const verifierSha256 = (JSON.parse(fs.readFileSync(join(vendor, "manifest.json"), "utf8")) as { verifierSha256?: unknown }).verifierSha256;
+  if (dirname(input.verifierPath) !== dirname(input.configPath)) fail("bootstrap_verifier_unreceived");
+  let verifierFd: number;
+  try { verifierFd = fs.openSync(input.verifierPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
+  catch { return fail("bootstrap_verifier_unreceived"); }
+  try {
+    const stat = fs.fstatSync(verifierFd, { bigint: true });
+    if (!stat.isFile() || stat.nlink !== 1n || (stat.mode & 0o7777n) !== 0o600n ||
+        (stat.uid !== 0n && stat.uid !== BigInt(authority.nativeUid)) ||
+        createHash("sha256").update(fs.readFileSync(verifierFd)).digest("hex") !== verifierSha256)
+      fail("bootstrap_verifier_unreceived");
+  } finally { fs.closeSync(verifierFd); }
   const docker = (args: string[], deadlineMs = input.deadlineMs, signal: AbortSignal | null = input.signal ?? null) => {
     if (!same(executableStat, fs.lstatSync(input.dockerExecutable, { bigint: true })))
       fail("bootstrap_executable_changed");
@@ -529,6 +574,7 @@ async function actualBootstrap(input: BootstrapInput): Promise<BootstrapReceipt>
   let id: string | undefined;
   let cachedImage: string | undefined;
   let createAttempted = false;
+  let createRefused = false;
   const receiveIdentity = (received: CommandResult, acknowledgedId?: string) => {
     if (received.code !== 0) fail("bootstrap_cleanup_unproved");
     let parsed: unknown;
@@ -573,11 +619,18 @@ async function actualBootstrap(input: BootstrapInput): Promise<BootstrapReceipt>
       ...[authority.thoughtsRoot, authority.locksRoot, authority.requestsRoot, authority.responsesRoot]
         .flatMap(root => ["--mount", "type=bind,src=" + root + ",dst=" + root +
           (root === authority.responsesRoot ? ",readonly" : "")]),
-      "--mount", "type=bind,src=" + join(vendor, "verifier.mjs") + ",dst=/custody-verifier.mjs,readonly",
+      "--mount", "type=bind,src=" + input.verifierPath + ",dst=/custody-verifier.mjs,readonly",
       "--entrypoint", "/usr/bin/timeout", input.supervisorImage, "--signal=KILL",
       Math.max(1, Math.ceil((input.deadlineMs - Date.now()) / 1000)) + "s", "/usr/bin/env", "-i",
       "PATH=/usr/bin:/bin", "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0", "/usr/local/bin/bun", "--config=/dev/null", "--no-env-file", "--cwd=/",
       "-e", program, canonicalDarwinThoughtsJson({ authority, deadlineMs: input.deadlineMs })]);
+    const refusal = created.code !== 0 ? createRefusal(created.stderr) : undefined;
+    if (refusal !== undefined) {
+      // The daemon answered with a refusal. Keep it as a closed code; cleanup still has to
+      // prove nothing persisted before that refusal may reach the person.
+      createRefused = true;
+      fail(refusal);
+    }
     if (created.code !== 0 || !/^[a-f0-9]{64}$/.test(created.stdout)) fail("bootstrap_create_unreceived");
     id = created.stdout;
     const beforeStartDaemon = await docker(["info", "--format", "{{.ID}}"]);
@@ -607,27 +660,39 @@ async function actualBootstrap(input: BootstrapInput): Promise<BootstrapReceipt>
       // Pass no caller signal; cancellation of admission cannot cancel disposal of our helper.
       return docker(args, Date.now() + Math.ceil(remaining), null);
     };
+    // Set only when a refused create is proved to have persisted nothing; the refusal then stands.
+    let refusedAbsent = false;
     try {
       const daemon = await cleanupDocker(["info", "--format", "{{.ID}}"]);
       const image = await cleanupDocker(["image", "inspect", "--format", "{{.Id}}", input.supervisorImage]);
       if (daemon.code !== 0 || daemon.stdout !== authority.daemonId || image.code !== 0 ||
           image.stdout !== cachedImage) fail("bootstrap_cleanup_unproved");
       let received: CommandResult | undefined;
-      for (let attempt = 0; attempt < 32; attempt++) {
+      if (createRefused && id === undefined) {
+        // A refused create persists nothing; prove that by our random token label, and only
+        // fall back to recovering the exact helper when the Engine lists one anyway.
+        const persisted = await cleanupDocker(["ps", "--all", "--no-trunc", "--quiet",
+          "--filter", "label=dev.catalystcloud.custody-token=" + token]);
+        if (persisted.code !== 0) fail("bootstrap_cleanup_unproved");
+        refusedAbsent = persisted.stdout === "";
+      }
+      for (let attempt = 0; !refusedAbsent && attempt < 32; attempt++) {
         const current = await cleanupDocker(["inspect", name]);
         if (current.code === 0) { received = current; break; }
         if (id !== undefined || performance.now() - cleanupStarted >= 1900) fail("bootstrap_cleanup_unproved");
         await new Promise<void>(resolve => setTimeout(resolve, 25));
       }
-      if (received === undefined) fail("bootstrap_cleanup_unproved");
-      id = receiveIdentity(received, id);
-      const list = ["ps", "--all", "--no-trunc", "--quiet", "--filter", "id=" + id];
-      const present = await cleanupDocker(list);
-      if (present.code !== 0 || present.stdout !== id) fail("bootstrap_cleanup_unproved");
-      const removed = await cleanupDocker(["rm", "--force", id]);
-      if (removed.code !== 0) fail("bootstrap_cleanup_unproved");
-      const absent = await cleanupDocker(list);
-      if (absent.code !== 0 || absent.stdout !== "") fail("bootstrap_cleanup_unproved");
+      if (!refusedAbsent) {
+        if (received === undefined) fail("bootstrap_cleanup_unproved");
+        id = receiveIdentity(received, id);
+        const list = ["ps", "--all", "--no-trunc", "--quiet", "--filter", "id=" + id];
+        const present = await cleanupDocker(list);
+        if (present.code !== 0 || present.stdout !== id) fail("bootstrap_cleanup_unproved");
+        const removed = await cleanupDocker(["rm", "--force", id]);
+        if (removed.code !== 0) fail("bootstrap_cleanup_unproved");
+        const absent = await cleanupDocker(list);
+        if (absent.code !== 0 || absent.stdout !== "") fail("bootstrap_cleanup_unproved");
+      }
     } catch { fail("bootstrap_cleanup_unproved"); }
   }
   if ("error" in result) throw result.error;
