@@ -300,6 +300,8 @@ const REASONS: Record<string, string> = {
     "Setup could not tell which disk holds your Docker engine's virtual machine, so it cannot measure this Mac's free space for the runner. Set CATALYST_HOST_DISK_PATH to that folder (for a relocated Docker Desktop disk image, the folder chosen in Settings, Resources, Advanced), then run catalyst setup --runner.",
   runner_host_disk_sampler_failed:
     "Setup could not start the dev.catalystcloud.host-disk LaunchAgent that measures this Mac's disk, so the runner will advertise zero free slots. Run launchctl print gui/$(id -u)/dev.catalystcloud.host-disk, or user/$(id -u)/dev.catalystcloud.host-disk when no one is logged in at the console, to see why, then run catalyst setup --runner.",
+  runner_host_disk_sampler_not_repeating:
+    "Setup loaded the dev.catalystcloud.host-disk LaunchAgent, but launchd did not keep it measuring this Mac's disk: it published no new sample within 25 seconds, so the runner will advertise zero free slots. launchd can hold back an agent loaded from an SSH session. Log in to this Mac's desktop, at the console or over Screen Sharing, and run catalyst setup --runner in Terminal there. To see what launchd did, run launchctl print gui/$(id -u)/dev.catalystcloud.host-disk and read its runs and pended lines.",
   runner_capability_pending:
     "The runner enrolled but has not reported its capacity yet. Run catalyst onboard again in a minute.",
   runner_admission_unverified:
@@ -666,6 +668,8 @@ export function onboardReasonText(
     const e = step.evidence ?? {};
     const num = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
     const floorGiB = num(e.floorGiB) ?? DEFAULT_HOST_FREE_FLOOR_GIB, availableGiB = num(e.availableGiB);
+    if (reason === "runner_host_disk_below_floor" && availableGiB === null)
+      return `The runner advertises zero free slots: the disk it measures has less than ${floorGiB} GiB free. Free disk space, then run catalyst ready to see how much is free.`;
     const detail = typeof e.diskDetail === "string" && isRunnerDiskUnmeasured(e.diskDetail) ? e.diskDetail : "physical_host_disk_sample_required";
     const copy = runnerDiskCopy(reason === "runner_host_disk_below_floor" && availableGiB !== null
       ? { state: "below_floor", availableGiB, floorGiB }

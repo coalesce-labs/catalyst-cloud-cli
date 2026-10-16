@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 
@@ -39,5 +40,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--path", required=True, type=Path, help="Native filesystem backing the VM disk")
     parser.add_argument("--output", required=True, type=Path, help="Sample in a read-only supervisor bind")
+    parser.add_argument("--interval", type=float, help="Publish every INTERVAL seconds until stopped")
     args = parser.parse_args()
-    publish(args.path, args.output)
+    if args.interval is None:
+        publish(args.path, args.output)
+        sys.exit(0)
+    if args.interval <= 0:
+        parser.error("--interval must be positive")
+    # launchd keeps this loop alive instead of firing a timer: an agent bootstrapped over SSH can
+    # leave every StartInterval launch pended (CTC-5929), and the supervisor then refuses all work.
+    while True:
+        try:
+            publish(args.path, args.output)
+        except OSError as error:
+            print(f"host-disk sample failed: {error}", file=sys.stderr, flush=True)
+        time.sleep(args.interval)

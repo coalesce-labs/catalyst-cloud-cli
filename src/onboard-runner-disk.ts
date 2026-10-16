@@ -136,6 +136,8 @@ export interface HostDiskSamplerDeps {
   exists?: (path: string) => boolean;
   realpath?: (path: string) => string;
   readText?: (path: string) => string;
+  /** Blocks while setup waits for the agent's own samples. */
+  sleep?: (ms: number) => void;
 }
 export type HostDiskSamplerStatus =
   | "installed"
@@ -148,7 +150,8 @@ export type HostDiskSamplerResult =
   | "runner_host_disk_sampler_python_missing"
   | "runner_host_disk_location_unverified"
   | "runner_host_disk_sampler_conflict"
-  | "runner_host_disk_sampler_failed";
+  | "runner_host_disk_sampler_failed"
+  | "runner_host_disk_sampler_not_repeating";
 
 const within = (path: string, root: string) => {
   const rel = relative(root, path);
@@ -214,6 +217,8 @@ interface Plan {
   plistText: string;
   /** The agent's command, unescaped: the template's ProgramArguments with the values filled in. */
   command: string[];
+  /** Seconds between the agent's samples: the template's `--interval`. */
+  interval: number;
 }
 
 function plan(dir: string, deps: HostDiskSamplerDeps): Plan | "runner_host_disk_sampler_python_missing" | "runner_host_disk_location_unverified" {
@@ -234,8 +239,9 @@ function plan(dir: string, deps: HostDiskSamplerDeps): Plan | "runner_host_disk_
     key in values ? `<string>${xml(values[key]!)}</string>` : whole);
   const program = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(template)?.[1] ?? "";
   const command = [...program.matchAll(/<string>([^<]*)<\/string>/g)].map(m => values[m[1]!] ?? m[1]!);
+  const at = command.indexOf("--interval");
   return {
-    script, output, plistText, command,
+    script, output, plistText, command, interval: Number(command[at + 1]),
     plist: join(deps.home, "Library", "LaunchAgents", `${HOST_DISK_LABEL}.plist`),
     scriptBytes: readFileSync(join(vendor, "host-disk-sample.py")),
   };
@@ -276,6 +282,34 @@ function writeAtomic(path: string, bytes: Buffer | string, mode: number): void {
   renameSync(temporary, path);
 }
 
+function observedAt(output: string): number | null {
+  try {
+    const value: unknown = JSON.parse(readOr(output)?.toString("utf8") ?? "");
+    const at = (value as Record<string, unknown> | null)?.observedAtMs;
+    return Number.isSafeInteger(at) ? at as number : null;
+  } catch {
+    return null;
+  }
+}
+
+const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** The positive cadence check: the agent itself publishes two new samples, one interval apart.
+ * Loaded is not running: launchd held every launch of an agent bootstrapped over SSH (CTC-5929). */
+function repeats(p: Plan, deps: HostDiskSamplerDeps): boolean {
+  const sleep = deps.sleep ?? sleepSync;
+  const seen = new Set<number>();
+  const before = observedAt(p.output);
+  const deadline = deps.now() + (2 * p.interval + 5) * 1_000;
+  while (deps.now() < deadline) {
+    const at = observedAt(p.output);
+    if (at !== null && at !== before && sampleFresh(p.output, deps.now())) seen.add(at);
+    if (seen.size >= 2) return true;
+    sleep(1_000);
+  }
+  return false;
+}
+
 function sampleFresh(output: string, nowMs: number): boolean {
   const text = readOr(output);
   return text !== null && typeof hostDiskSampleBytes(text.toString("utf8"), nowMs) === "number";
@@ -302,7 +336,10 @@ export function installHostDiskSampler(dir: string, deps: HostDiskSamplerDeps): 
   try {
     if (!readOr(p.script)?.equals(p.scriptBytes)) writeAtomic(p.script, p.scriptBytes, 0o644);
     // One synchronous sample proves the interpreter and the measured path before launchd owns it.
-    const once = run(p.command[0]!, p.command.slice(1), 15_000);
+    // Without --interval the script publishes once and exits; with it, it loops.
+    const loop = p.command.indexOf("--interval");
+    const oneShot = loop < 0 ? p.command : [...p.command.slice(0, loop), ...p.command.slice(loop + 2)];
+    const once = run(oneShot[0]!, oneShot.slice(1), 15_000);
     if (once.status !== 0 || !sampleFresh(p.output, deps.now())) return "runner_host_disk_sampler_failed";
     if (plistChanged) writeAtomic(p.plist, p.plistText, 0o644);
     let domain = loadedIn(run, deps.uid);
@@ -315,7 +352,12 @@ export function installHostDiskSampler(dir: string, deps: HostDiskSamplerDeps): 
       if (!gui && run("/bin/launchctl", ["bootstrap", `user/${deps.uid}`, p.plist], 15_000).status !== 0)
         return "runner_host_disk_sampler_failed";
     }
-    return loadedIn(run, deps.uid) ? "ready" : "runner_host_disk_sampler_failed";
+    domain = loadedIn(run, deps.uid);
+    if (!domain) return "runner_host_disk_sampler_failed";
+    // A demand start: launchd ran a kickstarted agent on mini-2 while it held RunAtLoad and the
+    // timer. The script loops by itself once started, and a running agent is left as it is.
+    run("/bin/launchctl", ["kickstart", `${domain}/${HOST_DISK_LABEL}`], 15_000);
+    return repeats(p, deps) ? "ready" : "runner_host_disk_sampler_not_repeating";
   } catch {
     return "runner_host_disk_sampler_failed";
   }

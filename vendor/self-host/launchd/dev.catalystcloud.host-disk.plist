@@ -9,9 +9,10 @@
     <string>__SCRIPT__</string>
     <string>--path</string><string>__PATH__</string>
     <string>--output</string><string>__OUTPUT__</string>
+    <string>--interval</string><string>10</string>
   </array>
   <key>RunAtLoad</key><true/>
-  <key>StartInterval</key><integer>10</integer>
-  <key>ProcessType</key><string>Background</string>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
 </dict>
 </plist>

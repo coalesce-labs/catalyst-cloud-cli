@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { packageRoot } from "../src/config.js";
+import { onboardReasonText } from "../src/onboard-next.js";
 import {
   HOST_DISK_LABEL,
   HOST_DISK_SAMPLE_FILE,
@@ -83,27 +85,54 @@ describe("the runner's disk verdict mirrors the supervisor's admission", () => {
 });
 
 describe("the Mac's host-disk LaunchAgent", () => {
-  /** A fake launchctl and python: the sampler run writes a fresh sample like the real script. */
-  function machine(options: { clt?: boolean; brew?: boolean; bootstrap?: boolean } = {}) {
+  /** A fake launchctl and python on a fake clock. The one-shot sampler run writes a fresh sample
+   * like the real script. A started agent publishes at once and then every `--interval` seconds,
+   * as the looping script does. `launchd: "pended"` is mini-2 over SSH (CTC-5929): it loads the
+   * agent but starts it only on kickstart. `"never"` starts nothing. */
+  function machine(options: { clt?: boolean; brew?: boolean; bootstrap?: boolean; launchd?: "runs" | "pended" | "never" } = {}) {
     const home = temp();
     const dir = join(home, "state", "runner");
     mkdirSync(join(dir, "host-disk"), { recursive: true });
+    const output = join(dir, "host-disk", "space.json");
     const loaded = new Set<string>();
     const calls: string[] = [];
+    let clock = NOW;
+    let agent: { intervalMs: number; last: number } | null = null;
+    const start = () => {
+      if (agent || options.launchd === "never") return;
+      const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(readFileSync(plist, "utf8"))![1]!;
+      const values = [...args.matchAll(/<string>([^<]*)<\/string>/g)].map(m => m[1]!);
+      agent = { intervalMs: Number(values[values.indexOf("--interval") + 1]) * 1_000, last: clock };
+      writeFileSync(output, sample(80, clock));
+    };
+    const tick = (ms: number) => {
+      clock += ms;
+      while (agent && agent.intervalMs > 0 && clock - agent.last >= agent.intervalMs) {
+        agent.last += agent.intervalMs;
+        writeFileSync(output, sample(80, agent.last));
+      }
+    };
     const run: SamplerRun = (cmd, args) => {
       calls.push([cmd, ...args].join(" "));
       if (cmd === "/usr/bin/xcode-select") return { status: options.clt === false ? 2 : 0, stdout: "", stderr: "" };
       if (cmd.endsWith("python3")) {
-        const output = args[args.indexOf("--output") + 1]!;
-        writeFileSync(output, sample(80, Date.now()));
+        // With --interval the real script never exits, so setup's one-shot run would time out.
+        if (args.includes("--interval")) return { status: 1, stdout: "", stderr: "timed out" };
+        writeFileSync(args[args.indexOf("--output") + 1]!, sample(80, clock));
         return { status: 0, stdout: "", stderr: "" };
       }
       const [verb, target] = args;
       if (verb === "print") return { status: loaded.has(target!) ? 0 : 113, stdout: "", stderr: "" };
-      if (verb === "bootout") { loaded.delete(target!); return { status: 0, stdout: "", stderr: "" }; }
+      if (verb === "bootout") { loaded.delete(target!); agent = null; return { status: 0, stdout: "", stderr: "" }; }
       if (verb === "bootstrap") {
         if (options.bootstrap === false) return { status: 5, stdout: "", stderr: "" };
         loaded.add(`${target}/${HOST_DISK_LABEL}`);
+        if ((options.launchd ?? "runs") === "runs") start();
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (verb === "kickstart") {
+        if (!loaded.has(target!)) return { status: 113, stdout: "", stderr: "" };
+        start();
         return { status: 0, stdout: "", stderr: "" };
       }
       return { status: 1, stdout: "", stderr: "" };
@@ -115,11 +144,20 @@ describe("the Mac's host-disk LaunchAgent", () => {
     // Docker Desktop is the active engine, with its default disk image folder.
     const desktop = join(home, "Library/Containers/com.docker.docker/Data/vms/0/data");
     mkdirSync(desktop, { recursive: true });
-    const deps = { home, uid: 501, now: () => Date.now(), run, exists, desktop,
+    const deps = { home, uid: 501, now: () => clock, sleep: tick, run, exists, desktop,
       dockerHost: `unix://${home}/.docker/run/docker.sock` as string | null, realpath: (path: string) => path,
       explicitPath: undefined as string | undefined };
     const plist = join(home, "Library", "LaunchAgents", `${HOST_DISK_LABEL}.plist`);
-    return { home, dir, deps, calls, plist, loaded };
+    /** Distinct sample times the agent publishes over the next `seconds`, one-second reads. */
+    const published = (seconds: number) => {
+      const seen = new Set<number>();
+      for (let i = 0; i < seconds; i++) {
+        tick(1_000);
+        seen.add(JSON.parse(readFileSync(output, "utf8")).observedAtMs as number);
+      }
+      return seen.size;
+    };
+    return { home, dir, deps, calls, plist, loaded, published };
   }
 
   test("installs catalyst-cloud's sampler and template with this install's paths, then loads it", () => {
@@ -132,8 +170,10 @@ describe("the Mac's host-disk LaunchAgent", () => {
     expect(plist).not.toMatch(/__[A-Z]+__/);
     for (const value of ["/usr/bin/python3", script, m.deps.desktop, join(m.dir, "host-disk", "space.json")])
       expect(plist).toContain(`<string>${value}</string>`);
-    expect(plist).toContain("<key>StartInterval</key><integer>10</integer>");
+    expect(plist).toContain("<string>--interval</string><string>10</string>");
+    expect(plist).toContain("<key>KeepAlive</key><true/>");
     expect(m.calls).toContain(`/bin/launchctl bootstrap gui/501 ${m.plist}`);
+    expect(m.calls).toContain(`/bin/launchctl kickstart gui/501/${HOST_DISK_LABEL}`);
     expect(hostDiskSamplerStatus(m.dir, m.deps)).toBe("installed");
   });
 
@@ -148,7 +188,7 @@ describe("the Mac's host-disk LaunchAgent", () => {
   test("a changed agent is reloaded in place", () => {
     const m = machine();
     expect(installHostDiskSampler(m.dir, m.deps)).toBe("ready");
-    writeFileSync(m.plist, readFileSync(m.plist, "utf8").replace("<integer>10</integer>", "<integer>60</integer>"));
+    writeFileSync(m.plist, readFileSync(m.plist, "utf8").replace("<string>10</string>", "<string>60</string>"));
     m.calls.length = 0;
     expect(installHostDiskSampler(m.dir, m.deps)).toBe("ready");
     expect(m.calls.filter(call => / (bootout|bootstrap) /.test(call)))
@@ -193,6 +233,53 @@ describe("the Mac's host-disk LaunchAgent", () => {
     const m = machine({ bootstrap: false });
     expect(installHostDiskSampler(m.dir, m.deps)).toBe("runner_host_disk_sampler_failed");
   });
+
+  // CTC-5929 mini-2: bootstrapped over SSH, the agent sat at runs = 0 ("pended nondemand spawn =
+  // interval"), the setup-time sample went stale in 30 seconds, and the supervisor refused work.
+  test("an agent launchd loads but holds is started on demand and keeps publishing", () => {
+    const m = machine({ launchd: "pended" });
+    expect(installHostDiskSampler(m.dir, m.deps)).toBe("ready");
+    expect(m.calls).toContain(`/bin/launchctl kickstart gui/501/${HOST_DISK_LABEL}`);
+    // The positive cadence control: three minutes later it still publishes every ten seconds.
+    expect(m.published(180)).toBeGreaterThanOrEqual(17);
+    expect(hostDiskSamplerStatus(m.dir, m.deps)).toBe("installed");
+  });
+
+  test("setup's own sample is one run that exits, never the agent's loop", () => {
+    const m = machine();
+    expect(installHostDiskSampler(m.dir, m.deps)).toBe("ready");
+    const once = m.calls.filter(call => call.startsWith("/usr/bin/python3 "));
+    expect(once).toHaveLength(1);
+    expect(once[0]).not.toContain("--interval");
+  });
+
+  test("an agent launchd never runs is named, not reported ready", () => {
+    const m = machine({ launchd: "never" });
+    expect(installHostDiskSampler(m.dir, m.deps)).toBe("runner_host_disk_sampler_not_repeating");
+    const text = onboardReasonText({ id: "runner", state: "waiting", reason: "runner_host_disk_sampler_not_repeating" });
+    expect(text).toContain("launchd did not keep it measuring this Mac's disk");
+    expect(text).toContain("SSH");
+    expect(text).toContain("catalyst setup --runner");
+    expect(text).not.toContain("runner_host_disk_sampler_not_repeating");
+  });
+});
+
+test("the vendored sampler keeps publishing at its interval on its own", async () => {
+  const dir = temp();
+  const output = join(dir, "host-disk", "space.json");
+  const script = join(packageRoot(), "vendor/self-host/host-disk-sample.py");
+  const child = spawn("python3", [script, "--path", dir, "--output", output, "--interval", "0.2"]);
+  const seen = new Set<number>();
+  try {
+    for (let waited = 0; seen.size < 3 && waited < 5_000; waited += 50) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      try { seen.add(JSON.parse(readFileSync(output, "utf8")).observedAtMs as number); } catch { /* not yet */ }
+    }
+  } finally {
+    child.kill();
+  }
+  expect(child.exitCode).toBeNull();
+  expect(seen.size).toBeGreaterThanOrEqual(3);
 });
 
 test("removal and diagnosis name both launchd domains", () => {

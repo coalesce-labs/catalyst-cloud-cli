@@ -2675,6 +2675,33 @@ describe("CTC-5929: the Mac's physical disk sample and a zero-slot reason", () =
     expect(text).not.toContain("—");
   });
 
+  // CTC-5929 Lima arm64: ready said 34.51 GiB against 60 GiB, but setup printed "no disk sampler",
+  // because the saved setup record dropped the disk evidence and setup prints from that record.
+  test("the saved setup record keeps a Linux below-floor reason with its numbers", async () => {
+    const engine = fakeEngine({ arch: "amd64", vm: false });
+    for (const ref of [SUPERVISOR, WATCHDOG, RUNNER]) engine.images.set(ref, "amd64");
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    f.state.capability!.placeableCapacity = 0;
+    f.engine.hostDisk = async () => ({ state: "below_floor", availableGiB: 34.51, floorGiB: 60 });
+    const result = await run(f);
+    const path = join(f.home, "saved-run.json");
+    writeOnboardJournal(path, { schema: 1, steps: [{ id: "runner", state: "waiting", reason: result.reason, evidence: result.evidence }] } as OnboardJournal);
+    const saved = readOnboardJournal(path)!.steps[0]!;
+    expect(saved.evidence).toMatchObject({ availableGiB: 34.51, floorGiB: 60, vm: false });
+    const text = onboardReasonText(saved);
+    expect(text).toContain("34.51 GiB of disk is free and it needs 60 GiB");
+    expect(text).toContain("the disk that holds Docker's data");
+    expect(text).not.toContain("no disk sampler");
+    expect(text).not.toContain("Mac");
+  });
+
+  test("a below-floor reason without its numbers never claims a missing sampler", () => {
+    const text = onboardReasonText({ id: "runner", state: "waiting", reason: "runner_host_disk_below_floor", evidence: { floorGiB: 60 } });
+    expect(text).toContain("less than 60 GiB free");
+    expect(text).not.toContain("sampler");
+  });
+
   test("zero free slots with a measured disk keep the readiness reason", async () => {
     const f = fixture({ selected: true });
     withOrgKey(f);
