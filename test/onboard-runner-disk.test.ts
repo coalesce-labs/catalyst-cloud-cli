@@ -6,6 +6,8 @@ import { packageRoot } from "../src/config.js";
 import {
   HOST_DISK_LABEL,
   HOST_DISK_SAMPLE_FILE,
+  engineDiskPath,
+  foreignHostDiskSample,
   hostDiskSamplerStatus,
   installHostDiskSampler,
   runnerDiskCopy,
@@ -110,7 +112,12 @@ describe("the Mac's host-disk LaunchAgent", () => {
       path === "/usr/bin/python3" ? options.clt !== false
         : path === "/opt/homebrew/bin/python3" ? options.brew === true
           : existsSync(path);
-    const deps = { home, uid: 501, now: () => Date.now(), run, exists };
+    // Docker Desktop is the active engine, with its default disk image folder.
+    const desktop = join(home, "Library/Containers/com.docker.docker/Data/vms/0/data");
+    mkdirSync(desktop, { recursive: true });
+    const deps = { home, uid: 501, now: () => Date.now(), run, exists, desktop,
+      dockerHost: `unix://${home}/.docker/run/docker.sock` as string | null, realpath: (path: string) => path,
+      explicitPath: undefined as string | undefined };
     const plist = join(home, "Library", "LaunchAgents", `${HOST_DISK_LABEL}.plist`);
     return { home, dir, deps, calls, plist, loaded };
   }
@@ -123,7 +130,7 @@ describe("the Mac's host-disk LaunchAgent", () => {
     expect(readFileSync(script)).toEqual(readFileSync(join(packageRoot(), "vendor/self-host/host-disk-sample.py")));
     const plist = readFileSync(m.plist, "utf8");
     expect(plist).not.toMatch(/__[A-Z]+__/);
-    for (const value of ["/usr/bin/python3", script, m.home, join(m.dir, "host-disk", "space.json")])
+    for (const value of ["/usr/bin/python3", script, m.deps.desktop, join(m.dir, "host-disk", "space.json")])
       expect(plist).toContain(`<string>${value}</string>`);
     expect(plist).toContain("<key>StartInterval</key><integer>10</integer>");
     expect(m.calls).toContain(`/bin/launchctl bootstrap gui/501 ${m.plist}`);
@@ -192,4 +199,82 @@ test("removal and diagnosis name both launchd domains", () => {
   const fix = runnerDiskCopy({ state: "unmeasured", detail: "host_disk_sample_stale", floorGiB: 25 }, true).fix;
   expect(fix).toContain(`gui/$(id -u)/${HOST_DISK_LABEL}`);
   expect(fix).toContain(`user/$(id -u)/${HOST_DISK_LABEL}`);
+});
+
+describe("the sampler measures the ACTIVE engine's disk", () => {
+  function engine(socket: string, dirs: string[] = [], settings: Record<string, string> = {}) {
+    const home = "/Users/a";
+    const present = new Set(dirs.map(d => join(home, d)));
+    return {
+      home, uid: 501, now: () => NOW,
+      dockerHost: `unix://${socket.startsWith("/") ? socket : join(home, socket)}` as string | null,
+      exists: (path: string) => present.has(path),
+      realpath: (path: string) => path === "/var/run/docker.sock" ? join(home, ".orbstack/run/docker.sock") : path,
+      readText: (path: string) => {
+        const name = path.split("/").at(-1)!;
+        if (!(name in settings)) throw new Error("ENOENT");
+        return settings[name]!;
+      },
+    };
+  }
+  const DESKTOP = "Library/Containers/com.docker.docker/Data/vms/0/data";
+  const ORB = "Library/Group Containers/HUAQ24HBR6.dev.orbstack/data";
+
+  test("with Docker Desktop and OrbStack both installed, OrbStack active measures OrbStack's disk", () => {
+    expect(engineDiskPath(engine(".orbstack/run/docker.sock", [DESKTOP, ORB]))).toBe(join("/Users/a", ORB));
+  });
+
+  test("the /var/run/docker.sock symlink resolves to the engine it points at", () => {
+    expect(engineDiskPath(engine("/var/run/docker.sock", [DESKTOP, ORB]))).toBe(join("/Users/a", ORB));
+  });
+
+  test("Docker Desktop active measures its default folder, never OrbStack's", () => {
+    expect(engineDiskPath(engine(".docker/run/docker.sock", [DESKTOP, ORB]))).toBe(join("/Users/a", DESKTOP));
+  });
+
+  test("a relocated Docker Desktop disk image is measured where its settings put it", () => {
+    const e = engine(".docker/run/docker.sock", [DESKTOP, "/Volumes/Fast/docker"].map(d => d), {
+      "settings-store.json": JSON.stringify({ DataFolder: "/Volumes/Fast/docker" }) });
+    e.exists = (path: string) => path === "/Volumes/Fast/docker" || path === join("/Users/a", DESKTOP);
+    expect(engineDiskPath(e)).toBe("/Volumes/Fast/docker");
+  });
+
+  test("a relocated folder that is not there is unverified, never the default", () => {
+    expect(engineDiskPath(engine(".docker/run/docker.sock", [DESKTOP], {
+      "settings.json": JSON.stringify({ dataFolder: "/Volumes/Gone/docker" }) }))).toBeNull();
+  });
+
+  test("Lima and Colima measure the instance directory that holds the socket", () => {
+    expect(engineDiskPath(engine(".lima/docker/sock/docker.sock", [".lima/docker"]))).toBe("/Users/a/.lima/docker");
+    expect(engineDiskPath(engine(".colima/default/docker.sock", [".colima/_lima/colima"]))).toBe("/Users/a/.colima/_lima/colima");
+    expect(engineDiskPath(engine(".colima/work/docker.sock", [".colima/_lima/colima-work"]))).toBe("/Users/a/.colima/_lima/colima-work");
+  });
+
+  test("an unknown or remote engine is unverified and needs CATALYST_HOST_DISK_PATH", () => {
+    expect(engineDiskPath(engine("/tmp/custom/docker.sock", [DESKTOP, ORB]))).toBeNull();
+    const remote = engine(".docker/run/docker.sock", [DESKTOP]);
+    remote.dockerHost = "tcp://10.0.0.5:2376";
+    expect(engineDiskPath(remote)).toBeNull();
+    const named = { ...engine("/tmp/custom/docker.sock", ["/Volumes/VMs"]), explicitPath: "/Volumes/VMs" };
+    named.exists = (path: string) => path === "/Volumes/VMs";
+    expect(engineDiskPath(named)).toBe("/Volumes/VMs");
+  });
+
+  test("install refuses an unverified location before writing anything", () => {
+    const home = temp();
+    const dir = join(home, "state", "runner");
+    const result = installHostDiskSampler(dir, { home, uid: 501, now: () => NOW,
+      dockerHost: "unix:///tmp/custom/docker.sock", realpath: (path: string) => path, run: () => ({ status: 0, stdout: "", stderr: "" }) });
+    expect(result).toBe("runner_host_disk_location_unverified");
+    expect(existsSync(join(home, "Library", "LaunchAgents", `${HOST_DISK_LABEL}.plist`))).toBe(false);
+  });
+
+  test("a foreign agent's output becomes both sample settings", () => {
+    const home = temp();
+    mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(join(home, "Library", "LaunchAgents", `${HOST_DISK_LABEL}.plist`),
+      "<array><string>--output</string><string>/Users/a/.local/share/catalyst/host-disk/space.json</string></array>");
+    expect(foreignHostDiskSample(home)).toEqual({
+      sampleDir: "/Users/a/.local/share/catalyst/host-disk", sampleFile: "/var/lib/catalyst/host-disk/space.json" });
+  });
 });

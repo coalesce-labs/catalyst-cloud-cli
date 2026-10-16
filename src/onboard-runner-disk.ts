@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statfsSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statfsSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { packageRoot } from "./config.js";
 
 // CTC-5929: a supervisor in a Docker VM cannot measure the Mac's disk, so it refuses all work
@@ -128,28 +128,73 @@ export interface HostDiskSamplerDeps {
   home: string;
   uid: number;
   now(): number;
+  /** The active Docker endpoint (`unix:///…`), from the selected context or DOCKER_HOST. */
+  dockerHost: string | null;
+  /** CATALYST_HOST_DISK_PATH: the operator names the filesystem backing the engine's disk. */
+  explicitPath?: string;
   run?: SamplerRun;
   exists?: (path: string) => boolean;
+  realpath?: (path: string) => string;
+  readText?: (path: string) => string;
 }
 export type HostDiskSamplerStatus =
   | "installed"
   | "missing"
   | "runner_host_disk_sampler_python_missing"
+  | "runner_host_disk_location_unverified"
   | "runner_host_disk_sampler_conflict";
 export type HostDiskSamplerResult =
   | "ready"
   | "runner_host_disk_sampler_python_missing"
+  | "runner_host_disk_location_unverified"
   | "runner_host_disk_sampler_conflict"
   | "runner_host_disk_sampler_failed";
 
-/** The VM disk's backing directory when it is a known engine's; else home, on the same volume by default. */
-function measuredPath(home: string, exists: (path: string) => boolean): string {
-  return [
-    join(home, "Library/Containers/com.docker.docker/Data/vms/0/data"),
-    join(home, "Library/Group Containers/HUAQ24HBR6.dev.orbstack/data"),
-    join(home, ".colima"),
-    join(home, ".lima"),
-  ].find(exists) ?? home;
+const within = (path: string, root: string) => {
+  const rel = relative(root, path);
+  return rel !== "" && !rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel);
+};
+
+/** Docker Desktop's disk image folder: the relocated one from its settings, else the default. */
+function desktopData(deps: HostDiskSamplerDeps, exists: (path: string) => boolean): string | null {
+  const read = deps.readText ?? ((path: string) => readFileSync(path, "utf8"));
+  for (const name of ["settings-store.json", "settings.json"]) {
+    let settings: Record<string, unknown>;
+    try { settings = JSON.parse(read(join(deps.home, "Library/Group Containers/group.com.docker", name))); }
+    catch { continue; }
+    const folder = settings.DataFolder ?? settings.dataFolder;
+    if (folder !== undefined) return typeof folder === "string" && isAbsolute(folder) && exists(folder) ? folder : null;
+  }
+  const fallback = join(deps.home, "Library/Containers/com.docker.docker/Data/vms/0/data");
+  return exists(fallback) ? fallback : null;
+}
+
+/** The filesystem backing the ACTIVE engine's VM disk, from its socket; null when it cannot be
+ * verified, so setup asks for CATALYST_HOST_DISK_PATH instead of measuring the wrong disk. */
+export function engineDiskPath(deps: HostDiskSamplerDeps): string | null {
+  const exists = deps.exists ?? existsSync;
+  if (deps.explicitPath !== undefined && deps.explicitPath.trim() !== "")
+    return isAbsolute(deps.explicitPath) && exists(deps.explicitPath) ? deps.explicitPath : null;
+  if (!deps.dockerHost?.startsWith("unix://")) return null;
+  let socket: string;
+  try { socket = (deps.realpath ?? realpathSync)(deps.dockerHost.slice("unix://".length)); }
+  catch { return null; }
+  const home = deps.home;
+  if (within(socket, join(home, ".docker")) || within(socket, join(home, "Library/Containers/com.docker.docker")))
+    return desktopData(deps, exists);
+  if (within(socket, join(home, ".orbstack"))) {
+    const data = join(home, "Library/Group Containers/HUAQ24HBR6.dev.orbstack/data");
+    return exists(data) ? data : null;
+  }
+  // Lima and Colima keep each instance's disk in the instance directory that holds its socket.
+  const lima = /^(.*)\/sock\/docker\.sock$/.exec(socket)?.[1];
+  if (lima && within(lima, join(home, ".lima")) && exists(lima)) return lima;
+  const colima = /^(.*)\/docker\.sock$/.exec(socket)?.[1];
+  if (colima && within(colima, join(home, ".colima"))) {
+    const instance = join(home, ".colima", "_lima", `colima${colima.endsWith(`${sep}default`) ? "" : `-${colima.split(sep).at(-1)}`}`);
+    return exists(instance) ? instance : null;
+  }
+  return null;
 }
 
 /** A stable interpreter. /usr/bin/python3 is a stub that opens an install dialog until the
@@ -171,16 +216,18 @@ interface Plan {
   command: string[];
 }
 
-function plan(dir: string, deps: HostDiskSamplerDeps): Plan | "runner_host_disk_sampler_python_missing" {
+function plan(dir: string, deps: HostDiskSamplerDeps): Plan | "runner_host_disk_sampler_python_missing" | "runner_host_disk_location_unverified" {
   const run = deps.run ?? defaultRun;
   const exists = deps.exists ?? existsSync;
+  const measured = engineDiskPath(deps);
+  if (!measured) return "runner_host_disk_location_unverified";
   const interpreter = python(run, exists);
   if (!interpreter) return "runner_host_disk_sampler_python_missing";
   const vendor = join(packageRoot(), "vendor", "self-host");
   const script = join(dir, "host-disk-sampler", "host-disk-sample.py");
   const output = join(dir, "host-disk", "space.json");
   const values: Record<string, string> = {
-    __PYTHON__: interpreter, __SCRIPT__: script, __PATH__: measuredPath(deps.home, exists), __OUTPUT__: output,
+    __PYTHON__: interpreter, __SCRIPT__: script, __PATH__: measured, __OUTPUT__: output,
   };
   const template = readFileSync(join(vendor, "launchd", `${HOST_DISK_LABEL}.plist`), "utf8");
   const plistText = template.replace(/<string>(__[A-Z]+__)<\/string>/g, (whole, key: string) =>
@@ -202,6 +249,16 @@ const readOr = (path: string): Buffer | null => {
 function foreign(existing: Buffer, output: string): boolean {
   const target = /<string>--output<\/string>\s*<string>([^<]*)<\/string>/.exec(existing.toString("utf8"))?.[1];
   return target !== xml(output);
+}
+
+/** Where a same-label agent this setup does not own publishes, as the two settings that would
+ * point the runner at it: the bind directory and the in-container file name. */
+export function foreignHostDiskSample(home: string): { sampleDir: string; sampleFile: string } | Record<string, never> {
+  const text = readOr(join(home, "Library", "LaunchAgents", `${HOST_DISK_LABEL}.plist`))?.toString("utf8");
+  const output = text && /<string>--output<\/string>\s*<string>([^<]*)<\/string>/.exec(text)?.[1]
+    ?.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  if (!output || !isAbsolute(output) || !/^[^\x00-\x1f'"]+$/.test(output)) return {};
+  return { sampleDir: dirname(output), sampleFile: `${HOST_DISK_MOUNT}/${output.split("/").at(-1)}` };
 }
 
 /** The launchd domain holding the agent: gui when someone is logged in at the console, else user. */
@@ -283,6 +340,6 @@ export function runnerDiskCopy(verdict: Exclude<RunnerDiskVerdict, { state: "mea
     };
   const line = `The runner advertises zero free slots: it has no fresh measurement of ${vm ? "this Mac's" : "this machine's"} disk, because ${UNMEASURED_WHY[verdict.detail]}.`;
   return vm
-    ? { line, fix: `Run catalyst setup --runner. It installs and starts the ${HOST_DISK_LABEL} LaunchAgent, which measures the disk every 10 seconds. If it is already installed, run launchctl print gui/$(id -u)/${HOST_DISK_LABEL}, or user/$(id -u)/${HOST_DISK_LABEL} when no one is logged in at the console, to see why it stopped. If you publish your own sample with CATALYST_HOST_DISK_SAMPLE_DIR, restart that publisher.` }
+    ? { line, fix: `Run catalyst setup --runner. It installs and starts the ${HOST_DISK_LABEL} LaunchAgent, which measures the disk every 10 seconds. If it is already installed, run launchctl print gui/$(id -u)/${HOST_DISK_LABEL}, or user/$(id -u)/${HOST_DISK_LABEL} when no one is logged in at the console, to see why it stopped. If you publish your own sample with CATALYST_HOST_DISK_SAMPLE_DIR and CATALYST_HOST_DISK_SAMPLE_FILE, restart that publisher.` }
     : { line, fix: "Run docker compose -p catalyst-host logs supervisor and look for host_disk_admission_refused, then run catalyst ready." };
 }

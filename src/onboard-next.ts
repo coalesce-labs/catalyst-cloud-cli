@@ -296,8 +296,8 @@ const REASONS: Record<string, string> = {
     "This machine was set up to run Catalyst's work, but its runner is not running or not enrolled. To bring it up, run catalyst onboard --runner.",
   runner_host_disk_sampler_python_missing:
     "Setup needs Python 3 to measure this Mac's disk for the runner. Install Apple's Command Line Tools with xcode-select --install, or python3 from Homebrew, then run catalyst setup --runner.",
-  runner_host_disk_sampler_conflict:
-    "Another dev.catalystcloud.host-disk LaunchAgent on this Mac writes its disk sample somewhere else, so setup left it alone and the runner has no disk measurement. Either point the runner at that sample with CATALYST_HOST_DISK_SAMPLE_DIR, or remove the other agent (run launchctl bootout gui/$(id -u)/dev.catalystcloud.host-disk and launchctl bootout user/$(id -u)/dev.catalystcloud.host-disk, one of which reports it is not loaded, then delete ~/Library/LaunchAgents/dev.catalystcloud.host-disk.plist). Then run catalyst setup --runner.",
+  runner_host_disk_location_unverified:
+    "Setup could not tell which disk holds your Docker engine's virtual machine, so it cannot measure this Mac's free space for the runner. Set CATALYST_HOST_DISK_PATH to that folder (for a relocated Docker Desktop disk image, the folder chosen in Settings, Resources, Advanced), then run catalyst setup --runner.",
   runner_host_disk_sampler_failed:
     "Setup could not start the dev.catalystcloud.host-disk LaunchAgent that measures this Mac's disk, so the runner will advertise zero free slots. Run launchctl print gui/$(id -u)/dev.catalystcloud.host-disk, or user/$(id -u)/dev.catalystcloud.host-disk when no one is logged in at the console, to see why, then run catalyst setup --runner.",
   runner_capability_pending:
@@ -653,6 +653,14 @@ export function onboardReasonText(
       ? `at ${normalizeBaseUrl(context.baseUrl)}/settings/account-keys`
       : "on the web app's Account API keys page";
     return `The runner is enrolled, but it takes no work without an organization key. A workspace owner or administrator runs catalyst onboard --runner on this machine; it mints the key and stores it for the runner. If their cloud cannot mint one yet, they create one with the mirror:read, mirror:write and mirror:feed scopes ${where}, save it in a file only they can read, and run catalyst onboard --runner with CATALYST_RUNNER_ORG_KEY_FILE set to that file.`;
+  }
+  if (reason === "runner_host_disk_sampler_conflict") {
+    // Both settings are needed: a custom directory turns off setup's sampler, and the sample file
+    // name is then empty unless it is set too.
+    const safe = (value: unknown) => typeof value === "string" && /^\/[^\x00-\x1f'"]{0,500}$/.test(value) ? value : null;
+    const dir = safe(step.evidence?.sampleDir) ?? "<directory the other agent writes to>";
+    const file = safe(step.evidence?.sampleFile) ?? "/var/lib/catalyst/host-disk/<its file name>";
+    return `Another dev.catalystcloud.host-disk LaunchAgent on this Mac writes its disk sample somewhere else, so setup left it alone and the runner has no disk measurement. To use that agent's sample, set both CATALYST_HOST_DISK_SAMPLE_DIR=${dir} and CATALYST_HOST_DISK_SAMPLE_FILE=${file}, then run catalyst setup --runner; the directory alone leaves the runner without a sample file. Or remove the other agent: run launchctl bootout gui/$(id -u)/dev.catalystcloud.host-disk and launchctl bootout user/$(id -u)/dev.catalystcloud.host-disk (one of them reports it is not loaded), delete ~/Library/LaunchAgents/dev.catalystcloud.host-disk.plist, then run catalyst setup --runner.`;
   }
   if (reason === "runner_host_disk_below_floor" || reason === "runner_host_disk_unmeasured") {
     const e = step.evidence ?? {};

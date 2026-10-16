@@ -2586,6 +2586,54 @@ describe("CTC-5929: the Mac's physical disk sample and a zero-slot reason", () =
     expect(onboardReasonText({ id: "runner", state: "waiting", reason: result.reason })).toContain("xcode-select --install");
   });
 
+  test("a conflicting agent's recovery names both sample settings with its real values", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    f.engine.installHostDiskSampler = async () => "runner_host_disk_sampler_conflict";
+    f.engine.hostDiskSamplerStatus = async () => "missing";
+    mkdirSync(join(f.home, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(join(f.home, "Library", "LaunchAgents", "dev.catalystcloud.host-disk.plist"),
+      "<array><string>--output</string><string>/Users/a/.local/share/catalyst/host-disk/space.json</string></array>");
+    const result = await run(f);
+    expect(result).toMatchObject({ state: "waiting", reason: "runner_host_disk_sampler_conflict",
+      evidence: { sampleDir: "/Users/a/.local/share/catalyst/host-disk", sampleFile: "/var/lib/catalyst/host-disk/space.json" } });
+    const text = onboardReasonText({ id: "runner", state: "waiting", reason: result.reason, evidence: result.evidence });
+    expect(text).toContain("CATALYST_HOST_DISK_SAMPLE_DIR=/Users/a/.local/share/catalyst/host-disk");
+    expect(text).toContain("CATALYST_HOST_DISK_SAMPLE_FILE=/var/lib/catalyst/host-disk/space.json");
+    const bare = onboardReasonText({ id: "runner", state: "waiting", reason: "runner_host_disk_sampler_conflict" });
+    expect(bare).toContain("CATALYST_HOST_DISK_SAMPLE_DIR=");
+    expect(bare).toContain("CATALYST_HOST_DISK_SAMPLE_FILE=/var/lib/catalyst/host-disk/");
+    expect(f.engine.calls).not.toContain("composeUp");
+  });
+
+  test("an engine disk setup cannot locate asks for CATALYST_HOST_DISK_PATH, which unattended checks reuse", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    const seen: Array<string | undefined> = [];
+    f.engine.installHostDiskSampler = async (_dir, options) => {
+      seen.push(options.explicitPath);
+      return options.explicitPath ? "ready" : "runner_host_disk_location_unverified";
+    };
+    f.engine.hostDiskSamplerStatus = async (_dir, options) => { seen.push(options.explicitPath); return options.explicitPath ? "installed" : "missing"; };
+    const refused = await run(f);
+    expect(refused).toMatchObject({ state: "waiting", reason: "runner_host_disk_location_unverified" });
+    expect(onboardReasonText({ id: "runner", state: "waiting", reason: refused.reason })).toContain("CATALYST_HOST_DISK_PATH");
+    const named = fixture({ selected: true });
+    withOrgKey(named);
+    named.engine.installHostDiskSampler = f.engine.installHostDiskSampler;
+    named.engine.hostDiskSamplerStatus = f.engine.hostDiskSamplerStatus;
+    named.ctx.env.CATALYST_HOST_DISK_PATH = "/Volumes/VMs";
+    expect(await run(named)).toMatchObject({ state: "done" });
+    expect(readFileSync(join(named.dir, ".env"), "utf8")).toContain("CATALYST_HOST_DISK_PATH=/Volumes/VMs\n");
+    delete named.ctx.env.CATALYST_HOST_DISK_PATH;
+    seen.length = 0;
+    const unattended = onboardRunnerAdapter({ engine: named.engine, sleep: async () => {}, waitMs: 20, pollMs: 10 });
+    named.journal.steps = [...named.journal.steps.filter(step => step.id !== "runner"),
+      { id: "runner", state: "done", evidence: { selected: true } }] as OnboardJournal["steps"];
+    await unattended.check(named.ctx, named.journal);
+    expect(seen).toEqual(["/Volumes/VMs"]);
+  });
+
   test("an operator's own sample directory is left to its publisher", async () => {
     const f = fixture({ selected: true });
     withOrgKey(f);
