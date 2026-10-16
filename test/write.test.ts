@@ -2,7 +2,11 @@
 // --bookkeeping prefixes the contract's marker, state moves resolve by slot and by state type, labels
 // resolve by name, a 429 names hostDailyWriteBudget, and the ask verbs post what the route expects.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { main } from "../src/cli";
 import { rankAsks } from "../src/ask";
 import { firstStateOfType } from "../src/write";
@@ -207,6 +211,61 @@ describe("write labels by name or id (CTC-5871)", () => {
     const h = makeCtx(home);
     expect(await main(["write", "label", "ENG-1", "--remove", "Bug"], h)).toBe(2);
     expect(h.err.join("\n")).toMatch(/outcome "failed"/);
+  });
+});
+
+// CTC-2534 — the catalyst-linear wrapper end to end: scripts/label.mjs runs as a real node process
+// against a stand-in CLI that records its argv (no tenant is reached), and that argv then drives
+// `main` against the mock mirror. So a value goes by the route the wrapper's help says it goes by.
+const LABEL_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "skills", "catalyst-linear", "scripts", "label.mjs");
+function runLabelScript(args: string[]): { status: number | null; stdout: string; argv: string[][] } {
+  const scriptHome = mkdtempSync(join(tmpdir(), "label-script-"));
+  const log = join(scriptHome, "calls.log");
+  const cli = join(scriptHome, "fake-cli.mjs");
+  writeFileSync(cli, `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nprocess.stdout.write("{}\\n");\n`);
+  mkdirSync(join(scriptHome, ".config", "catalyst-cloud"), { recursive: true });
+  writeFileSync(
+    join(scriptHome, ".config", "catalyst-cloud", "customer.json"),
+    JSON.stringify({ baseUrl: "https://cloud.example", account: "tenant-fixture", key: "ctc_user_fixture", cliPath: cli }),
+  );
+  const r = spawnSync(process.execPath, [LABEL_SCRIPT, ...args], {
+    encoding: "utf8",
+    timeout: 20_000,
+    env: { ...process.env, CATALYST_SKILLS_HOME: scriptHome, HOME: scriptHome },
+  });
+  const argv = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as string[]) : [];
+  return { status: r.status, stdout: r.stdout, argv };
+}
+
+describe("catalyst-linear label.mjs (CTC-2534)", () => {
+  beforeEach(() => {
+    server.agentWriteReply = mirrorLabelRule;
+  });
+  test("custom name, contract-known name and UUID on add and remove reach the mirror by the right route", async () => {
+    const r = runLabelScript(["ENG-1", "--add", "Bug", "--add", "catalyst-ask", "--add", LABEL_UUID, "--remove", "Customer", "--remove", LABEL_UUID]);
+    expect(r.status).toBe(0);
+    expect(r.argv).toHaveLength(1);
+    expect(await main(r.argv[0]!, ctx)).toBe(0);
+    expect(server.writes.map((w) => w.body)).toEqual([
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], labelNames: ["Bug", "catalyst-ask"], mode: "add" },
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], labelNames: ["Customer"], mode: "remove" },
+    ]);
+  });
+  test("a Catalyst label the contract lists as absent refuses before any write", async () => {
+    const r = runLabelScript(["ENG-1", "--add", "catalyst-not-an-ask", "--add", "Bug"]);
+    expect(r.status).toBe(0);
+    expect(await main(r.argv[0]!, ctx)).toBe(2);
+    expect(ctx.err.join("\n")).toMatch(/absent/);
+    expect(server.writes).toEqual([]);
+  });
+  test("--help describes the route each value takes: a UUID as an id, any other value as a name", () => {
+    const r = runLabelScript(["--help"]);
+    expect(r.status).toBe(0);
+    expect(r.argv).toEqual([]);
+    const help = r.stdout.replace(/\s+/g, " ");
+    expect(help).toMatch(/UUID is sent as a label id/);
+    expect(help).toMatch(/Any other value, .*custom labels.* is sent as a label name/);
+    expect(help).not.toMatch(/other value is sent as a label id/);
   });
 });
 
