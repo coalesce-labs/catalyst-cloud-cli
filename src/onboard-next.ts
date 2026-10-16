@@ -297,9 +297,9 @@ const REASONS: Record<string, string> = {
   runner_host_disk_sampler_python_missing:
     "Setup needs Python 3 to measure this Mac's disk for the runner. Install Apple's Command Line Tools with xcode-select --install, or python3 from Homebrew, then run catalyst setup --runner.",
   runner_host_disk_sampler_conflict:
-    "Another dev.catalystcloud.host-disk LaunchAgent on this Mac writes its disk sample somewhere else, so setup left it alone and the runner has no disk measurement. Either point the runner at that sample with CATALYST_HOST_DISK_SAMPLE_DIR, or remove the other agent (launchctl bootout gui/$(id -u)/dev.catalystcloud.host-disk, then delete ~/Library/LaunchAgents/dev.catalystcloud.host-disk.plist). Then run catalyst setup --runner.",
+    "Another dev.catalystcloud.host-disk LaunchAgent on this Mac writes its disk sample somewhere else, so setup left it alone and the runner has no disk measurement. Either point the runner at that sample with CATALYST_HOST_DISK_SAMPLE_DIR, or remove the other agent (run launchctl bootout gui/$(id -u)/dev.catalystcloud.host-disk and launchctl bootout user/$(id -u)/dev.catalystcloud.host-disk, one of which reports it is not loaded, then delete ~/Library/LaunchAgents/dev.catalystcloud.host-disk.plist). Then run catalyst setup --runner.",
   runner_host_disk_sampler_failed:
-    "Setup could not start the dev.catalystcloud.host-disk LaunchAgent that measures this Mac's disk, so the runner will advertise zero free slots. Run launchctl print gui/$(id -u)/dev.catalystcloud.host-disk to see why, then run catalyst setup --runner.",
+    "Setup could not start the dev.catalystcloud.host-disk LaunchAgent that measures this Mac's disk, so the runner will advertise zero free slots. Run launchctl print gui/$(id -u)/dev.catalystcloud.host-disk, or user/$(id -u)/dev.catalystcloud.host-disk when no one is logged in at the console, to see why, then run catalyst setup --runner.",
   runner_capability_pending:
     "The runner enrolled but has not reported its capacity yet. Run catalyst onboard again in a minute.",
   runner_admission_unverified:

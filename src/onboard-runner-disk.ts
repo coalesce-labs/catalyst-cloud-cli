@@ -283,6 +283,6 @@ export function runnerDiskCopy(verdict: Exclude<RunnerDiskVerdict, { state: "mea
     };
   const line = `The runner advertises zero free slots: it has no fresh measurement of ${vm ? "this Mac's" : "this machine's"} disk, because ${UNMEASURED_WHY[verdict.detail]}.`;
   return vm
-    ? { line, fix: `Run catalyst setup --runner. It installs and starts the ${HOST_DISK_LABEL} LaunchAgent, which measures the disk every 10 seconds. If it is already installed, run launchctl print gui/$(id -u)/${HOST_DISK_LABEL} to see why it stopped. If you publish your own sample with CATALYST_HOST_DISK_SAMPLE_DIR, restart that publisher.` }
+    ? { line, fix: `Run catalyst setup --runner. It installs and starts the ${HOST_DISK_LABEL} LaunchAgent, which measures the disk every 10 seconds. If it is already installed, run launchctl print gui/$(id -u)/${HOST_DISK_LABEL}, or user/$(id -u)/${HOST_DISK_LABEL} when no one is logged in at the console, to see why it stopped. If you publish your own sample with CATALYST_HOST_DISK_SAMPLE_DIR, restart that publisher.` }
     : { line, fix: "Run docker compose -p catalyst-host logs supervisor and look for host_disk_admission_refused, then run catalyst ready." };
 }

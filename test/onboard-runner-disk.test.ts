@@ -187,3 +187,9 @@ describe("the Mac's host-disk LaunchAgent", () => {
     expect(installHostDiskSampler(m.dir, m.deps)).toBe("runner_host_disk_sampler_failed");
   });
 });
+
+test("removal and diagnosis name both launchd domains", () => {
+  const fix = runnerDiskCopy({ state: "unmeasured", detail: "host_disk_sample_stale", floorGiB: 25 }, true).fix;
+  expect(fix).toContain(`gui/$(id -u)/${HOST_DISK_LABEL}`);
+  expect(fix).toContain(`user/$(id -u)/${HOST_DISK_LABEL}`);
+});
