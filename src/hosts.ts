@@ -34,7 +34,7 @@ async function confirmRemove(name: string): Promise<boolean> {
 export function machineLines(inventory: MachineInventory): string[] {
   const lines = inventory.machines.map(
     (m) =>
-      `${m.name} | ${m.ownership === "self_hosted" ? "Self-hosted" : "Catalyst's"} | ${m.teams.join(", ")} | ${m.slots} slots, ${m.inUse} in use, ${m.free} free | ${m.stopped === true && m.status !== "live" ? "stopped" : m.status} | last check-in ${m.lastCheckInAtMs === null ? "never" : new Date(m.lastCheckInAtMs).toISOString()}`,
+      `${m.name} | ${m.ownership === "self_hosted" ? "Self-hosted" : "Catalyst's"} | ${m.teams.join(", ")} | ${m.slots} slots, ${m.inUse} in use, ${m.free} free | ${m.stopped === true ? "stopped" : m.status} | last check-in ${m.lastCheckInAtMs === null ? "never" : new Date(m.lastCheckInAtMs).toISOString()}`,
   );
   if (lines.length === 0)
     lines.push("No machines are enrolled for this account.");

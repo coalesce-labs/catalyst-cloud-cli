@@ -534,6 +534,8 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
 };
 
 export const VERB_USAGE: Record<string, string> = {
+  runner:
+    "runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts] [--json]",
   hosts:
     "hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name> [--json]",
   setup:
