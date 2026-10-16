@@ -52,6 +52,10 @@ const GLOBAL_FLAGS: FlagTable = {
 /** Per-verb flag tables. A verb absent here accepts only the global flags. */
 export const FLAG_TABLES: Record<string, FlagTable> = {
   hosts: { yes: { value: false, help: "confirm removal without a terminal" } },
+  runner: {
+    yes: { value: false, help: "uninstall: confirm without a terminal" },
+    "delete-checkouts": { value: false, help: "uninstall: also delete the repository and thoughts checkouts" },
+  },
   login: {
     "start-replica": {
       value: false,

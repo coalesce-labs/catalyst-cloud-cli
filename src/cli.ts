@@ -1,4 +1,5 @@
 import { cmdHosts, type HostsDeps } from "./hosts.js";
+import { cmdRunner, type RunnerLifecycleDeps } from "./runner.js";
 import { cmdSeat } from "./seat.js";
 // cli.ts — the `catalyst` dispatcher (npm: @catalyst-cloud/cli). Verbs live in
 // their own modules; this file keeps every export the 0.1 tests and the bin import.
@@ -207,6 +208,7 @@ export function usageText(): string {
     "  catalyst status | notice | me | ready | accounts",
     "  catalyst seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE]",
     "  catalyst hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name>",
+    "  catalyst runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts]   (this machine's self-hosted runner)",
     "  catalyst mcp add|list|remove (vault references only)",
     "  catalyst contract [--refresh] [--path <a.b.c>]",
     "  catalyst query <issues|issue <id>|pulls|pull <id>|projects|cycles|search <terms>|changes --since <cursor|head>>",
@@ -267,6 +269,7 @@ export interface MainDeps {
   var?: VarDeps;
   connections?: ConnectionsDeps;
   hosts?: HostsDeps;
+  runner?: RunnerLifecycleDeps;
   identity?: IdentityDeps;
   team?: TeamDeps;
   legacy?: LegacyDeps;
@@ -749,6 +752,8 @@ export async function main(
         return await cmdIdentity(args, ctx, deps.identity ?? {});
       case "hosts":
         return await cmdHosts(args, ctx, deps.hosts);
+      case "runner":
+        return await cmdRunner(args, ctx, deps.runner);
       case "connections":
         return await cmdConnections(args, ctx, deps.connections ?? {});
       default:
