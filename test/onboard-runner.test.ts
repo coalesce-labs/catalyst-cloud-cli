@@ -1589,10 +1589,10 @@ describe("the Docker engine", () => {
       inspect: { code, stdout: JSON.stringify(value) },
     }).exec }).installation!(f.ctx.home, SUPERVISOR);
     expect(await inspect([{ Config: config }])).toEqual({ dir: f.dir, hostName: "catalyst-laptop", baseUrl: "https://cloud.example.test", supervisorImage: SUPERVISOR });
-    expect(await inspect([{ Config: { ...config, Image: "unrelated:latest" } }])).toBe("unverified");
-    expect(await inspect([{ Config: config }], 1)).toBe("unverified");
+    expect(await inspect([{ Config: { ...config, Image: "unrelated:latest" } }])).toEqual({ unverified: "image" });
+    expect(await inspect([{ Config: config }], 1)).toEqual({ unverified: "engine_unreadable" });
     expect(await dockerRunnerEngine({ exec: recordingExec({ "ps --all": { code: 0, stdout: "" } }).exec }).installation!(f.ctx.home, SUPERVISOR)).toBe("missing");
-    expect(await dockerRunnerEngine({ exec: recordingExec({ "ps --all": { code: 1, stdout: "" } }).exec }).installation!(f.ctx.home, SUPERVISOR)).toBe("unverified");
+    expect(await dockerRunnerEngine({ exec: recordingExec({ "ps --all": { code: 1, stdout: "" } }).exec }).installation!(f.ctx.home, SUPERVISOR)).toEqual({ unverified: "engine_unreadable" });
   });
 
   test("Compose runs in the runner directory with the caller's CATALYST_ variables removed", async () => {
@@ -1706,10 +1706,10 @@ describe("the Docker engine", () => {
     // chmod, rather than creation mode, makes the broad permissions meaningful on an existing file.
     const { chmodSync } = await import("node:fs");
     chmodSync(override, 0o666);
-    expect(await inspect()).toBe("unverified");
+    expect(await inspect()).toEqual({ unverified: "file_safety" });
     chmodSync(override, 0o600);
     config.Labels["com.docker.compose.project.config_files"] += ",/foreign/override.yaml";
-    expect(await inspect()).toBe("unverified");
+    expect(await inspect()).toEqual({ unverified: "config_files" });
   });
 
   test("handing folders to the runner uid gives root back only CHOWN", async () => {
@@ -1949,6 +1949,199 @@ test("the vendored Compose file matches its recorded provenance", () => {
   ).toBe(manifest.sha256["deploy/self-host/compose.yaml"]);
 });
 
+
+describe("CTC-5931: setup adopts and resumes the installation it started", () => {
+  /** Docker Engine 29 with Compose v5, as measured: Compose records the CLI's own `--file` paths and
+   *  working directory unchanged, the container keeps the pinned image reference and the `.env` values,
+   *  and `ps` applies every label filter. A `compose run` one-off carries the supervisor's labels with
+   *  oneoff=True. */
+  function docker(f: ReturnType<typeof fixture>) {
+    type Row = { Id: string; Image: string; Config: { Image: string; Env: string[]; Labels: Record<string, string> } };
+    const rows: Row[] = [];
+    let next = 0;
+    const id = () => (++next).toString(16).padStart(64, "0");
+    const add = (service: string, oneoff: boolean, labels: Record<string, string>, env: string[], image: string) =>
+      rows.push({ Id: id(), Image: `sha256:${"f".repeat(64)}`, Config: { Image: image, Env: env, Labels: {
+        "com.docker.compose.project": "catalyst-host", "com.docker.compose.service": service,
+        "com.docker.compose.oneoff": oneoff ? "True" : "False", ...labels } } });
+    // The labels follow the argv the CLI itself gives `compose up`.
+    const composeLabels = async (dir: string) => {
+      let args: string[] = [];
+      await dockerRunnerEngine({ exec: async argv => { args = argv; return { code: 0, stdout: "" }; }, env: {} }).composeUp(dir);
+      const files = args.flatMap((arg, index) => args[index - 1] === "--file" ? [arg] : []);
+      return { "com.docker.compose.project.working_dir": dir, "com.docker.compose.project.config_files": files.join(",") };
+    };
+    const saved = (dir: string) => Object.fromEntries(readFileSync(join(dir, ".env"), "utf8").split("\n")
+      .flatMap(line => { const m = /^([A-Z0-9_]+)=(.*)$/.exec(line); return m ? [[m[1]!, m[2]!.replace(/^'(.*)'$/, "$1")]] : []; }));
+    const up = async (dir: string) => {
+      if (rows.some(row => row.Config.Labels["com.docker.compose.oneoff"] === "False")) return;
+      const values = saved(dir);
+      const env = [`CATALYST_HOST_NAME=${values.CATALYST_HOST_NAME}`, `CATALYST_MIRROR_URL=${values.CATALYST_MIRROR_URL}`, "PATH=/usr/bin:/bin"];
+      add("supervisor", false, await composeLabels(dir), env, values.CATALYST_SUPERVISOR_IMAGE!);
+      add("deadline-watchdog", false, await composeLabels(dir), [], values.CATALYST_WATCHDOG_IMAGE!);
+    };
+    const engine = dockerRunnerEngine({ exec: async args => {
+      if (args[0] === "ps") {
+        const filters = args.flatMap((arg, index) => args[index - 1] === "--filter" ? [arg.replace(/^label=/, "")] : []);
+        const ids = rows.filter(row => filters.every(filter => {
+          const [key, value] = [filter.slice(0, filter.indexOf("=")), filter.slice(filter.indexOf("=") + 1)];
+          return row.Config.Labels[key] === value;
+        })).map(row => row.Id.slice(0, 12));
+        return { code: 0, stdout: ids.join("\n") };
+      }
+      if (args[0] === "inspect") {
+        const row = rows.find(candidate => candidate.Id.startsWith(args[1]!));
+        return row ? { code: 0, stdout: JSON.stringify([row]) } : { code: 1, stdout: "" };
+      }
+      return { code: 1, stdout: "" };
+    } });
+    f.engine.installation = engine.installation;
+    const composeUp = f.engine.composeUp;
+    f.engine.composeUp = async (dir, signal) => {
+      const started = await composeUp(dir, signal);
+      if (started.ok) await up(dir);
+      return started;
+    };
+    return {
+      rows,
+      /** A `compose run --rm` one-off whose removal has not finished, or whose CLI was interrupted. */
+      oneOff: async (dir: string) => add("supervisor", true, await composeLabels(dir), [], saved(dir).CATALYST_SUPERVISOR_IMAGE!),
+      add,
+      composeLabels,
+    };
+  }
+  /** The native installer creates its exchange folders before it can fail or return. */
+  function nativeFolders(f: ReturnType<typeof fixture>, failFirst = false) {
+    let calls = 0;
+    f.engine.nativeThoughtsCustody = async ({ dir }) => {
+      f.engine.calls.push("nativeThoughtsCustody");
+      const custody = nativeCustodyFixture(dir);
+      for (const root of [custody.requestsRoot, custody.responsesRoot])
+        if (!existsSync(root)) mkdirSync(root, { mode: 0o700 });
+      if (failFirst && calls++ === 0) throw Object.assign(new Error("fixture storage check stopped"), { name: "CustodyInstallError" });
+      return custody;
+    };
+  }
+  function macInstall() {
+    const f = fixture({ selected: true });
+    f.engine.files.set("CATALYST_ORG_KEY_FILE", ORG_KEY);
+    nativeFolders(f);
+    return { f, docker: docker(f) };
+  }
+
+  test("a clean first install on a Mac is adopted by the check right after it starts Compose", async () => {
+    const { f, docker: d } = macInstall();
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostName: "catalyst-laptop", hostId: "host-1", capacity: 2 } });
+    expect(f.results[0]).toEqual({ state: "pending" });
+    expect(f.engine.calls.filter(call => call === "composeUp")).toHaveLength(1);
+    expect(f.state.mints).toHaveLength(1);
+    // The check adopted the two-file Darwin installation in setup's own folder.
+    expect(d.rows[0]!.Config.Labels["com.docker.compose.project.config_files"])
+      .toBe(`${join(f.dir, "compose.yaml")},${join(f.dir, "compose.darwin-thoughts.yaml")}`);
+    expect(f.messages.join("\n")).not.toContain("could not adopt");
+    secretsNowhere(f);
+  });
+
+  test("a compose-run one-off left by setup's own credential reads is not a second installation", async () => {
+    const { f, docker: d } = macInstall();
+    const enrollment = f.engine.enrollment;
+    f.engine.enrollment = async (dir, signal) => {
+      // Daemon-side auto-remove can finish after the CLI returns; an interrupted read never removes.
+      if (existsSync(join(dir, ".env"))) await d.oneOff(dir);
+      return enrollment(dir, signal);
+    };
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostName: "catalyst-laptop", hostId: "host-1" } });
+    expect(d.rows.filter(row => row.Config.Labels["com.docker.compose.oneoff"] === "True").length).toBeGreaterThan(0);
+    // Every rerun adopts it too, with the lingering one-offs still listed.
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostId: "host-1" } });
+    expect(f.state.mints).toHaveLength(1);
+  });
+
+  test("repeat setup adopts the running installation and changes nothing", async () => {
+    const { f } = macInstall();
+    expect((await run(f)).state).toBe("done");
+    const files = ["compose.yaml", "compose.darwin-thoughts.yaml", ".env"].map(name => readFileSync(join(f.dir, name)));
+    const calls = f.engine.calls.length;
+    for (let rerun = 0; rerun < 2; rerun++)
+      expect(await run(f)).toMatchObject({ state: "done", evidence: { hostName: "catalyst-laptop", hostId: "host-1" } });
+    expect(["compose.yaml", "compose.darwin-thoughts.yaml", ".env"].map(name => readFileSync(join(f.dir, name)))).toEqual(files);
+    expect(f.engine.calls.slice(calls)).not.toContain("composeUp");
+    expect(f.engine.calls.slice(calls)).not.toContain("nativeThoughtsCustody");
+    expect(f.state.mints).toHaveLength(1);
+    expect(f.state.hosts).toHaveLength(1);
+  });
+
+  test("a setup that stopped after writing compose.yaml and before Compose resumes with the same name", async () => {
+    const { f, docker: d } = macInstall();
+    f.engine.upError = "fixture: the engine stopped before creating containers";
+    expect(await run(f)).toMatchObject({ state: "failed", reason: "runner_compose_failed" });
+    expect(existsSync(join(f.dir, "compose.yaml"))).toBe(true);
+    expect(d.rows).toEqual([]);
+    const name = readFileSync(join(f.dir, ".env"), "utf8").match(/^CATALYST_HOST_NAME=(.*)$/m)?.[1];
+    expect(name).toBe("catalyst-laptop");
+    f.engine.upError = false;
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostName: "catalyst-laptop" } });
+    expect(f.state.hosts.map(host => host.hostName)).toEqual(["catalyst-laptop"]);
+    expect(d.rows.filter(row => row.Config.Labels["com.docker.compose.service"] === "supervisor")).toHaveLength(1);
+  });
+
+  test("a setup whose storage check stopped after writing compose.yaml resumes on the next run", async () => {
+    const f = fixture({ selected: true });
+    f.engine.files.set("CATALYST_ORG_KEY_FILE", ORG_KEY);
+    nativeFolders(f, true);
+    const d = docker(f);
+    expect(await run(f)).toMatchObject({ state: "waiting", reason: "runner_thoughts_custody_unavailable" });
+    expect(existsSync(join(f.dir, "compose.yaml"))).toBe(true);
+    expect(d.rows).toEqual([]);
+    expect(f.state.mints).toHaveLength(0);
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostName: "catalyst-laptop", hostId: "host-1" } });
+    expect(f.state.mints).toHaveLength(1);
+  });
+
+  test.each([
+    ["another folder", "outside_home"],
+    ["foreign Compose files", "config_files"],
+    ["a second supervisor", "supervisor_ambiguous"],
+    ["open permissions on its .env", "file_safety"],
+    ["no machine name", "identity_env"],
+  ] as const)("a mismatched installation (%s) is refused by name and left untouched", async (shape, check) => {
+    const { f, docker: d } = macInstall();
+    expect((await run(f)).state).toBe("done");
+    const before = readFileSync(join(f.dir, ".env"));
+    const calls = f.engine.calls.length;
+    const supervisor = d.rows[0]!;
+    if (shape === "another folder") {
+      const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), "foreign-runner-")); homes.push(elsewhere);
+      supervisor.Config.Labels["com.docker.compose.project.working_dir"] = elsewhere;
+    } else if (shape === "foreign Compose files")
+      supervisor.Config.Labels["com.docker.compose.project.config_files"] += ",/foreign/override.yaml";
+    else if (shape === "a second supervisor")
+      d.add("supervisor", false, await d.composeLabels(f.dir), supervisor.Config.Env, supervisor.Config.Image);
+    else if (shape === "open permissions on its .env") chmodSync(join(f.dir, ".env"), 0o644);
+    else supervisor.Config.Env = supervisor.Config.Env.filter(entry => !entry.startsWith("CATALYST_HOST_NAME="));
+    const result = await f.adapter.check(f.ctx, f.journal);
+    expect(result).toMatchObject({ state: "waiting", reason: "runner_installation_unverified", evidence: { installationCheck: check } });
+    expect(f.messages.at(-1)).toMatch(/^Setup could not adopt the existing catalyst-host installation: .+\.$/);
+    expect(await f.adapter.act!(f.ctx, f.journal)).toMatchObject({ reason: "runner_installation_unverified" });
+    if (shape !== "open permissions on its .env") expect(readFileSync(join(f.dir, ".env"))).toEqual(before);
+    expect(f.engine.calls.slice(calls)).not.toContain("composeUp");
+    expect(f.engine.calls.slice(calls).some(call => call.startsWith("writeVolumeFile"))).toBe(false);
+    expect(f.state.mints).toHaveLength(1);
+    // The receipt keeps the closed code and nothing Docker said.
+    const statePath = join(f.home, "receipt.json");
+    writeOnboardJournal(statePath, { ...f.journal, steps: [...f.journal.steps, { id: "runner", ...result, at: now.toISOString() } as never] });
+    expect(readOnboardJournal(statePath)?.steps.find(step => step.id === "runner")?.evidence).toMatchObject({ installationCheck: check });
+  });
+
+  test("an installation for another Catalyst address is not adopted", async () => {
+    const { f, docker: d } = macInstall();
+    expect((await run(f)).state).toBe("done");
+    d.rows[0]!.Config.Env = d.rows[0]!.Config.Env.map(entry =>
+      entry.startsWith("CATALYST_MIRROR_URL=") ? "CATALYST_MIRROR_URL=https://other.example.test" : entry);
+    expect(await f.adapter.check(f.ctx, f.journal)).toMatchObject({ state: "waiting", reason: "runner_identity_unverified" });
+    expect(f.state.mints).toHaveLength(1);
+  });
+});
 
 describe("runner account key enrollment policy", () => {
   async function keyFixture() {

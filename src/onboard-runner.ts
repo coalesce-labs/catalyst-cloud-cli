@@ -91,6 +91,21 @@ const DISK_POLICY_KEYS = [
 ] as const;
 
 
+/** CTC-5931: the closed proof an existing installation failed. Docker's own text never reaches output. */
+export type RunnerInstallationCheck = keyof typeof INSTALLATION_CHECKS;
+const INSTALLATION_CHECKS = {
+  engine_unreadable: "Docker did not answer the read of its supervisor container",
+  supervisor_ambiguous: "more than one catalyst-host supervisor container exists",
+  labels: "its supervisor container does not carry catalyst-host's Compose labels",
+  outside_home: "its Compose folder is not a folder in your home",
+  custody: "its saved storage authority is incomplete or names another folder",
+  config_files: "it was started from other Compose files than the ones setup writes",
+  file_safety: "its compose.yaml, .env or storage override has another owner or open permissions",
+  custody_dirs: "its storage exchange folders have another owner or open permissions",
+  identity_env: "its supervisor has no single valid machine name and Catalyst address",
+  image: "its supervisor runs an image other than this release's pin",
+} as const;
+
 export interface RunnerEngineInfo {
   arch: "amd64" | "arm64";
   /** On macOS the Linux engine runs in a VM. Bind mounts must pass the supervisor uid probe. */
@@ -126,9 +141,11 @@ function isUnenrolled(value: RunnerEnrollment | RunnerUnenrolled | null): value 
 export interface RunnerEngine {
   /** Null when there is no docker command, no reachable Linux engine, or no Compose plugin. */
   info(signal?: AbortSignal): Promise<RunnerEngineInfo | null>;
-  /** Existing Compose ownership and public identity, before setup chooses new files or a name. */
+  /** Existing Compose ownership and public identity, before setup chooses new files or a name.
+   * A refusal names the one proof that failed, so a retest can say which. */
   installation?(home: string, supervisorImage: string, signal?: AbortSignal): Promise<
-    { dir: string; hostName: string; baseUrl: string; supervisorImage?: string } | "missing" | "unverified"
+    { dir: string; hostName: string; baseUrl: string; supervisorImage?: string } | "missing" | "unverified" |
+    { unverified: RunnerInstallationCheck }
   >;
   /** Every container of this Compose project in any state, read before Compose is started.
    * Null when the listing itself could not be read; never a guess. */
@@ -312,52 +329,65 @@ export function dockerRunnerEngine(
       } : {}) };
     },
     async installation(home, supervisorImage, signal) {
+      // A `compose run` one-off (setup's own credential reads) carries the supervisor's labels too.
+      // Daemon-side auto-remove can outlive the CLI, and an interrupted one can stay: neither is the installation.
       const listed = await docker(["ps", "--all", "--filter", `label=com.docker.compose.project=${RUNNER_PROJECT}`,
-        "--filter", "label=com.docker.compose.service=supervisor", "--format", "{{.ID}}"], { signal });
-      if (listed.code !== 0) return "unverified";
+        "--filter", "label=com.docker.compose.service=supervisor", "--filter", "label=com.docker.compose.oneoff=False",
+        "--format", "{{.ID}}"], { signal });
+      if (listed.code !== 0) return { unverified: "engine_unreadable" };
       const ids = listed.stdout.trim().split(/\s+/).filter(Boolean);
       if (ids.length === 0) return "missing";
-      if (ids.length !== 1 || !/^[0-9a-f]{12,64}$/.test(ids[0]!)) return "unverified";
+      if (ids.length !== 1 || !/^[0-9a-f]{12,64}$/.test(ids[0]!)) return { unverified: "supervisor_ambiguous" };
       const read = await docker(["inspect", ids[0]!], { signal });
-      if (read.code !== 0) return "unverified";
+      if (read.code !== 0) return { unverified: "engine_unreadable" };
+      let check: RunnerInstallationCheck = "engine_unreadable";
+      const refuse = () => ({ unverified: check });
       try {
         const rows = JSON.parse(read.stdout);
-        if (!Array.isArray(rows) || rows.length !== 1) return "unverified";
+        if (!Array.isArray(rows) || rows.length !== 1) return refuse();
         const config = rows[0]?.Config;
         const labels = config?.Labels;
         const dir = labels?.["com.docker.compose.project.working_dir"];
+        check = "labels";
         if (labels?.["com.docker.compose.project"] !== RUNNER_PROJECT ||
-          labels?.["com.docker.compose.service"] !== "supervisor" || typeof dir !== "string" || !isAbsolute(dir)) return "unverified";
+          labels?.["com.docker.compose.service"] !== "supervisor" || typeof dir !== "string" || !isAbsolute(dir)) return refuse();
+        check = "outside_home";
         const inHome = relative(realpathSync(home), realpathSync(dir));
-        if (inHome === ".." || inHome.startsWith("../") || isAbsolute(inHome) || !lstatSync(dir).isDirectory()) return "unverified";
+        if (inHome === ".." || inHome.startsWith("../") || isAbsolute(inHome) || !lstatSync(dir).isDirectory()) return refuse();
+        check = "custody";
         const saved = readEnvFile(join(dir, ".env"));
         const custody = persistedCustody(dir, saved);
-        if (custody === "invalid") return "unverified";
+        if (custody === "invalid") return refuse();
+        check = "config_files";
         const files = [join(dir, "compose.yaml"), ...(custody === "installed" ? [join(dir, "compose.darwin-thoughts.yaml")] : [])];
-        if (labels?.["com.docker.compose.project.config_files"] !== files.join(",")) return "unverified";
+        if (labels?.["com.docker.compose.project.config_files"] !== files.join(",")) return refuse();
+        check = "file_safety";
         for (const path of [join(dir, "compose.yaml"), join(dir, ".env")]) {
           const stat = lstatSync(path);
-          if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o022) !== 0) return "unverified";
+          if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o022) !== 0) return refuse();
         }
         if (custody === "installed") {
           for (const path of [join(dir, ".env"), join(dir, "compose.darwin-thoughts.yaml")]) {
             const stat = lstatSync(path);
             if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() ||
-              (stat.mode & 0o7777) !== 0o600) return "unverified";
+              (stat.mode & 0o7777) !== 0o600) return refuse();
           }
+          check = "custody_dirs";
           for (const key of CUSTODY_KEYS.slice(1)) {
             const stat = lstatSync(saved![key]!);
             if (!stat.isDirectory() || stat.uid !== process.getuid?.() ||
-              (stat.mode & 0o7777) !== 0o700) return "unverified";
+              (stat.mode & 0o7777) !== 0o700) return refuse();
           }
         }
-        if (!Array.isArray(config.Env) || !config.Env.every((entry: unknown) => typeof entry === "string")) return "unverified";
+        check = "identity_env";
+        if (!Array.isArray(config.Env) || !config.Env.every((entry: unknown) => typeof entry === "string")) return refuse();
         const names = config.Env.filter((entry: string) => entry.startsWith("CATALYST_HOST_NAME="));
         const origins = config.Env.filter((entry: string) => entry.startsWith("CATALYST_MIRROR_URL="));
-        if (names.length !== 1 || origins.length !== 1) return "unverified";
+        if (names.length !== 1 || origins.length !== 1) return refuse();
         const hostName = names[0].slice("CATALYST_HOST_NAME=".length);
         const baseUrl = origins[0].slice("CATALYST_MIRROR_URL=".length);
-        if (!HOST_NAME.test(hostName)) return "unverified";
+        if (!HOST_NAME.test(hostName)) return refuse();
+        check = "image";
         // An interrupted update can leave saved intent ahead of the actual runtime.
         // A later requested pin still requires the same publisher and installation identity.
         if (config.Image !== supervisorImage) {
@@ -366,21 +396,21 @@ export function dockerRunnerEngine(
             config.Image.split("@sha256:")[0] !== supervisorImage.split("@sha256:")[0] ||
             saved.CATALYST_SUPERVISOR_IMAGE.split("@sha256:")[0] !== supervisorImage.split("@sha256:")[0] ||
             saved.CATALYST_HOST_NAME !== hostName ||
-            normalizeBaseUrl(saved.CATALYST_MIRROR_URL ?? "") !== normalizeBaseUrl(baseUrl)) return "unverified";
+            normalizeBaseUrl(saved.CATALYST_MIRROR_URL ?? "") !== normalizeBaseUrl(baseUrl)) return refuse();
           if (config.Image !== saved.CATALYST_SUPERVISOR_IMAGE && saved.CATALYST_SUPERVISOR_IMAGE !== supervisorImage) {
             // Prove the configured old digest names this exact cached runtime, without a pull.
             const imageRead = await docker(["image", "inspect", config.Image], { signal });
-            if (imageRead.code !== 0 || signal?.aborted) return "unverified";
+            if (imageRead.code !== 0 || signal?.aborted) return refuse();
             const cached = JSON.parse(imageRead.stdout);
             const runtimeImage = rows[0]?.Image;
             if (!Array.isArray(cached) || cached.length !== 1 ||
               typeof runtimeImage !== "string" || !/^sha256:[a-f0-9]{64}$/.test(runtimeImage) ||
               cached[0]?.Id !== runtimeImage || !Array.isArray(cached[0]?.RepoDigests) ||
-              !cached[0].RepoDigests.includes(config.Image)) return "unverified";
+              !cached[0].RepoDigests.includes(config.Image)) return refuse();
           }
         }
         return { dir, hostName, baseUrl: normalizeBaseUrl(baseUrl), supervisorImage: config.Image };
-      } catch { return "unverified"; }
+      } catch { return refuse(); }
     },
     async projectContainers(signal) {
       const read = await docker(["ps", "--all",
@@ -854,13 +884,22 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
     let dir = join(state, "runner");
     const installation = await engine.installation?.(ctx.home, ctx.env.CATALYST_SUPERVISOR_IMAGE ?? RUNNER_HOST_IMAGES.supervisor, signal);
     if (installation === "unverified") return waiting("runner_installation_unverified", selected);
+    if (typeof installation === "object" && "unverified" in installation) {
+      input.message?.(`Setup could not adopt the existing ${RUNNER_PROJECT} installation: ${INSTALLATION_CHECKS[installation.unverified]}.`);
+      return waiting("runner_installation_unverified", { ...selected, installationCheck: installation.unverified });
+    }
     let credential: RunnerEnrollment | RunnerUnenrolled | null = null;
     if (installation && installation !== "missing") {
       if (installation.baseUrl !== normalizeBaseUrl(cfg.baseUrl)) return waiting("runner_identity_unverified", selected);
       dir = installation.dir;
       credential = await engine.enrollment(dir, signal);
-      if (!credential) return waiting("runner_credential_unverified", selected);
-      if (!isUnenrolled(credential) && (credential.tenant !== account || credential.enrollmentKind !== "self_hosted"))
+      // CTC-5931: the supervisor writes its credential after Compose starts it. An absent file is
+      // not enrolled yet, exactly as act reads it; only a present file that cannot be read is refused.
+      if (!credential && await engine.hasVolumeFile(dir, "CATALYST_HOST_CREDENTIAL_FILE", signal)) {
+        credential = await engine.enrollment(dir, signal);
+        if (!credential) return waiting("runner_credential_unverified", selected);
+      }
+      if (credential && !isUnenrolled(credential) && (credential.tenant !== account || credential.enrollmentKind !== "self_hosted"))
         return waiting("runner_identity_unverified", selected);
     }
     let teamId = selectedOnboardTeam(journal);

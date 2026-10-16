@@ -512,6 +512,8 @@ function normalizeStep(value: unknown, fallbackAt: string): OnboardStep | null {
     "custodyResultInstalled",
     "custodyAuthorityMatched",
     "custodyTelemetry",
+    // CTC-5931: the closed proof an existing runner installation failed.
+    "installationCheck",
   ] as const) {
     const item = evidence?.[key];
     if (
