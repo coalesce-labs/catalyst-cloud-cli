@@ -92,7 +92,6 @@ function fail(reason: string): never { throw new CustodyInstallError(reason); }
 const CREATE_REFUSAL_ADVICE: Readonly<Record<string, string>> = {
   file_sharing: "Docker Desktop refused to share a storage folder with the check container. In Docker Desktop, open Settings, then Resources, then File sharing, make sure your home folder is listed, apply, and run setup again.",
   image_not_cached: "The pinned supervisor image is not in this engine's cache. Run setup again so it fetches the pinned images first.",
-  engine_unavailable: "Docker stopped answering. Start Docker Desktop, wait until it reports running, and run setup again.",
 };
 /** One fixed next step for a known installer refusal; undefined when there is none to give. */
 export function darwinThoughtsInstallAdvice(error: unknown): string | undefined {
@@ -100,15 +99,16 @@ export function darwinThoughtsInstallAdvice(error: unknown): string | undefined 
   const kind = reason?.startsWith("bootstrap_create_refused:") ? reason.slice("bootstrap_create_refused:".length) : undefined;
   return kind === undefined ? undefined : CREATE_REFUSAL_ADVICE[kind];
 }
-/** Classify the daemon's own create refusal into a closed code; its text never reaches output. */
-function createRefusal(stderr: string): string {
+/** Classify the daemon's own create refusal into a closed code; its text never reaches output.
+ * Only an HTTP error response from the daemon proves it rejected the create. A CLI or transport
+ * failure (unexpected EOF, reset, timeout) is ambiguous: the daemon may still persist the helper,
+ * so it returns undefined and cleanup recovers exactly as for an absent ACK. */
+function createRefusal(stderr: string): string | undefined {
+  if (!/(?:^|\n)(?:docker: )?Error response from daemon: /.test(stderr)) return undefined;
   if (/mounts denied|is not shared from the host|not known to Docker/i.test(stderr)) return "bootstrap_create_refused:file_sharing";
   if (/No such image|pull access denied|manifest unknown/i.test(stderr)) return "bootstrap_create_refused:image_not_cached";
-  if (/Cannot connect to the Docker daemon|Is the docker daemon running/i.test(stderr)) return "bootstrap_create_refused:engine_unavailable";
   return "bootstrap_create_refused";
 }
-/** Receipts the command seam synthesizes when the CLI never answered; those are not refusals. */
-const UNRECEIVED = new Set(["command_receipt_unreceived", "command_start_unreceived", "command_cancelled"]);
 const VERIFIER_REFUSALS = new Set([
   "ancestor", "ancestor_identity", "bootstrap_directory", "bootstrap_owner", "bootstrap_path",
   "channel_identity", "cleanup", "deadline", "directory", "engine_identity", "exchange",
@@ -624,11 +624,12 @@ async function actualBootstrap(input: BootstrapInput): Promise<BootstrapReceipt>
       Math.max(1, Math.ceil((input.deadlineMs - Date.now()) / 1000)) + "s", "/usr/bin/env", "-i",
       "PATH=/usr/bin:/bin", "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0", "/usr/local/bin/bun", "--config=/dev/null", "--no-env-file", "--cwd=/",
       "-e", program, canonicalDarwinThoughtsJson({ authority, deadlineMs: input.deadlineMs })]);
-    if (created.code !== 0 && created.stderr !== "" && !UNRECEIVED.has(created.stderr)) {
+    const refusal = created.code !== 0 ? createRefusal(created.stderr) : undefined;
+    if (refusal !== undefined) {
       // The daemon answered with a refusal. Keep it as a closed code; cleanup still has to
       // prove nothing persisted before that refusal may reach the person.
       createRefused = true;
-      fail(createRefusal(created.stderr));
+      fail(refusal);
     }
     if (created.code !== 0 || !/^[a-f0-9]{64}$/.test(created.stdout)) fail("bootstrap_create_unreceived");
     id = created.stdout;

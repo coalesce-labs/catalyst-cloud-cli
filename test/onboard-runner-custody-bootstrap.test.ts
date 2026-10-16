@@ -25,7 +25,7 @@ const VENDORED_VERIFIER = join(import.meta.dirname, "..", "vendor", "self-host",
 const MOUNTS_DENIED = "docker: Error response from daemon: mounts denied: \nThe path /opt/homebrew/lib/node_modules/@catalyst-cloud/cli/vendor/self-host/darwin-thoughts-custody/verifier.mjs is not shared from the host and is not known to Docker.\nYou can configure shared paths from Docker -> Preferences... -> Resources -> File Sharing.";
 type Mode = "complete" | "ack-timeout" | "ack-invalid" | "foreign-label" |
   "foreign-image" | "foreign-name" | "foreign-cache" | "foreign-daemon" |
-  "rm-noop" | "late-create" | "proof-refused" | "unknown-refusal" | "create-refused" | "create-refused-persisted";
+  "rm-noop" | "late-create" | "proof-refused" | "unknown-refusal" | "create-refused" | "create-refused-persisted" | "create-transport-eof";
 interface State {
   mode: Mode; calls: string[][]; created?: string[]; removed: boolean; inspectCount: number;
   row?: { Id: string; Name: string; Image: string; Config: { Image: string; Labels: Record<string, string> } };
@@ -86,6 +86,7 @@ describe("production custody bootstrap helper ACK and cleanup", () => {
         state.created=args;
         if(state.mode==='create-refused'){save();process.stderr.write(${JSON.stringify(MOUNTS_DENIED)}+'\\n');process.exit(125);}
         state.row={Id:${JSON.stringify(CID)},Name:'/'+args[args.indexOf('--name')+1],Image:${JSON.stringify(IMAGE_ID)},Config:{Image:${JSON.stringify(IMAGE)},Labels:labels}};save();
+        if(state.mode==='create-transport-eof'){save();process.stderr.write('error during connect: Post "http://%2Fvar%2Frun%2Fdocker.sock/v1.47/containers/create": unexpected EOF\\n');process.exit(1);}
         if(state.mode==='create-refused-persisted'){save();process.stderr.write('Error response from daemon: unexpected engine failure\\n');process.exit(125);}
         if(state.mode==='ack-timeout'){setInterval(()=>{},100);setTimeout(()=>process.exit(0),5000);}
         else if(['ack-invalid','late-create','foreign-label','foreign-image','foreign-name','foreign-cache','foreign-daemon'].includes(state.mode))out('invalid-create-ack');
@@ -93,7 +94,7 @@ describe("production custody bootstrap helper ACK and cleanup", () => {
       }
       else if(args[0]==='inspect'){
         const target=args.at(-1);state.inspectCount++;
-        if(!state.row||state.removed||![state.row.Id,state.row.Name,state.row.Name.slice(1)].includes(target)||(state.mode==='late-create'&&state.inspectCount===1)){
+        if(!state.row||state.removed||![state.row.Id,state.row.Name,state.row.Name.slice(1)].includes(target)||(['late-create','create-transport-eof'].includes(state.mode)&&state.inspectCount===1)){
           save();process.stderr.write('Error: No such container: '+target+'\\n');process.exit(1);
         }
         const row=JSON.parse(JSON.stringify(state.row));
@@ -103,7 +104,7 @@ describe("production custody bootstrap helper ACK and cleanup", () => {
         if(args.includes('--format'))out(row.Id+' '+row.Config.Labels[${JSON.stringify(LABEL)}]);
         else out(JSON.stringify([row]));
       }
-      else if(args[0]==='ps')out(state.row&&!state.removed?state.row.Id:'');
+      else if(args[0]==='ps')out(state.row&&!state.removed&&!(state.mode==='create-transport-eof'&&state.inspectCount<2)?state.row.Id:'');
       else if(args[0]==='start'){
         if(args.at(-1)!==${JSON.stringify(CID)})throw Error('fixture_foreign_start');
         if(state.mode==='proof-refused'||state.mode==='unknown-refusal'){
@@ -212,6 +213,15 @@ describe("production custody bootstrap helper ACK and cleanup", () => {
     expect(calls.slice(create + 1)).toContainEqual(["ps", "--all", "--no-trunc", "--quiet", "--filter", "label=" + label]);
     expect(state.row).toBeUndefined();
     expect(calls.filter(args => ["start", "rm"].includes(args[0]!))).toEqual([]);
+  });
+  it("treats a create transport failure as unreceived and recovers a helper the daemon persisted late", async () => {
+    const f = fixture("create-transport-eof");
+    let error: unknown;
+    try { await receiveDarwinThoughtsBootstrapForTest(f.input); } catch (caught) { error = caught; }
+    expect(darwinThoughtsInstallRefusal(error)).toBe("bootstrap_create_unreceived");
+    expect(darwinThoughtsInstallAdvice(error)).toBeUndefined();
+    const state = f.state(); receivedIdentity(state); removedAndAbsent(state);
+    expect(state.inspectCount).toBeGreaterThanOrEqual(2);
   });
   it("still recovers and removes a helper the Engine persisted despite a create refusal", async () => {
     const f = fixture("create-refused-persisted");
