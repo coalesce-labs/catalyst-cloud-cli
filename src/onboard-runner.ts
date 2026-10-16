@@ -94,6 +94,7 @@ const DISK_POLICY_KEYS = [
 /** CTC-5931: the closed proof an existing installation failed. Docker's own text never reaches output. */
 export type RunnerInstallationCheck = keyof typeof INSTALLATION_CHECKS;
 const INSTALLATION_CHECKS = {
+  engine_unavailable: "Docker did not list this machine's containers",
   engine_unreadable: "Docker did not answer the read of its supervisor container",
   supervisor_ambiguous: "more than one catalyst-host supervisor container exists",
   labels: "its supervisor container does not carry catalyst-host's Compose labels",
@@ -142,10 +143,10 @@ export interface RunnerEngine {
   /** Null when there is no docker command, no reachable Linux engine, or no Compose plugin. */
   info(signal?: AbortSignal): Promise<RunnerEngineInfo | null>;
   /** Existing Compose ownership and public identity, before setup chooses new files or a name.
-   * A refusal names the one proof that failed, so a retest can say which. */
+   * A refusal stays a string, and names the one proof that failed (runnerInstallationRefusal reads it). */
   installation?(home: string, supervisorImage: string, signal?: AbortSignal): Promise<
     { dir: string; hostName: string; baseUrl: string; supervisorImage?: string } | "missing" | "unverified" |
-    { unverified: RunnerInstallationCheck }
+    `unverified:${RunnerInstallationCheck}`
   >;
   /** Every container of this Compose project in any state, read before Compose is started.
    * Null when the listing itself could not be read; never a guess. */
@@ -334,14 +335,14 @@ export function dockerRunnerEngine(
       const listed = await docker(["ps", "--all", "--filter", `label=com.docker.compose.project=${RUNNER_PROJECT}`,
         "--filter", "label=com.docker.compose.service=supervisor", "--filter", "label=com.docker.compose.oneoff=False",
         "--format", "{{.ID}}"], { signal });
-      if (listed.code !== 0) return { unverified: "engine_unreadable" };
+      if (listed.code !== 0) return "unverified:engine_unavailable";
       const ids = listed.stdout.trim().split(/\s+/).filter(Boolean);
       if (ids.length === 0) return "missing";
-      if (ids.length !== 1 || !/^[0-9a-f]{12,64}$/.test(ids[0]!)) return { unverified: "supervisor_ambiguous" };
+      if (ids.length !== 1 || !/^[0-9a-f]{12,64}$/.test(ids[0]!)) return "unverified:supervisor_ambiguous";
       const read = await docker(["inspect", ids[0]!], { signal });
-      if (read.code !== 0) return { unverified: "engine_unreadable" };
+      if (read.code !== 0) return "unverified:engine_unreadable";
       let check: RunnerInstallationCheck = "engine_unreadable";
-      const refuse = () => ({ unverified: check });
+      const refuse = () => `unverified:${check}` as const;
       try {
         const rows = JSON.parse(read.stdout);
         if (!Array.isArray(rows) || rows.length !== 1) return refuse();
@@ -883,10 +884,10 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
     catch { return waiting("runner_directory_unavailable", selected); }
     let dir = join(state, "runner");
     const installation = await engine.installation?.(ctx.home, ctx.env.CATALYST_SUPERVISOR_IMAGE ?? RUNNER_HOST_IMAGES.supervisor, signal);
-    if (installation === "unverified") return waiting("runner_installation_unverified", selected);
-    if (typeof installation === "object" && "unverified" in installation) {
-      input.message?.(`Setup could not adopt the existing ${RUNNER_PROJECT} installation: ${INSTALLATION_CHECKS[installation.unverified]}.`);
-      return waiting("runner_installation_unverified", { ...selected, installationCheck: installation.unverified });
+    if (typeof installation === "string" && installation !== "missing") {
+      const check = runnerInstallationRefusal(installation);
+      if (check) input.message?.(`Setup could not adopt the existing ${RUNNER_PROJECT} installation: ${INSTALLATION_CHECKS[check]}.`);
+      return waiting("runner_installation_unverified", { ...selected, ...(check ? { installationCheck: check } : {}) });
     }
     let credential: RunnerEnrollment | RunnerUnenrolled | null = null;
     if (installation && installation !== "missing") {
@@ -1352,4 +1353,35 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
       return { state: "done" };
     },
   };
+}
+
+/** The closed proof a refused installation names; null for an adopted, missing or unnamed result. */
+export function runnerInstallationRefusal(value: unknown): RunnerInstallationCheck | null {
+  if (typeof value !== "string" || !value.startsWith("unverified:")) return null;
+  const check = value.slice("unverified:".length);
+  return Object.hasOwn(INSTALLATION_CHECKS, check) ? check as RunnerInstallationCheck : null;
+}
+
+/** What a refused proof means, in the words setup prints. */
+export function runnerInstallationCheckText(check: RunnerInstallationCheck): string {
+  return INSTALLATION_CHECKS[check];
+}
+
+/** CTC-5931: whether a catalyst-host runner on this machine is the installation setup verifies.
+ * Null when Docker shows none and setup installed none here, so a machine without a runner is
+ * untouched. Docker that cannot list containers only counts where setup installed a runner. */
+export async function localRunnerInstallation(
+  ctx: Pick<Ctx, "home" | "env">,
+  engine: Pick<RunnerEngine, "installation"> = dockerRunnerEngine({ env: ctx.env }),
+): Promise<{ verified: string } | { refused: RunnerInstallationCheck } | null> {
+  const installed = await engine.installation?.(ctx.home, ctx.env.CATALYST_SUPERVISOR_IMAGE ?? RUNNER_HOST_IMAGES.supervisor)
+    .catch(() => "unverified:engine_unavailable" as const);
+  if (!installed || installed === "missing") return null;
+  if (typeof installed === "object") return { verified: installed.dir };
+  const check = runnerInstallationRefusal(installed) ?? "engine_unreadable";
+  if (check !== "engine_unavailable") return { refused: check };
+  try {
+    return readEnvFile(join(onboardStateRoot(ctx.home, ctx.env), "runner", ".env"))?.CATALYST_SUPERVISOR_IMAGE
+      ? { refused: check } : null;
+  } catch { return null; }
 }

@@ -40,6 +40,7 @@ import {
   type RuntimeFacts,
 } from "./runtime.js";
 import { semverOlder } from "./semver.js";
+import { localRunnerInstallation, runnerInstallationCheckText } from "./onboard-runner.js";
 import { FIRST_STAMPED_VERSION } from "./skill-shape.js";
 import { installedBundleVersion } from "./skills.js";
 import {
@@ -174,6 +175,8 @@ export function catalystCommandCheck(
 }
 
 export interface ReadyDeps {
+  /** CTC-5931 test seam: the catalyst-host runner on this machine; defaults to the docker CLI. */
+  runnerInstallation?: () => ReturnType<typeof localRunnerInstallation>;
   onboarding?: OnboardingReadyDeps;
   /** CTC-2158: replaces `nodeMajor`. A check called `node` cannot honestly describe bun, and under
    *  bun it used to print bun's Node-*compat* major as if it were Node. Test seam; defaults to the
@@ -413,6 +416,17 @@ export async function readyReport(
     note: true,
     line: readyReplicaLine(replica),
   });
+
+  // CTC-5931: a runner whose installation fails a proof is not running Catalyst's work, and none of
+  // its own measurements can be read. It fails the verdict; it is never a note.
+  const runner = await (deps.runnerInstallation ?? (() => localRunnerInstallation(ctx)))();
+  if (runner && "refused" in runner)
+    checks.push({ id: "runner:installation", ok: false,
+      line: `runner: setup could not verify this machine's catalyst-host installation: ${runnerInstallationCheckText(runner.refused)} (${runner.refused})`,
+      fix: "keep its files and credentials, run catalyst setup --runner, and send its output to Catalyst support if it still refuses",
+      who: "you" });
+  else if (runner)
+    checks.push({ id: "runner:installation", ok: true, line: `runner: catalyst-host installation verified in ${runner.verified}` });
 
   if (cache) {
     const doc = cache.doc;

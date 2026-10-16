@@ -1589,10 +1589,10 @@ describe("the Docker engine", () => {
       inspect: { code, stdout: JSON.stringify(value) },
     }).exec }).installation!(f.ctx.home, SUPERVISOR);
     expect(await inspect([{ Config: config }])).toEqual({ dir: f.dir, hostName: "catalyst-laptop", baseUrl: "https://cloud.example.test", supervisorImage: SUPERVISOR });
-    expect(await inspect([{ Config: { ...config, Image: "unrelated:latest" } }])).toEqual({ unverified: "image" });
-    expect(await inspect([{ Config: config }], 1)).toEqual({ unverified: "engine_unreadable" });
+    expect(await inspect([{ Config: { ...config, Image: "unrelated:latest" } }])).toBe("unverified:image");
+    expect(await inspect([{ Config: config }], 1)).toBe("unverified:engine_unreadable");
     expect(await dockerRunnerEngine({ exec: recordingExec({ "ps --all": { code: 0, stdout: "" } }).exec }).installation!(f.ctx.home, SUPERVISOR)).toBe("missing");
-    expect(await dockerRunnerEngine({ exec: recordingExec({ "ps --all": { code: 1, stdout: "" } }).exec }).installation!(f.ctx.home, SUPERVISOR)).toEqual({ unverified: "engine_unreadable" });
+    expect(await dockerRunnerEngine({ exec: recordingExec({ "ps --all": { code: 1, stdout: "" } }).exec }).installation!(f.ctx.home, SUPERVISOR)).toBe("unverified:engine_unavailable");
   });
 
   test("Compose runs in the runner directory with the caller's CATALYST_ variables removed", async () => {
@@ -1706,10 +1706,10 @@ describe("the Docker engine", () => {
     // chmod, rather than creation mode, makes the broad permissions meaningful on an existing file.
     const { chmodSync } = await import("node:fs");
     chmodSync(override, 0o666);
-    expect(await inspect()).toEqual({ unverified: "file_safety" });
+    expect(await inspect()).toBe("unverified:file_safety");
     chmodSync(override, 0o600);
     config.Labels["com.docker.compose.project.config_files"] += ",/foreign/override.yaml";
-    expect(await inspect()).toEqual({ unverified: "config_files" });
+    expect(await inspect()).toBe("unverified:config_files");
   });
 
   test("handing folders to the runner uid gives root back only CHOWN", async () => {
