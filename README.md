@@ -166,6 +166,19 @@ With a person at the terminal, `catalyst onboard` starts each of these approvals
 
 With `--runner yes`, setup starts the self-hosted runner and verifies enrollment, advertised capacity and team admission. This needs Docker with Compose, pinned host images and an organization key file (`CATALYST_RUNNER_ORG_KEY_FILE`). When images, a key or admission are missing, exit 11 names that gate. A failed setup step exits 10. Use `--runner no` to skip the machine's runner. Unlike the interactive optional runner step, an explicitly requested headless runner must finish before exit 0.
 
+### Stopping or removing this machine's runner
+
+Run these on the machine itself:
+
+| command | what it does |
+| -- | -- |
+| `catalyst runner stop` | The machine takes no new work. Work it already started finishes or reaches its deadline. Its registration, settings and checkouts are kept, and `catalyst hosts` shows it as `stopped`. |
+| `catalyst runner start` | Starts it again with the same registration. |
+| `catalyst runner status` | Says whether it is running, stopped or not installed. |
+| `catalyst runner uninstall` | Asks first (`--yes` confirms without a terminal; an owner or admin login is needed). It stops new work, revokes the machine's registration and the runner key setup issued, and switches the project's runner admission off when no other machine runs it. Then it removes the runner's containers, their volumes and the session network, and the setup files in the runner folder. On macOS it also removes the storage LaunchAgent and its folders. On Linux it also removes the session-egress units, their script and state, and the `inet catalyst_session` nftables table, through `sudo`. |
+
+Uninstall removes only what setup created. Anything that does not match what setup wrote, such as a network with another label or a changed unit file, is left in place. Your repository and thoughts checkouts are kept unless you add `--delete-checkouts`. The command ends with a "Left behind" list naming everything it did not remove. When a step fails, such as a cloud call while you are offline, it says which one and exits 1. Run it again: it picks up where the last run stopped. Do not delete the runner folder by hand while the runner is installed. That deletes its settings while its containers keep running.
+
 With `--json`, stdout carries exactly one document: the onboarding receipt plus a `headless` block (`schema: "catalyst-onboard-headless/1"`). The block holds the resolved `inputs` (the key appears only as its source: `env`, `file` or `saved`), and lists of items under `missing`, `refused`, `failed`, `deferred` and `warnings`. Each item has `id`, `kind` (`input`, `grant` or `step`), `reason` and a one-line `text`, plus `flag`, `env` and `url` where they apply. Everything else goes to stderr.
 
 | Exit | Meaning |
@@ -267,6 +280,8 @@ A `customer.json` written by an older bundle is still read unchanged; it gains t
 `catalyst ready` also says when either the installed skills or the CLI is behind the latest publish, naming both versions and the command for each; it is a note, never a failure, and `--offline` (or `CATALYST_SKILLS_OFFLINE=1`) skips the lookup.
 
 ## Uninstalling
+
+If this machine runs Catalyst's work, run `catalyst runner uninstall` first (see "Stopping or removing this machine's runner").
 
 Remove the skills the way you installed them: `/plugin uninstall catalyst@catalyst-cloud` in Claude Code, or delete the skill directories (`catalyst-github`, `catalyst-linear`, `catalyst-onboard`, `run-this-project`, `unstick`, `what-needs-me`, `what-this-repo-needs`, `whats-happening`) from wherever `npx skills add` wrote them. Skills an earlier release shipped (`catalyst-setup`, `connect-me`, `how-catalyst-works`) go the same way; the CLI removes its own stamped copies of them when it installs or refreshes skills. Then remove what the CLI wrote:
 
