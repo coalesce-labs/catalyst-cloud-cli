@@ -52,6 +52,11 @@ const GLOBAL_FLAGS: FlagTable = {
 /** Per-verb flag tables. A verb absent here accepts only the global flags. */
 export const FLAG_TABLES: Record<string, FlagTable> = {
   hosts: { yes: { value: false, help: "confirm removal without a terminal" } },
+  runner: {
+    check: { value: false, help: "read the approved release and say what would change, without changing it" },
+    auto: { value: false, help: "one-line output for the scheduled run" },
+    dir: { value: true, help: "the runner directory (default: the one setup created)" },
+  },
   login: {
     "start-replica": {
       value: false,
@@ -532,6 +537,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
 export const VERB_USAGE: Record<string, string> = {
   hosts:
     "hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name> [--json]",
+  runner: "runner update [--check] [--dir <runner directory>] | runner auto-update [status|on|off]",
   setup:
     "setup [onboard options]   (sets up Catalyst step by step; same as catalyst onboard) | setup --engine <file> --engine-sha256 <hex> [-- <install options>]   (run by install.sh; install.sh --help lists the options)",
   login:
