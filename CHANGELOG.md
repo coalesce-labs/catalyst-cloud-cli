@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.17
+
+A self-hosted machine now keeps its own images current. Every 15 minutes it checks for the release Catalyst approved, waits until no work is running on it, switches to the new images, and goes back to the previous ones if the machine is not ready within five minutes. `catalyst runner update --check` shows what would change, and `catalyst runner auto-update status|on|off` controls the schedule. Setup turns it on and now starts new machines on the current approved images. To turn it on for a machine you already set up, run `catalyst runner auto-update on`.
+
 ## 0.16.16
 
 Publishing a browser verification recording now saves its proof card with the required attachment details. Update the CLI before using `browser-verify --publish`.
