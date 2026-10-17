@@ -78,8 +78,8 @@ describe("parse and decide: only a valid, strictly newer approved release moves 
     expect(decideRelease(null, answered(body))).toEqual({ action: "retain", reason: "response_invalid", terminal: false });
   });
 
-  it("an equal or older generation is not newer", () => {
-    expect(decideRelease(3, answered(release({ generation: 3 })))).toMatchObject({ action: "retain", reason: "not_newer" });
+  it("an older generation is not newer; the applied one is verified, not trusted", () => {
+    expect(decideRelease(3, answered(release({ generation: 3 })))).toMatchObject({ action: "verify", release: { generation: 3 } });
     expect(decideRelease(3, answered(release({ generation: 2 })))).toMatchObject({ action: "retain", reason: "not_newer" });
     expect(decideRelease(3, answered(release({ generation: 4 })))).toMatchObject({ action: "update" });
   });
@@ -202,6 +202,28 @@ describe("runRunnerUpdate", () => {
     const second = fakeEngine(dir);
     expect(await runRunnerUpdate(second.engine, { dir, ...fastClock() })).toMatchObject({ outcome: "current", generation: 1 });
     expect(second.calls).toEqual(["read"]);
+  });
+
+  it("a setup run that puts the old images back after an update is moved back to the applied release", async () => {
+    // Seen on a fresh Linux install, 2026-10-17: setup started the machine on its default pins, the
+    // schedule moved it to the approved release, then running setup again wrote the default pins
+    // back into .env and restarted on them while release-state still said that release.
+    await runRunnerUpdate(fakeEngine(dir).engine, { dir, ...fastClock() });
+    expect(readReleaseState(dir).generation).toBe(1);
+    writeFileSync(join(dir, ".env"), ORIGINAL_ENV, { mode: 0o600 });
+    const after = fakeEngine(dir); // now running what .env names: the old images
+    const result = await runRunnerUpdate(after.engine, { dir, ...fastClock() });
+    expect(result).toMatchObject({ outcome: "updated", detail: "updated:runner,supervisor,watchdog", generation: 1 });
+    expect(after.live()).toEqual(TARGET);
+    expect(imagesIn(readFileSync(join(dir, ".env"), "utf8"))).toEqual(TARGET);
+  });
+
+  it("the applied release with .env right but the old supervisor still running is moved too", async () => {
+    await runRunnerUpdate(fakeEngine(dir).engine, { dir, ...fastClock() });
+    const stale = fakeEngine(dir, { live: { ...TARGET, supervisor: OLD.supervisor } });
+    expect(await runRunnerUpdate(stale.engine, { dir, ...fastClock() })).toMatchObject({ generation: 1 });
+    expect(stale.calls).toContain("up");
+    expect(stale.live()).toEqual(TARGET);
   });
 
   it("a phase container on this host at the first look defers, and nothing is stopped or written", async () => {
