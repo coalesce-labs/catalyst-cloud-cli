@@ -69,7 +69,7 @@ const CUSTODY_KEYS = [
 ] as const;
 
 /** A persisted authority selects bindings, never substitutes for a fresh native proof. */
-function persistedCustody(dir: string, values: Record<string, string> | null): "absent" | "invalid" | "installed" {
+export function persistedCustody(dir: string, values: Record<string, string> | null): "absent" | "invalid" | "installed" {
   const present = CUSTODY_KEYS.map(key => values?.[key] ?? "");
   if (present.every(value => !value)) return "absent";
   if (present.some(value => !value)) return "invalid";
@@ -186,7 +186,8 @@ export type RunnerExec = (
   options: RunnerExecOptions,
 ) => Promise<{ code: number; stdout: string; stderr?: string }>;
 
-const spawnDocker: RunnerExec = (args, options) =>
+/** The docker CLI as a child process. Exported for `catalyst runner update`. */
+export const spawnDocker: RunnerExec = (args, options) =>
   new Promise((resolve, reject) => {
     const child = spawn("docker", args, {
       env: options.env,
@@ -221,6 +222,23 @@ function composeErrorText(raw: string | undefined): string | undefined {
   return text !== "" ? text : undefined;
 }
 
+/** The Compose arguments for the installation in `dir`, with the Darwin custody file when its
+ * persisted authority is installed. Null when that authority is only partly present. */
+export function runnerComposeArgs(dir: string): string[] | null {
+  const custody = persistedCustody(dir, readEnvFile(join(dir, ".env")));
+  if (custody === "invalid") return null;
+  return [
+    "compose",
+    "--project-name",
+    RUNNER_PROJECT,
+    "--file",
+    join(dir, "compose.yaml"),
+    ...(custody === "installed" ? ["--file", join(dir, "compose.darwin-thoughts.yaml")] : []),
+    "--env-file",
+    join(dir, ".env"),
+  ];
+}
+
 /** The real engine, through the docker CLI. Compose reads `.env` only: the caller's CATALYST_ and
  * DOCKER_SOCKET_ variables are removed, because Compose prefers an exported value over the file. */
 export function dockerRunnerEngine(
@@ -242,20 +260,7 @@ export function dockerRunnerEngine(
       return { code: 1, stdout: "" };
     }
   };
-  const compose = (dir: string): string[] | null => {
-    const custody = persistedCustody(dir, readEnvFile(join(dir, ".env")));
-    if (custody === "invalid") return null;
-    return [
-      "compose",
-      "--project-name",
-      RUNNER_PROJECT,
-      "--file",
-      join(dir, "compose.yaml"),
-      ...(custody === "installed" ? ["--file", join(dir, "compose.darwin-thoughts.yaml")] : []),
-      "--env-file",
-      join(dir, ".env"),
-    ];
-  };
+  const compose = runnerComposeArgs;
   const supervisorShell = (dir: string, script: string): string[] | null => {
     const files = compose(dir);
     if (!files) return null;
@@ -682,13 +687,18 @@ function parseHosts(body: unknown): ListedHost[] | null {
 }
 
 /** `KEY=value` lines; a single-quoted value is unquoted. Anything else is ignored. */
-function readEnvFile(path: string): Record<string, string> | null {
+export function readEnvFile(path: string): Record<string, string> | null {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch {
     return null;
   }
+  return parseEnvText(text);
+}
+
+/** `KEY=value` lines of `.env` text, as readEnvFile reads them. */
+export function parseEnvText(text: string): Record<string, string> {
   const values: Record<string, string> = {};
   for (const line of text.split("\n")) {
     const match = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line);
@@ -734,6 +744,9 @@ export interface OnboardRunnerInput {
   chooseName?: (defaultName: string) => Promise<string | null>;
   message?: (text: string) => void;
   sleep?: (ms: number) => Promise<void>;
+  /** CTC-4646: turns on the runner's update schedule after it starts; returns the line to show.
+   *  Never fails setup: an update schedule is a convenience, and `catalyst runner update` works without it. */
+  autoUpdate?: (dir: string) => string;
   /** How long a check waits for the host to enroll and advertise. */
   waitMs?: number;
   pollMs?: number;
@@ -1310,6 +1323,13 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
         return { state: "failed", reason: "runner_compose_failed", evidence: { ...selected,
           project: RUNNER_PROJECT, ...(up.error ? { composeError: up.error } : {}) } };
       acted = true;
+      if (input.autoUpdate) {
+        try {
+          input.message?.(input.autoUpdate(p.dir));
+        } catch {
+          input.message?.("Automatic runner updates could not be turned on. Run catalyst runner auto-update on to try again.");
+        }
+      }
       return { state: "done" };
     },
   };
