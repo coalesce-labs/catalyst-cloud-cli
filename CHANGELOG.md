@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.16
+
+Publishing a browser verification recording now saves its proof card with the required attachment details. Update the CLI before using `browser-verify --publish`.
+
 ## 0.16.15
 
 Command-line workflows can report stage progress with `catalyst stage start`, `renew`, `done`, and `fail`, and choose an eligible AI account and model for a local session with `catalyst seat checkout`. Retries reuse the same stage attempt. `catalyst write create --label` and `write label --add`/`--remove` now accept a label by name, and a refused write exits non-zero with a JSON error on stdout under `--json`.
