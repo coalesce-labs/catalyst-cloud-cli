@@ -86,7 +86,7 @@ describe("write", () => {
     expect(await main(["write", "reaction", "--comment", "c-9", "--emoji", "👍"], makeCtx(home))).toBe(0);
     expect(server.writes[2]!.body).toEqual({ emoji: "👍", commentId: "c-9" });
     expect(await main(["write", "attachment", "ENG-1", "--title", "PR", "--url", "https://x/1"], makeCtx(home))).toBe(0);
-    expect(server.writes[3]!.body).toEqual({ issueId: "lin-eng-1", title: "PR", url: "https://x/1" });
+    expect(server.writes[3]!.body).toEqual({ issueId: "lin-eng-1", title: "PR", url: "https://x/1", metadata: {} });
     writeFileSync(`${home}/plan.json`, JSON.stringify([{ content: "research", status: "inProgress" }]));
     expect(await main(["write", "session", "ENG-1", "--title", "Relay", "--plan-file", `${home}/plan.json`, "--activity", "started"], makeCtx(home))).toBe(0);
     expect(server.writes[4]!.body).toEqual({ issueId: "lin-eng-1", title: "Relay", plan: [{ content: "research", status: "inProgress" }], activity: "started" });
@@ -97,6 +97,21 @@ describe("write", () => {
     expect(await main(["write", "delegate"], makeCtx(home))).toBe(1);
     expect(await main(["write", "wat"], makeCtx(home))).toBe(1);
     expect(await main(["write"], makeCtx(home))).toBe(1);
+  });
+  test("attachment satisfies the cloud's required metadata object contract", async () => {
+    server.agentWriteReply = (name, body) => {
+      if (name !== "attachment") return undefined;
+      const metadata = (body as { metadata?: unknown }).metadata;
+      if (typeof metadata === "object" && metadata !== null && !Array.isArray(metadata)) return undefined;
+      return { status: 400, body: { outcome: "rejected", reason: "metadata must be a JSON object" } };
+    };
+    expect(await main(["write", "attachment", "ENG-1", "--title", "Browser proof", "--url", "https://x/verify/ticket/ENG-1"], ctx)).toBe(0);
+    expect(server.writes[0]!.body).toEqual({
+      issueId: "lin-eng-1",
+      title: "Browser proof",
+      url: "https://x/verify/ticket/ENG-1",
+      metadata: {},
+    });
   });
   test("an unknown ticket is exit 2; a 429 exits 2 naming hostDailyWriteBudget", async () => {
     expect(await main(["write", "comment", "ENG-404", "--body", "x"], ctx)).toBe(2);
