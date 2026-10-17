@@ -41,6 +41,7 @@ const agent = (method: "GET" | "POST", name: string) => ({ method, path: `/api/v
 export const CAPABILITIES: readonly Capability[] = [
   {verb:"hosts",does:"list this account's machines, current use and live capacity",needs:"member",routes:[],since:"0.16.0"},
   {verb:"hosts remove|rename",does:"remove or rename a self-hosted machine in this account",needs:"admin",routes:[],since:"0.16.0"},
+  {verb:"runner update|auto-update",does:"move this machine's self-hosted runner to the release Catalyst approved, and check for one every 15 minutes",needs:"member",routes:[],since:"0.16.16"},
   // CTC-4680: plain `catalyst setup` runs the onboard flow, so install.sh may hand off to it. install.sh
   // reads this flag rather than `setup --help`, which already exits 0 on 0.15.x.
   { verb: "setup", does: "set up Catalyst step by step, or show install.sh's plan, progress and sign-in in this terminal", needs: "member", routes: [], since: "0.15.0", engineProtocol: 1, bootstrapHandoff: true, bootstrapHandoffVersion: 2 },

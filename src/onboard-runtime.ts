@@ -54,6 +54,7 @@ import type {
 import type { OnboardUi } from "./onboard-ui.js";
 import { TIMED_OUT_REASONS } from "./setup-onboard-copy.js";
 import { fetchMe } from "./transport.js";
+import { enableRunnerAutoUpdate } from "./runner-command.js";
 
 export interface OnboardRuntimeHooks {
   beforeStep?: (id: OnboardStepId) => Promise<void>;
@@ -71,6 +72,8 @@ export interface OnboardRuntimeHooks {
   realHome?: () => string;
   skillNames?: readonly string[];
   runnerEngine?: RunnerEngine;
+  /** Turns on the runner's update schedule once it runs. Without an injected engine, the real one. */
+  runnerAutoUpdate?: (dir: string) => string;
   /** How the daily update step reads this computer's scheduler; tests replace it. */
   scheduler?: HousekeepingOptions;
 }
@@ -466,6 +469,7 @@ export function createOnboardRuntime(
           : undefined,
       sleep: hooks.sleep,
       message: (text) => (hooks.ui ? hooks.ui.message(text) : ctx.stderr(text)),
+      autoUpdate: hooks.runnerAutoUpdate ?? (hooks.runnerEngine ? undefined : (dir) => enableRunnerAutoUpdate(ctx, dir)),
     }),
     "linear.adopt": onboardWorkflowVerificationAdapter({
       message: (text) => (hooks.ui ? hooks.ui.message(text) : ctx.stderr(text)),
