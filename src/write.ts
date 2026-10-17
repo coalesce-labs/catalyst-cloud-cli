@@ -244,7 +244,7 @@ async function runWrite(args: ParsedArgs, ctx: Ctx, deps: WriteDeps): Promise<nu
       const url = flagString(args, "url");
       if (!title || !url) throw new UsageError("write attachment needs --title <t> and --url <u>");
       const issue = await resolveIssue(api, ticket);
-      result = await postAgent(api, doc, "attachment", { issueId: issue.id, title, url });
+      result = await postAgent(api, doc, "attachment", { issueId: issue.id, title, url, metadata: {} });
       break;
     }
     case "session": {
