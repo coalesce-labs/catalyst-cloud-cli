@@ -442,7 +442,9 @@ describe("the update schedule", () => {
     const units = systemdUnits({ cli: "/usr/local/bin/catalyst", path: "/usr/local/bin:/usr/bin:/bin" }, "/home/x/.local/state/catalyst/runner");
     expect(readFileSync(systemdUnitPaths(home).service, "utf8")).toBe(units.service);
     expect(units.service).toContain('ExecStart="/usr/local/bin/catalyst" "runner" "update" "--auto" "--dir" "/home/x/.local/state/catalyst/runner"');
-    expect(units.timer).toContain("OnUnitActiveSec=15min");
+    expect(units.timer).toContain("OnCalendar=*:0/15");
+    // Never a monotonic trigger: it stops firing when the user manager restarts without a reboot.
+    expect(units.timer).not.toMatch(/OnBootSec|OnUnitActiveSec|OnStartupSec/);
     expect(calls).toContain("systemctl --user enable --now catalyst-runner-update.timer");
     disableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "x", path: "x", run });
     expect(existsSync(systemdUnitPaths(home).timer)).toBe(false);

@@ -96,8 +96,10 @@ export function systemdUnits(deps: Pick<AutoUpdateDeps, "cli" | "path">, dir: st
       "Description=Check for an approved Catalyst runner release every 15 minutes",
       "",
       "[Timer]",
-      "OnBootSec=5min",
-      `OnUnitActiveSec=${AUTO_UPDATE_INTERVAL_SECONDS / 60}min`,
+      // Wall-clock, not OnBootSec/OnUnitActiveSec: those are relative to boot and to the last run in
+      // THIS user manager, so a manager that restarts without a reboot (enabling linger, a logout and
+      // login) left the timer "elapsed" with no next run, forever (fresh Ubuntu 24.04, 2026-10-17).
+      `OnCalendar=*:0/${AUTO_UPDATE_INTERVAL_SECONDS / 60}`,
       "RandomizedDelaySec=60",
       "Persistent=true",
       "",
