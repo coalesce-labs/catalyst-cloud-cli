@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.19
+
+A self-hosted Mac whose `catalyst` command was installed with Homebrew's Node now keeps its images current and finishes setup's private thoughts storage step. Before, Docker Desktop could not read a file the check needs from the Homebrew folder, so every update and that setup step stopped. Install this version; the next 15-minute check updates the machine.
+
 ## 0.16.18
 
 A self-hosted machine now returns to the approved release by itself after setup runs again on it. Before, re-running setup could put older images back while the machine still counted itself current, so it stopped updating. On Linux, the 15-minute update schedule now keeps running after you enable lingering for your user. Install this version, then run `catalyst runner auto-update on` to rewrite the schedule.
