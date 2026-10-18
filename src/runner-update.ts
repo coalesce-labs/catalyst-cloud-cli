@@ -110,6 +110,9 @@ export function parseDesiredRelease(input: unknown): DesiredRelease | null {
 
 export type ReleaseDecision =
   | { action: "update"; release: DesiredRelease }
+  /** The generation this machine last applied: still check that it runs those images, because a
+   *  setup run (or a hand edit) can put other images back in `.env` without changing the record. */
+  | { action: "verify"; release: DesiredRelease }
   | {
       action: "retain";
       reason: "no_credential" | "read_unreachable" | "release_unavailable" | "response_invalid" | "credential_refused" | "not_newer";
@@ -128,7 +131,8 @@ export function decideRelease(appliedGeneration: number | null, read: DesiredRel
   if (read.status !== 200) return retain("release_unavailable");
   const release = parseDesiredRelease(isRecord(read.body) && read.body.ok === true ? read.body.release : null);
   if (!release) return retain("response_invalid");
-  if (appliedGeneration !== null && release.generation <= appliedGeneration) return retain("not_newer");
+  if (appliedGeneration !== null && release.generation < appliedGeneration) return retain("not_newer");
+  if (appliedGeneration !== null && release.generation === appliedGeneration) return { action: "verify", release };
   return { action: "update", release };
 }
 
@@ -299,6 +303,13 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   const env = readEnvFile(envPath) ?? {};
   const current = imagesOf(env);
   const changed = RELEASE_COMPONENTS.filter((c) => current[c] !== target[c]);
+  // Already on this generation: cheap check that `.env` and the running containers are its images
+  // (no log read). A match is current; any drift is moved back below like any other update.
+  if (decision.action === "verify" && changed.length === 0) {
+    const live = await engine.services(dir, signal);
+    if (live?.supervisor?.running && live.supervisor.image === target.supervisor && live.watchdog?.image === target.watchdog)
+      return done("current", "not_newer");
+  }
   const tagged = { releaseId: release.releaseId };
   const record = (outcome: UpdateOutcome, detail: string, previous: Images | null): UpdateResult => {
     writeReleaseState(dir, { ...state, generation: release.generation, releaseId: release.releaseId, appliedAtMs: now(), previous });
