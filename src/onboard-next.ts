@@ -201,8 +201,6 @@ const REASONS: Record<string, string> = {
     "Setup could not confirm this project's registered repositories and its default repository for capacity. Run catalyst ready to see the project checks, then run catalyst setup again. Starting a ticket checks its own repository's admission.",
   capacity_identity_unverified:
     "Setup could not confirm your workspace and administrator role for the capacity check. Run catalyst login, then run catalyst setup again.",
-  capacity_admission_unverified:
-    "No runner is allowed to take work for this workspace yet. Enroll a self-hosted runner host, or ask Catalyst to enable cloud runners for it. Then run catalyst onboard.",
   capacity_currently_full:
     "Every runner slot for this repository is in use. Run catalyst onboard again after current work finishes.",
   capacity_unavailable:
@@ -626,9 +624,12 @@ export function onboardReasonText(
       ? `This setup step is not available on this server yet. Continue in the web app at ${page}, then run catalyst onboard.`
       : "This setup step is not available on this server yet. Run catalyst onboard after the server update.";
   }
+  // CTC-6180: the command that enrolls this computer, named with its team.
+  if (reason === "capacity_admission_unverified")
+    return `No runner is allowed to take work for this workspace yet. To run work on this computer, run catalyst onboard --runner --team ${onboardTeamKey(context.journal) ?? "<TEAM KEY>"} here; it enrolls this computer as a self-hosted runner. To use Catalyst's cloud runners instead, ask Catalyst support to turn on cloud runners for your workspace, then run catalyst onboard.`;
   if(reason === "runner_native_egress_setup_required"){
-    const commands=nativeEgressInstallCommands();
-    return "Native Linux needs a root-managed session egress producer before the runner can take work. Its elevated installation creates the isolated session network and private-range and host-isolation nftables rules. Review and authorize this separately; setup has not run it. It requires systemd, python3, Docker and nftables. " + (commands ? "Install the verified bundled artifacts, then run the same setup command:\n"+commands : "Setup could not verify its bundled artifacts. Reinstall the CLI before authorizing installation.");
+    const command=nativeEgressInstallCommands();
+    return "Native Linux needs a root-managed session egress service before this computer can take work. It creates the isolated session network and the nftables rules that keep sessions off private addresses and this machine. It needs systemd, python3, Docker and nftables, and setup has not run it. " + (command ? "Review it, run this one command, then run the same setup command:\n"+command : "Setup could not verify its bundled files. Reinstall the CLI, then run the same setup command.");
   }
   if (reason === "runner_images_unavailable" || reason === "runner_supervisor_image_unavailable") {
     const image = step.evidence?.image;

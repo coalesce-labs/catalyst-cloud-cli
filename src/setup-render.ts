@@ -249,7 +249,9 @@ export function createSetupRenderer(
     const indent = /^ */.exec(text)?.[0].length ?? 0;
     col += indent;
     text = text.slice(indent);
-    return wrapAnsi(text, Math.max(1, width - col), {
+    // CTC-6180: each line after the first is a command a person copies, so it is never wrapped.
+    const [prose = "", ...commands] = text.split("\n");
+    return [...wrapAnsi(prose, Math.max(1, width - col), {
       hard: false,
       wordWrap: true,
       trim: true,
@@ -262,7 +264,7 @@ export function createSetupRenderer(
             ? textCol
             : col;
         return prefix(indent) + line;
-      });
+      }), ...commands.map((command) => prefix(col) + command)];
   };
   const stepRows = (
     kind: StepMark,

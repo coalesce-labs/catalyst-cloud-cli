@@ -481,3 +481,20 @@ test("ordinary output during the working delay never paints a quick checking fra
   expect(out.text()).not.toContain("checking");
   r.dispose();
 });
+
+// CTC-6180: a command after the first line is copied as is, so it is never wrapped at a space.
+test.each([true, false])("a command line in an item stays whole at 80 columns (tty %s)", (terminal) => {
+  const out = sink(terminal, 80);
+  const r = createSetupRenderer(out, tty);
+  const command =
+    "sudo sh '/home/tony/.npm-global/lib/node_modules/@catalyst-cloud/cli/vendor/install-session-egress.sh'";
+  r.item(
+    "2. ",
+    "Native Linux needs a root-managed session egress service before this computer can take work. Run this, then run the same setup command:\n" +
+      command,
+  );
+  const lines = out.text().split("\n");
+  expect(lines).toContain(`     ${command}`);
+  expect(lines.filter((line) => line.includes("sudo"))).toHaveLength(1);
+  expect(lines.slice(0, 2).every((line) => line.length <= 80)).toBe(true);
+});

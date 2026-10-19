@@ -44,10 +44,10 @@ export async function nativeEgressReady(now:number,signal?:AbortSignal,io:Egress
  }catch{return false;}
 }
 
-/** Exact bundled bytes are checked before showing the separate, elevated install commands. */
+/** Exact bundled bytes are checked before showing the one elevated install command (CTC-6180). */
 export function nativeEgressInstallCommands():string|null{
- const root=join(packageRoot(),'vendor/self-host/linux-session-egress');
- try{for(const artifact of EGRESS_ARTIFACTS)if(hash(readFileSync(join(root,artifact.name)))!==artifact.digest)return null;}catch{return null;}
+ const vendor=join(packageRoot(),'vendor'),root=join(vendor,'self-host/linux-session-egress');
+ try{readFileSync(join(vendor,'install-session-egress.sh'));for(const artifact of EGRESS_ARTIFACTS)if(hash(readFileSync(join(root,artifact.name)))!==artifact.digest)return null;}catch{return null;}
  const quote=(s:string)=>"'"+s.replaceAll("'","'\\''")+"'";
- return EGRESS_ARTIFACTS.map(a=>`sudo install ${a.name==='session-egress.py'?'-D ':''}-o root -g root -m ${a.mode.toString(8)} ${quote(join(root,a.name))} ${quote(a.path)}`).join('\n')+'\nsudo systemctl daemon-reload\nsudo systemctl enable --now catalyst-session-egress.service catalyst-session-egress-attest.timer\nsudo /usr/bin/python3 /usr/lib/catalyst/session-egress.py attest';
+ return `sudo sh ${quote(join(vendor,'install-session-egress.sh'))}`;
 }

@@ -33,9 +33,21 @@ function fixture(){
 }
 test('genuine producer bytes, root-owned proof and active timer are required',async()=>{
  const f=fixture();expect(await nativeEgressReady(now,undefined,f.io)).toBe(true);expect(f.calls).toHaveLength(4);
- expect(nativeEgressInstallCommands()).toContain('sudo /usr/bin/python3 /usr/lib/catalyst/session-egress.py attest');
+ expect(nativeEgressInstallCommands()).toBe(`sudo sh '${join(packageRoot(),'vendor/install-session-egress.sh')}'`);
 });
 test.each(['non-root','symlink','changed producer','disabled timer','stale','future','wrong bridge'])('%s cannot certify native egress',async kind=>{
  const f=fixture();if(kind==='non-root')f.state.uid=1000;if(kind==='symlink')f.state.symlink=true;if(kind==='changed producer')f.state.corrupt=true;if(kind==='disabled timer')f.state.enabled=false;if(kind==='stale')f.state.proof.verifiedAtMs=now-900001;if(kind==='future')f.state.proof.verifiedAtMs=now+300001;if(kind==='wrong bridge')f.state.proof.bridge='other';
  expect(await nativeEgressReady(now,undefined,f.io)).toBe(false);
+});
+
+// CTC-6180: the one-command installer checks the same pinned bytes it installs, at the same paths and modes.
+test('the session egress installer pins every artifact the readiness check reads',()=>{
+ const script=readFileSync(join(packageRoot(),'vendor/install-session-egress.sh'),'utf8');
+ for(const artifact of EGRESS_ARTIFACTS){
+  expect(script).toContain(`${artifact.digest}  ${artifact.name}`);
+  expect(script).toMatch(new RegExp(`-m ${artifact.mode.toString(8)} .*${artifact.name.endsWith('.py')?artifact.path:'/etc/systemd/system/'}`));
+ }
+ expect(script).toContain('systemctl daemon-reload');
+ expect(script).toContain('systemctl enable --now catalyst-session-egress.service catalyst-session-egress-attest.timer');
+ expect(script).toContain('/usr/bin/python3 /usr/lib/catalyst/session-egress.py attest');
 });
