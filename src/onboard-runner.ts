@@ -55,7 +55,7 @@ export const RUNNER_HOST_IMAGES = {
   runner:
     "ghcr.io/coalesce-labs/catalyst-runner@sha256:a19f7b0859a9814740935f7aadd8fe5c5c9c5974f9a5956a057b983ada16ea01",
 } as const;
-const IMAGE_REF = /^[a-z0-9][a-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}$/;
+export const IMAGE_REF = /^[a-z0-9][a-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}$/;
 const HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
 const JOIN_TOKEN = /^[A-Za-z0-9._~+/=-]{16,1024}$/;
 const ENROLLMENTS = "/api/v1/hosts/enrollments";

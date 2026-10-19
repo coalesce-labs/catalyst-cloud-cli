@@ -221,7 +221,7 @@ export function usageText(): string {
     "  catalyst ask <raise|accept|list> ...",
     "  catalyst release <ticket> --because <what changed> [--retry-unchanged] [--dry-run] | release --class <c> --team <K> ...",
     "  catalyst environment [read] | environment propose --file <path>|--stdin [--approve] | environment approve   (your account; needs login)",
-    "  catalyst env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write]> [--json]   (this repository, offline — no login, no network)",
+    "  catalyst env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (this repository; no login — shell needs Docker and downloads Catalyst's image once)",
     "  catalyst secret set <NAME> --repo <owner/name> [--command '<cmd>'] | secret import <file> --repo <owner/name> [--names NAME[,NAME...]]",
     "  catalyst var set <NAME> | var import <file> [--repo <owner/name>] [--names NAME[,NAME...]]   (plain environment variables)",
     "  catalyst team <list|check|map|adopt|migrate|checklist> ...",
