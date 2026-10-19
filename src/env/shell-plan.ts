@@ -25,7 +25,9 @@ export const ENV_SHELL_START_SCRIPT = [
   "  done",
   "  exit 0",
   "fi",
-  'if [ "$#" -gt 0 ]; then exec mise exec "$@" -- bash -l; fi',
+  // Interactive, not login: a login shell re-reads /etc/profile, which replaces the PATH mise just
+  // set, so the declared toolchain would be lost (CTC-6153). ~/.bashrc still runs.
+  'if [ "$#" -gt 0 ]; then exec mise exec "$@" -- bash -i; fi',
   "exec bash -l",
 ].join("\n");
 
