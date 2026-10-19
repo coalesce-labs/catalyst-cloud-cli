@@ -98,8 +98,11 @@ export const RESERVED_VARIABLE_NAMES: ReadonlySet<string> = new Set([
 // DOCKER_HOST or DOCKER_CONTEXT from an --env-file would move `docker run` to another engine.
 const RESERVED_PREFIXES = ["MISE_", "OTEL_", "GIT_CONFIG_", "DOCKER_"];
 
+// Compared upper-cased: Windows environment names are case-insensitive, so a declared docker_host
+// reaches the docker client as DOCKER_HOST (CTC-6152).
 export function isReservedVariableName(name: string): boolean {
-  return RESERVED_VARIABLE_NAMES.has(name) || RESERVED_PREFIXES.some((prefix) => name.startsWith(prefix));
+  const upper = name.toUpperCase();
+  return RESERVED_VARIABLE_NAMES.has(upper) || RESERVED_PREFIXES.some((prefix) => upper.startsWith(prefix));
 }
 
 export const TERMINAL_SOURCE = "this terminal";

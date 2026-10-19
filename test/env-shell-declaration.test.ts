@@ -177,6 +177,18 @@ describe("resolveShellVariables", () => {
     expect(isReservedVariableName("DATABASE_URL")).toBe(false);
   });
 
+  // CTC-6152: Windows environment names are case-insensitive, so docker_host reaches the docker client as DOCKER_HOST.
+  test("reserved names and prefixes match case-insensitively: docker_host, Path and mise_data_dir are skipped", () => {
+    const names = ["docker_host", "Docker_Context", "Path", "home", "mise_data_dir", "otel_service_name", "git_config_count"];
+    const r = resolveShellVariables(
+      names.map((name) => ({ name, required: true, secret: false })),
+      { env: {}, envFiles: [{ path: ".env", values: Object.fromEntries(names.map((n) => [n, "x"])) }] },
+    );
+    expect(r.skippedReserved).toEqual(names);
+    expect(r.values).toEqual({});
+    expect(isReservedVariableName("database_url")).toBe(false);
+  });
+
   test("DOCKER_HOST and DOCKER_CONTEXT from an env file are skipped: they would move the docker client itself", () => {
     const r = resolveShellVariables(
       [{ name: "DOCKER_HOST", required: true, secret: false }, { name: "DOCKER_CONTEXT", required: false, secret: false }],
