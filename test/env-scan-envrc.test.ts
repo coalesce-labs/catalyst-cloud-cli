@@ -73,6 +73,32 @@ describe("scanEnvrc", () => {
     expect(computed).toEqual({ A: true, B: true, C: true, D: true, E: false, F: true });
   });
 
+  it.each([
+    'export QUERY="a<<EOF"',
+    "export QUERY='a<<EOF'",
+    "export APP_MODE=dev # example <<EOF",
+    'QUERY="a<<EOF"',
+    "QUERY=dev # example <<EOF",
+    'printf "%s" "a<<EOF"',
+    "printf example # <<EOF",
+    'export QUERY="a\\\"<<EOF"',
+    "printf \\<<EOF",
+  ])("keeps later exports after quoted, commented or escaped heredoc text: %s", (line) => {
+    const text = `${line}\nexport API_TOKEN=example\n`;
+    expect(scanEnvrc(text).exported).toContainEqual({ name: "API_TOKEN", line: 2, computed: false });
+    expect(envrcLiteralValues(text, new Set(["API_TOKEN"])).get("API_TOKEN")).toBe("example");
+  });
+
+  it.each([
+    ["export DOC=$(cat <<EOF", ")"],
+    ['export DOC="$(cat <<\'EOF\'', ')"'],
+    ['export DOC="$(printf \'%s\' "$(cat <<-\"EOF\"', ')")"'],
+    ["export DOC=`cat <<EOF", "`"],
+  ])("still skips heredoc bodies in command substitutions: %s", (start, end) => {
+    const text = [start, "export INSIDE_HEREDOC=hidden", "EOF", end, "export AFTER=ok"].join("\n");
+    expect(scanEnvrc(text).exported.map(({ name }) => name)).toEqual(["AFTER", "DOC"]);
+  });
+
   it("never returns a value: JSON.stringify(scan) contains no sentinel (positive control: the sentinels are in the input text)", () => {
     const text = envrcText();
     for (const name of ALL_NAMES.filter((n) => n !== "GITHUB_TOKEN")) expect(text).toContain(valueFor(name));

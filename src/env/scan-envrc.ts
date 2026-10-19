@@ -16,7 +16,7 @@ const EXPORT_RE = /^\s*export\s+(.*)$/;
 const ASSIGN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 const BARE_ASSIGN_RE = /^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 const NAMES_ONLY_RE = /^([A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)\s*(?:#.*)?$/;
-const HEREDOC_RE = /<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/;
+const HEREDOC_RE = /^<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/;
 const UNQUOTED_LITERAL_RE = /^[A-Za-z0-9_./:@%+,=-]+$/;
 const PEM_BEGIN = "-----BEGIN";
 const PEM_END = "-----END";
@@ -107,7 +107,7 @@ function parseEnvrc(text: string): { exported: ParsedExport[]; skippedNames: str
     const trimmed = line.trim();
     if (trimmed === "" || trimmed.startsWith("#")) continue;
 
-    const heredoc = HEREDOC_RE.exec(line);
+    const heredoc = heredocMatch(line);
     const exportMatch = EXPORT_RE.exec(line);
     if (exportMatch) {
       const rest = exportMatch[1]!.trim();
@@ -162,6 +162,48 @@ interface ValueRead {
   /** True when more shell words follow the value on the same line (`export A=1 B=2`). */
   extra: boolean;
   open: { kind: "quote"; quote: '"' | "'" } | { kind: "pem" } | { kind: "backslash" } | null;
+}
+
+/** Find a heredoc operator outside quotes and comments. Substitutions have their own quote state. */
+function heredocMatch(line: string): RegExpExecArray | null {
+  const stack: Array<{ quote: "'" | '"' | null; end: ")" | "`" | null }> = [{ quote: null, end: null }];
+  for (let i = 0; i < line.length; i++) {
+    const state = stack.at(-1);
+    if (state === undefined) return null;
+    const char = line[i];
+    if (state.quote === "'") {
+      if (char === "'") state.quote = null;
+      continue;
+    }
+    if (char === "\\") {
+      i++;
+      continue;
+    }
+    if (char === '"') {
+      state.quote = state.quote === '"' ? null : '"';
+      continue;
+    }
+    if (char === "$" && line[i + 1] === "(") {
+      stack.push({ quote: null, end: ")" });
+      i++;
+      continue;
+    }
+    if (char === "`") {
+      if (state.end === "`" && state.quote === null) stack.pop();
+      else stack.push({ quote: null, end: "`" });
+      continue;
+    }
+    if (state.quote !== null) continue;
+    if (char === "'") state.quote = "'";
+    else if (char === "#" && (i === 0 || /[\s;|&()<>]/.test(line[i - 1] ?? ""))) return null;
+    else if (char === "(" && state.end === ")") stack.push({ quote: null, end: ")" });
+    else if (char === ")" && state.end === ")") stack.pop();
+    else if (char === "<" && line[i - 1] !== "<" && line[i + 2] !== "<") {
+      const match = HEREDOC_RE.exec(line.slice(i));
+      if (match) return match;
+    }
+  }
+  return null;
 }
 
 function readValue(raw: string): ValueRead {

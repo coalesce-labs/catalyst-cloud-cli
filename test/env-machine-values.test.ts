@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { resolveMachineValues } from "../src/env/machine-values.js";
+import { scanClaudeMcp } from "../src/env/scan-claude-mcp.js";
 import { ALL_NAMES, DIRENV_GITHUB_TOKEN, SENTINEL, valueFor, writeMachine } from "./env-machine-fixture.js";
 
 const declare = (names: string[], secret = false) => names.map((name) => ({ name, secret }));
@@ -53,6 +54,25 @@ describe("resolveMachineValues", () => {
     const resolved = resolveMachineValues(root, { home, env }, declare(["LINEAR_API_KEY", "UNREFERENCED"], true));
     expect(resolved.values.get("LINEAR_API_KEY")).toEqual({ value: env.LINEAR_API_KEY, from: "shell environment" });
     expect(resolved.noValue).toEqual([{ name: "UNREFERENCED", computed: false }]);
+  });
+
+  it.each(["alpha", "zulu"])("preserves a referenced credential when %s sorts before or after a colliding literal server", (referenceServer) => {
+    const http = (authorization: string) => ({ type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: authorization } });
+    const claude = JSON.stringify({ mcpServers: {
+      [referenceServer]: http("Bearer ${SHARED_MCP_TOKEN}"),
+      shared: http(`Bearer ${SENTINEL}_different_literal`),
+    } });
+    const { root, home } = writeMachine({ envrc: null, claude });
+    const scan = scanClaudeMcp(claude, [root], new Set());
+    expect(scan.servers.map(({ name, headers, references }) => ({ name, headers, references }))).toEqual([
+      { name: referenceServer, headers: { Authorization: "Bearer $SHARED_MCP_TOKEN" }, references: ["SHARED_MCP_TOKEN"] },
+    ]);
+    expect(scan.notDrafted).toEqual([{ name: "shared", reason: expect.stringContaining("SHARED_MCP_TOKEN, is already declared") }]);
+    const env = { SHARED_MCP_TOKEN: `${SENTINEL}_original` };
+    const resolved = resolveMachineValues(root, { home, env }, declare(["SHARED_MCP_TOKEN"], true));
+    expect(resolved.values.get("SHARED_MCP_TOKEN")).toEqual({ value: env.SHARED_MCP_TOKEN, from: "shell environment" });
+    expect(resolved.noValue).toEqual([]);
+    expect(JSON.stringify(scan)).not.toContain(SENTINEL);
   });
 
   it("an empty value is noValue; a name declared but found nowhere is noValue {computed: false}", () => {

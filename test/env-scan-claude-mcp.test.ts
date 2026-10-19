@@ -70,6 +70,17 @@ describe("scanClaudeMcp", () => {
     expect(scan.notDrafted[0]!.reason).toContain("EXA_MCP_TOKEN, is already declared");
   });
 
+  it.each([false, true])("refuses a literal that collides with another header's reference regardless of header order (%s)", (referenceFirst) => {
+    const literal = { Authorization: `Bearer ${LITERAL}` };
+    const reference = { "X-Api-Key": "${SHARED_MCP_TOKEN}" };
+    const headers = referenceFirst ? { ...reference, ...literal } : { ...literal, ...reference };
+    const text = JSON.stringify({ mcpServers: { shared: http(headers) } });
+    const scan = scanClaudeMcp(text, [ROOT], new Set());
+    expect(scan.servers).toEqual([]);
+    expect(scan.notDrafted).toEqual([{ name: "shared", reason: expect.stringContaining("SHARED_MCP_TOKEN, is already declared") }]);
+    expect(claudeHeaderLiterals(text, [ROOT], new Set(["SHARED_MCP_TOKEN"])).size).toBe(0);
+  });
+
   it("does not draft stdio, sse, header-less http, query/userinfo/fragment URLs, localhost/loopback/private/.local hosts, mixed headers, lowercase ${name} references, or more than 32 headers; each appears in notDrafted with its reason", () => {
     const many = Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`X-H${i}`, `\${H${i}}`]));
     const scan = scanOf({

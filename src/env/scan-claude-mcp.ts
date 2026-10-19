@@ -71,6 +71,17 @@ export function scanClaudeMcp(text: string | undefined, repoRoots: readonly stri
   const servers: DraftedMcpServer[] = [];
   const notDrafted: Array<{ name: string; reason: string }> = [];
   const taken = new Set(declared);
+  // Reserve explicit references before deriving names, including later servers and headers.
+  // Use the effective entries after project overrides, just as the import lookup does.
+  for (const entry of entries) {
+    const name = toServerName(entry.configName);
+    if (name === null || !isRecord(entry.raw) || !isRecord(entry.raw.headers)) continue;
+    for (const [header, value] of Object.entries(entry.raw.headers)) {
+      if (!HEADER_NAME_RE.test(header) || typeof value !== "string") continue;
+      const read = readHeader(name, header, value);
+      if (read.kind === "reference") taken.add(read.name);
+    }
+  }
   const names = new Set<string>();
   for (const entry of entries) {
     const outcome = draftServer(entry, taken);
