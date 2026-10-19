@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.21
+
+`catalyst accounts` now leaves out removed AI accounts: ones an admin revoked, or whose paid access ended. They take no work and take no new credential, so they no longer appear as accounts to repair. The list says how many it left out, and `catalyst accounts --all` shows them, marked "removed — kept for history". Setup now names a revoked account as ended instead of asking you to turn it on. Update the Catalyst plugin's skills along with the CLI: setup's account check uses `--all`, which older CLIs do not know.
+
 ## 0.16.20
 
 Setup on Linux now prints every command whole, on its own line, so you can copy it from any terminal width. When this computer still needs the session egress service, setup prints one `sudo` command that checks the installer's fingerprint and installs and starts the service. Run it, then run the same setup command again. When nothing may take work for your workspace yet, setup now names the command that enrolls this computer as a self-hosted machine: `catalyst onboard --runner --team <your team>`.
