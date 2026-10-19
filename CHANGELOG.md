@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.20
+
+Setup on Linux now prints every command whole, on its own line, so you can copy it from any terminal width. When this computer still needs the session egress service, setup prints one `sudo` command that checks the installer's fingerprint and installs and starts the service. Run it, then run the same setup command again. When nothing may take work for your workspace yet, setup now names the command that enrolls this computer as a self-hosted machine: `catalyst onboard --runner --team <your team>`.
+
+New: `catalyst env shell` opens your repository's declared environment on your own computer in Docker, with the declared toolchain versions on `PATH`.
+
 ## 0.16.19
 
 A self-hosted Mac whose `catalyst` command was installed with Homebrew's Node now keeps its images current and finishes setup's private thoughts storage step. Before, Docker Desktop could not read a file the check needs from the Homebrew folder, so every update and that setup step stopped. Install this version; the next 15-minute check updates the machine.
