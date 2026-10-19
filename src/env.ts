@@ -1,19 +1,12 @@
-<<<<<<< HEAD
-// env.ts — `catalyst env inventory` / `env check`: a LOCAL, OFFLINE, repo-scoped reporter and
-// validator. Unlike every other verb in this file's siblings, `cmdEnv` never calls `requireConfig` or
-// `apiClient` — it needs neither a login nor a network call, which is the whole point of the feature:
-// a person reviews what a repository declares without connecting anything first.
-//
-// The two exceptions store values and so sign in: `env import` and `env draft --write`'s offer to
-// store this computer's values. Both are delegated to `env-import.ts`; this module itself stays offline.
-=======
 // env.ts — `catalyst env inventory` / `check` / `migrate` / `draft`: a LOCAL, OFFLINE, repo-scoped
 // reporter and validator. Unlike every other verb in this file's siblings, those four never call
 // `requireConfig` or `apiClient` — they need neither a login nor a network call, which is the whole
 // point of the feature: a person reviews what a repository declares without connecting anything first.
 // `env shell` (env/shell.ts) talks to Docker, and asks the cloud only when a credential-free download
 // of the image is refused; Catalyst's own image needs no login.
->>>>>>> 790f3807f82342e9a7f078a0a336c223814829ce
+//
+// The two exceptions store values and so sign in: `env import` and `env draft --write`'s offer to
+// store this computer's values. Both are delegated to `env-import.ts`; this module itself stays offline.
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { flagBool, flagString, positionals, type ParsedArgs } from "./args.js";
@@ -33,16 +26,12 @@ import { validateFullSettings } from "../vendor/settings/index.js";
 
 export type EnvDeps = Partial<ScanDeps> & {
   writeFile?: (path: string, content: string) => void;
-<<<<<<< HEAD
   /** `env import` and `env draft --write`'s offer to store values. */
   import?: EnvImportDeps;
+  shell?: EnvShellDeps;
 };
 
 const NEXT_IMPORT_LINE = "Next: catalyst env import stores this computer's values for these names. It signs in and asks first.";
-=======
-  shell?: EnvShellDeps;
-};
->>>>>>> 790f3807f82342e9a7f078a0a336c223814829ce
 
 export async function cmdEnv(
   args: ParsedArgs,
@@ -51,15 +40,11 @@ export async function cmdEnv(
 ): Promise<number> {
   const [sub, ...rest] = positionals(args);
   if (sub === undefined)
-<<<<<<< HEAD
-    throw new UsageError("env needs a subcommand: inventory | check | migrate | draft | import");
+    throw new UsageError("env needs a subcommand: inventory | check | migrate | draft | import | shell");
 
   if (sub === "import") return cmdEnvImport(args, ctx, deps.import ?? {});
-=======
-    throw new UsageError("env needs a subcommand: inventory | check | migrate | draft | shell");
 
   if (sub === "shell") return await runEnvShell(args, ctx, deps.shell ?? {});
->>>>>>> 790f3807f82342e9a7f078a0a336c223814829ce
 
   if (sub === "draft") {
     if (rest.length > 0) throw new UsageError("env draft takes no positional arguments; use --root DIR");
@@ -231,8 +216,7 @@ export async function cmdEnv(
     return result.state === "invalid" ? 1 : 0;
   }
 
-<<<<<<< HEAD
-  throw new UsageError(`unknown env subcommand "${sub}": inventory | check | migrate | draft | import`);
+  throw new UsageError(`unknown env subcommand "${sub}": inventory | check | migrate | draft | import | shell`);
 }
 
 /** After a successful write: store now (`--import-values`), ask in a terminal, or name the next command. */
@@ -297,7 +281,4 @@ function machineLines(machine: MachineScan | null, servers: ReadonlyArray<{ name
   }
   for (const note of machine.notes) lines.push(`  ${note}`);
   return lines;
-=======
-  throw new UsageError(`unknown env subcommand "${sub}": inventory | check | migrate | draft | shell`);
->>>>>>> 790f3807f82342e9a7f078a0a336c223814829ce
 }

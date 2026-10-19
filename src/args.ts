@@ -373,11 +373,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
   env: {
     root: {
       value: true,
-<<<<<<< HEAD
-      help: "draft, import: repository directory (default: current directory)",
-=======
-      help: "draft, shell: repository directory (default: the current repository's top level)",
->>>>>>> 790f3807f82342e9a7f078a0a336c223814829ce
+      help: "draft, import, shell: repository directory (default: current directory; shell: the current repository's top level)",
     },
     write: {
       value: false,
@@ -387,7 +383,6 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       value: false,
       help: "draft: show the generated TOML as an additions-only diff",
     },
-<<<<<<< HEAD
     "import-values": {
       value: false,
       help: "draft: after --write, store this computer's values for the declared names without asking",
@@ -399,7 +394,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     yes: {
       value: false,
       help: "import: store without asking (needed without a terminal)",
-=======
+    },
     "env-file": {
       value: true,
       repeat: true,
@@ -412,7 +407,6 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     check: {
       value: false,
       help: "shell: prepare the environment and report it, without opening a shell",
->>>>>>> 790f3807f82342e9a7f078a0a336c223814829ce
     },
   },
   var: {
@@ -601,11 +595,7 @@ export const VERB_USAGE: Record<string, string> = {
   seat: "seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE] [--key-env NAME]",
   mcp: "mcp <add <name> --url URL <--auth none|--bearer SECRET_NAME|--header NAME=SECRET_NAME...>|list|remove <name>> [--json]",
   team: "team <list|check <KEY>|check --all|map <KEY> [--stage role=StateName]... [--yes --plan-hash H]|adopt <KEY> [--undo] [--yes --plan-hash H]|migrate <KEY> [--choice sourceId=destinationId]... [--retire] [--yes --plan-hash H]|checklist <KEY>> [--json]",
-<<<<<<< HEAD
-  env: "env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write [--import-values]] | import [--root DIR] [--repo owner/name] [--yes]> [--json]   (THIS repository; offline with no login, except import and --import-values, which sign in and store values)",
-=======
-  env: "env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (THIS repository; no login — shell needs Docker and downloads Catalyst's image once)",
->>>>>>> 790f3807f82342e9a7f078a0a336c223814829ce
+  env: "env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write [--import-values]] | import [--root DIR] [--repo owner/name] [--yes] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (THIS repository; no login, except import and --import-values, which sign in and store values — shell needs Docker and downloads Catalyst's image once)",
   environment:
     "environment [read] [--json] | environment propose --file <path>|--stdin [--expect-revision N] [--approve] [--json] | environment approve [--revision N --hash H] [--json]   (your ACCOUNT's declaration; needs login)",
   secret:
