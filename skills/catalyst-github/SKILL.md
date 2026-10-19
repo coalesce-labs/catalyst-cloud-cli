@@ -4,7 +4,7 @@ description: >-
   Catalyst's GitHub: show a ticket's pull request with its checks, reviews and review threads, say whether it is mergeable under this repository's policy, and explain what a PR accumulates as the ticket moves (the branch, the draft, the rewrite, the force-pushes, the labels, the queue). Use when someone asks "show me the PR", "what are the checks saying", "why hasn't it merged", "what does the queue need", "what does that label mean", or wants the branch and merge conventions Catalyst follows.
 allowed-tools: Bash(catalyst:*) Bash(npx -p @catalyst-cloud/cli catalyst:*)
 ---
-<!-- vendored-from: @catalyst-cloud/catalyst-skills@0.16.19 — written in this repository for customer accounts -->
+<!-- vendored-from: @catalyst-cloud/catalyst-skills@0.16.20 — written in this repository for customer accounts -->
 
 # Catalyst's GitHub
 
