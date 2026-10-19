@@ -47,13 +47,13 @@ type HeaderRead =
   | { kind: "refused"; reason: string };
 
 /** A Catalyst server name: lowercase, `[a-z0-9_-]`, starting with a letter, at most 64 characters. */
-export function toServerName(configName: string): string | null {
+function toServerName(configName: string): string | null {
   const name = configName.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[-_]+|[-_]+$/g, "").slice(0, 64);
   return /^[a-z][a-z0-9_-]{0,63}$/.test(name) ? name : null;
 }
 
 /** An upper-case variable stem from a server or header name: `my-server` → `MY_SERVER`. */
-export function toVariableName(text: string): string {
+function toVariableName(text: string): string {
   return text.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 

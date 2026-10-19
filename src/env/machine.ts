@@ -53,7 +53,7 @@ export function readMachineFiles(root: string, options: MachineOptions): Machine
   return { envrcText, claudeText, repoRoots: repoRootsFor(root), notes };
 }
 
-export function repoRootsFor(root: string): string[] {
+function repoRootsFor(root: string): string[] {
   const roots = [root];
   try {
     const real = realpathSync(root);

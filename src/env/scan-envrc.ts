@@ -48,7 +48,7 @@ interface ParsedExport extends EnvrcExport {
   literal: string | undefined;
 }
 
-export function isMachineSetting(name: string): boolean {
+function isMachineSetting(name: string): boolean {
   return MACHINE_NAMES.has(name) || MACHINE_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
 
