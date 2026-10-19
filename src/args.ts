@@ -373,7 +373,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
   env: {
     root: {
       value: true,
-      help: "draft: repository directory (default: current directory)",
+      help: "draft, shell: repository directory (default: the current repository's top level)",
     },
     write: {
       value: false,
@@ -382,6 +382,19 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     diff: {
       value: false,
       help: "draft: show the generated TOML as an additions-only diff",
+    },
+    "env-file": {
+      value: true,
+      repeat: true,
+      help: "shell: read declared variables' values from this dotenv file (repeatable; your terminal's own values win)",
+    },
+    image: {
+      value: true,
+      help: "shell: open this digest-pinned image instead of Catalyst's (it must carry bash, and mise when toolchains are declared)",
+    },
+    check: {
+      value: false,
+      help: "shell: prepare the environment and report it, without opening a shell",
     },
   },
   var: {
@@ -570,7 +583,7 @@ export const VERB_USAGE: Record<string, string> = {
   seat: "seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE] [--key-env NAME]",
   mcp: "mcp <add <name> --url URL <--auth none|--bearer SECRET_NAME|--header NAME=SECRET_NAME...>|list|remove <name>> [--json]",
   team: "team <list|check <KEY>|check --all|map <KEY> [--stage role=StateName]... [--yes --plan-hash H]|adopt <KEY> [--undo] [--yes --plan-hash H]|migrate <KEY> [--choice sourceId=destinationId]... [--retire] [--yes --plan-hash H]|checklist <KEY>> [--json]",
-  env: "env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write]> [--json]   (THIS repository, offline — no login, no network)",
+  env: "env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (THIS repository; no login — shell needs Docker and downloads Catalyst's image once)",
   environment:
     "environment [read] [--json] | environment propose --file <path>|--stdin [--expect-revision N] [--approve] [--json] | environment approve [--revision N --hash H] [--json]   (your ACCOUNT's declaration; needs login)",
   secret:
