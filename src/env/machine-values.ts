@@ -36,10 +36,12 @@ export function resolveMachineValues(
   const literals = files.envrcText === undefined ? new Map<string, string>() : envrcLiteralValues(files.envrcText, wanted);
   const direnvDir = options.env.DIRENV_DIR;
   const direnvLoaded = typeof direnvDir === "string" && files.repoRoots.some((path) => direnvDir === `-${path}`);
-  const headerLiterals = files.claudeText === undefined ? new Map<string, string>() : claudeHeaderLiterals(files.claudeText, files.repoRoots, wanted);
+  // The draft saw the `.envrc` names when it derived header variables; the same set keeps lookups aligned.
+  const envrcNames = new Set(exported.keys());
+  const headerLiterals = files.claudeText === undefined ? new Map<string, string>() : claudeHeaderLiterals(files.claudeText, files.repoRoots, wanted, envrcNames);
   const referenced = new Set<string>();
   if (files.claudeText !== undefined) {
-    for (const server of scanClaudeMcp(files.claudeText, files.repoRoots, new Set()).servers) {
+    for (const server of scanClaudeMcp(files.claudeText, files.repoRoots, envrcNames).servers) {
       const derived = new Set(server.derived.map(({ variable }) => variable));
       for (const name of server.references) if (!derived.has(name)) referenced.add(name);
     }

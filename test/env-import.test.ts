@@ -8,7 +8,7 @@ import { main } from "../src/cli";
 import { parseEnvAssignments } from "../src/env/parse-env.js";
 import type { EnvImportDeps } from "../src/env-import.js";
 import { lineSafe, looksLikeCredential } from "../src/env-import.js";
-import type { ApiClient } from "../src/transport";
+import type { ApiClient, JsonResponse } from "../src/transport";
 import { ALL_NAMES, DIRENV_GITHUB_TOKEN, PLAIN_NAMES, SENTINEL, TOKEN_NAMES, valueFor, writeMachine } from "./env-machine-fixture.js";
 import { FIXTURE_USER_KEY, startMeFixture, type FixtureServer } from "./fixture";
 import { makeCtx, seedJoined, tempHome } from "./helpers";
@@ -26,31 +26,40 @@ function recordingClient(options: {
   throwOn?: string;
 } = {}) {
   const writes: Recorded[] = [];
-  const client = {
-    postJson: async (path: string, body: Record<string, unknown>) => {
-      if (path === "/me/env-vars" && body.name === options.throwOn) throw new Error("socket hang up");
-      writes.push({ path, body });
-      if (path === "/me/secrets/import") {
-        if (options.secretsStatus !== undefined && options.secretsStatus !== 200) {
-          return { status: options.secretsStatus, body: { error: "forbidden", message: "managing the organization's secrets requires an admin or owner role" } };
-        }
-        const names = String(body.text).split("\n").filter(Boolean).map((line) => line.slice(0, line.indexOf("=")));
-        const existing = new Set(options.existing ?? []);
-        return {
-          status: 200,
-          body: {
-            created: names.filter((name) => !existing.has(name)),
-            rotated: [],
-            errors: [...names.filter((name) => existing.has(name)).map((name) => ({ name, reason: "name_exists" })), ...(options.errors ?? [])],
-          },
-        };
+  const answer = (path: string, body: Record<string, unknown>): { status: number; body: unknown } => {
+    if (path === "/me/env-vars" && body.name === options.throwOn) throw new Error("socket hang up");
+    writes.push({ path, body });
+    if (path === "/me/secrets/import") {
+      if (options.secretsStatus !== undefined && options.secretsStatus !== 200) {
+        return { status: options.secretsStatus, body: { error: "forbidden", message: "managing the organization's secrets requires an admin or owner role" } };
       }
-      const refused = options.varRefused?.[String(body.name)];
-      if (refused !== undefined) return { status: refused, body: { error: "invalid_value", message: "the value was refused" } };
-      return { status: 201, body: { created: !(options.varUpdated ?? []).includes(String(body.name)) } };
+      const names = String(body.text).split("\n").filter(Boolean).map((line) => line.slice(0, line.indexOf("=")));
+      const existing = new Set(options.existing ?? []);
+      return {
+        status: 200,
+        body: {
+          created: names.filter((name) => !existing.has(name)),
+          rotated: [],
+          errors: [...names.filter((name) => existing.has(name)).map((name) => ({ name, reason: "name_exists" })), ...(options.errors ?? [])],
+        },
+      };
+    }
+    const refused = options.varRefused?.[String(body.name)];
+    if (refused !== undefined) return { status: refused, body: { error: "invalid_value", message: "the value was refused" } };
+    return { status: 201, body: { created: !(options.varUpdated ?? []).includes(String(body.name)) } };
+  };
+  const client: Pick<ApiClient, "postJson"> = {
+    postJson: async <T,>(path: string, body: unknown): Promise<JsonResponse<T>> => {
+      const reply = answer(path, isRecord(body) ? body : {});
+      // The route's reply type is the caller's to name; this fake answers each route's documented shape.
+      return { status: reply.status, body: reply.body as T, headers: new Headers() };
     },
-  } as unknown as Pick<ApiClient, "postJson">;
+  };
   return { client, writes };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 const REPOS = async () => [{ repoId: "repo_1", owner: "acme", name: "app" }];

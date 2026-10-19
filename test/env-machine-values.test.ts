@@ -39,6 +39,14 @@ describe("resolveMachineValues", () => {
     expect(resolved.values.get("EXA_MCP_TOKEN")).toEqual({ value: literal, from: "~/.claude.json" });
   });
 
+  it("an .envrc name that a refused server's derived variable clashes with never takes the header literal", () => {
+    const literal = `${SENTINEL}_foo_literal`;
+    const { root, home } = writeMachine({ envrc: 'export FOO_MCP_TOKEN="$(op read x)"\n', claude: JSON.stringify({ mcpServers: { foo: { type: "http", url: "https://mcp.foo.dev/mcp", headers: { Authorization: `Bearer ${literal}` } } } }) });
+    const resolved = resolveMachineValues(root, { home, env: {} }, declare(["FOO_MCP_TOKEN"], true));
+    expect(resolved.values.size).toBe(0);
+    expect(resolved.noValue).toEqual([{ name: "FOO_MCP_TOKEN", computed: true }]);
+  });
+
   it("a name a header references as ${NAME} takes ctx.env[NAME]", () => {
     const { root, home } = writeMachine({ envrc: null });
     const env = { LINEAR_API_KEY: `${SENTINEL}_linear_shell`, UNREFERENCED: `${SENTINEL}_other` };

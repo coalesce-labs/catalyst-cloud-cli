@@ -114,6 +114,14 @@ describe("scanClaudeMcp", () => {
     });
   });
 
+  it("does not draft a URL whose path looks like it carries a key, so the key never reaches the committed file", () => {
+    const key = `${SENTINEL}0123456789abcdef`;
+    const scan = scanOf({ zapier: http({ Authorization: "Bearer ${ZAP_TOKEN}" }, `https://mcp.zapier.com/api/mcp/s/${key}/mcp`), v1: http({ Authorization: "Bearer ${V1_TOKEN}" }, "https://mcp.example.com/v1/sse-endpoint/mcp") });
+    expect(scan.servers.map(({ name }) => name)).toEqual(["v1"]);
+    expect(scan.notDrafted).toEqual([{ name: "zapier", reason: "its URL path looks like it carries a key; add it by hand" }]);
+    expect(JSON.stringify(scan)).not.toContain(key);
+  });
+
   it("normalizes `My Server` to `my-server` and keeps configName", () => {
     const scan = scanOf({ "My Server": http({ Authorization: "Bearer ${MY_TOKEN}" }), "!!!": http({ Authorization: "Bearer ${MY_TOKEN}" }) });
     expect(scan.servers.map(({ name, configName }) => ({ name, configName }))).toEqual([{ name: "my-server", configName: "My Server" }]);
@@ -169,5 +177,17 @@ describe("claudeHeaderLiterals", () => {
     const values = claudeHeaderLiterals(text, [ROOT], new Set(["EXA_MCP_TOKEN", "REF_TOKEN", "OTHER"]));
     expect(Object.fromEntries(values)).toEqual({ EXA_MCP_TOKEN: LITERAL });
     expect(claudeHeaderLiterals("{bad", [ROOT], new Set(["EXA_MCP_TOKEN"])).size).toBe(0);
+  });
+
+  it("returns nothing for a server the draft refuses or whose derived name clashes with a declared name", () => {
+    const text = JSON.stringify({
+      mcpServers: {
+        dev: http({ Authorization: `Bearer ${LITERAL}` }, "http://localhost:3000/mcp"),
+        foo: http({ Authorization: `Bearer ${LITERAL}` }),
+      },
+    });
+    const wanted = new Set(["DEV_MCP_TOKEN", "FOO_MCP_TOKEN"]);
+    expect(Object.fromEntries(claudeHeaderLiterals(text, [ROOT], wanted))).toEqual({ FOO_MCP_TOKEN: LITERAL });
+    expect(claudeHeaderLiterals(text, [ROOT], wanted, new Set(["FOO_MCP_TOKEN"])).size).toBe(0);
   });
 });

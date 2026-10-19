@@ -97,18 +97,27 @@ export function scanClaudeMcp(text: string | undefined, repoRoots: readonly stri
   return { servers, notDrafted };
 }
 
-/** Import only. The literal (without `Bearer `) behind each requested variable this scanner derives. */
-export function claudeHeaderLiterals(text: string, repoRoots: readonly string[], wanted: ReadonlySet<string>): Map<string, string> {
+/** Import only. The literal (without `Bearer `) behind each requested variable the draft derives. Only
+ *  servers the draft itself drafts count, given the same `declared` names it saw (the `.envrc` exports):
+ *  a server it refused, or one whose derived name clashed, never supplies a value. */
+export function claudeHeaderLiterals(
+  text: string,
+  repoRoots: readonly string[],
+  wanted: ReadonlySet<string>,
+  declared: ReadonlySet<string> = new Set(),
+): Map<string, string> {
   const values = new Map<string, string>();
   const entries = readEntries(text, repoRoots);
   if (typeof entries === "string") return values;
+  const drafted = new Map(scanClaudeMcp(text, repoRoots, declared).servers.map((server) => [server.configName, server]));
   for (const entry of entries) {
-    const serverName = toServerName(entry.configName);
-    if (serverName === null || !isRecord(entry.raw) || !isRecord(entry.raw.headers)) continue;
+    const server = drafted.get(entry.configName);
+    if (server === undefined || !isRecord(entry.raw) || !isRecord(entry.raw.headers)) continue;
+    const derived = new Set(server.derived.map(({ variable }) => variable));
     for (const [header, value] of Object.entries(entry.raw.headers)) {
       if (typeof value !== "string") continue;
-      const read = readHeader(serverName, header, value);
-      if (read.kind === "literal" && wanted.has(read.variable) && !values.has(read.variable)) values.set(read.variable, read.literal);
+      const read = readHeader(server.name, header, value);
+      if (read.kind === "literal" && derived.has(read.variable) && wanted.has(read.variable)) values.set(read.variable, read.literal);
     }
   }
   return values;
@@ -225,7 +234,13 @@ function checkUrl(raw: unknown): string | null {
   }
   if (isPrivateHost(url.hostname)) return "it points at this computer or a private network";
   if (url.protocol !== "https:") return "its URL does not use https";
+  if (url.pathname.split("/").some(looksLikeKey)) return "its URL path looks like it carries a key; add it by hand";
   return null;
+}
+
+/** A path segment shaped like a key: long, and mixing letters with digits. `mcp`, `v1` and `sse` are not. */
+function looksLikeKey(segment: string): boolean {
+  return segment.length >= 20 && /^[A-Za-z0-9_.~-]+$/.test(segment) && /[A-Za-z]/.test(segment) && /[0-9]/.test(segment);
 }
 
 function isPrivateHost(hostname: string): boolean {

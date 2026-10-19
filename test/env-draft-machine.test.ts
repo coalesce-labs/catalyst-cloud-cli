@@ -17,7 +17,7 @@ const BEARER_REF_RE = /^Bearer \$([A-Z][A-Z0-9_]*)$/;
 const noTty = { import: { isTty: () => false } };
 
 interface DraftedFile {
-  environment: {
+  environment?: {
     variables: Array<{ name: string; secret?: boolean; required: boolean }>;
     mcp_servers?: Array<{ name: string; transport: string; url: string; headers: Record<string, string> }>;
   };
@@ -29,7 +29,8 @@ describe("Scenario: the machine's variables and MCP servers become declarations"
     const ctx = makeCtx(home);
     expect(await main(["env", "draft", "--root", root, "--write"], ctx, { env: noTty })).toBe(0);
     const text = readFileSync(join(root, ".catalyst/catalyst.toml"), "utf8");
-    const file = parse(text) as unknown as DraftedFile;
+    const file: DraftedFile = parse(text);
+    if (file.environment === undefined) throw new Error("the draft has no [environment] table");
     const variables = file.environment.variables;
     expect(variables.map(({ name }) => name)).toEqual(ALL_NAMES);
     expect(variables.filter(({ secret }) => secret === true).map(({ name }) => name)).toEqual(TOKEN_NAMES);
@@ -41,8 +42,8 @@ describe("Scenario: the machine's variables and MCP servers become declarations"
       expect(server.transport).toBe("http");
       for (const value of Object.values(server.headers)) {
         const ref = WHOLE_REF_RE.exec(value) ?? BEARER_REF_RE.exec(value);
-        expect(ref, value).not.toBeNull();
-        expect(declared.has(ref![1]!)).toBe(true);
+        if (ref === null) throw new Error(`header value is not a reference: ${value}`);
+        expect(declared.has(ref[1] ?? "")).toBe(true);
       }
     }
     expect(validateFullSettings(`[project]\nlinear_team = "DRAFT"\n\n${text}`).ok).toBe(true);

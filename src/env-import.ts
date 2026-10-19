@@ -166,7 +166,9 @@ async function importValues(input: ImportInput): Promise<{ code: number; report:
   const secretLines: string[] = [];
   const plain: Array<{ name: string; value: string }> = [];
   for (const { name: declaredName, secret } of withValue) {
-    const value = resolved.values.get(declaredName)!.value;
+    const found = resolved.values.get(declaredName);
+    if (found === undefined) continue;
+    const value = found.value;
     if (secret) {
       if (lineSafe(value)) secretLines.push(`${declaredName}=${value}`);
       else report.notStored.push({ name: declaredName, reason: `its value has a line break, spaces at either end, a leading quote or " #", which an import line cannot carry; store it with: catalyst secret set ${declaredName} --repo ${repo}` });
