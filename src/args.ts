@@ -362,7 +362,9 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       help: "skip the published-release check (no network)",
     },
   },
-  accounts: {},
+  accounts: {
+    all: { value: false, help: "also list removed accounts, which are kept for history and never used again" },
+  },
   seat: {
     size: { value: true, help: "model size: big or med" },
     stage: { value: true, help: "sized relay stage; defaults from size" },
@@ -579,7 +581,7 @@ export const VERB_USAGE: Record<string, string> = {
     "write <comment <ticket> --body|--stdin [--parent] [--bookkeeping] [--as-user] | state <ticket> --slot|--state-id|--state-type | label <ticket> --add... --remove... | create --team --title [--description|--stdin] [--label] [--priority] | reaction <ticket>|--comment <id> --emoji <e> | attachment <ticket> --title --url | session <ticket> [--title] [--plan-file] [--activity]>",
   ask: "ask <raise --team --title [--context] [--option]... [--default] --blocks <ticket>...|--nothing-to-block [--ask-key] [--gates-pr <n>... --released-by <letter>... [--gates-label hold|hold:preview]... [--gates-repo <owner/name>]] | accept <askTicket> --answer <commentId> --role <role> | list [--anyone] [--json]>",
   ready: "ready [--onboarding] [--local-sync] [--json] [--offline]",
-  accounts: "accounts [--json]",
+  accounts: "accounts [--all] [--json]",
   seat: "seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE] [--key-env NAME]",
   mcp: "mcp <add <name> --url URL <--auth none|--bearer SECRET_NAME|--header NAME=SECRET_NAME...>|list|remove <name>> [--json]",
   team: "team <list|check <KEY>|check --all|map <KEY> [--stage role=StateName]... [--yes --plan-hash H]|adopt <KEY> [--undo] [--yes --plan-hash H]|migrate <KEY> [--choice sourceId=destinationId]... [--retire] [--yes --plan-hash H]|checklist <KEY>> [--json]",

@@ -434,6 +434,54 @@ describe("running / queue / accounts", () => {
     expect(json.accounts.every((a) => typeof a.displayName === "string" && a.displayName !== "")).toBe(true);
     expect(await main(["accounts"], makeCtx(tempHome()))).toBe(2);
   });
+  // CTC-6204: a customer's agents kept trying to revive three revoked accounts the list showed as
+  // "expired or revoked — replace its credential". Removed accounts are history: hidden by default.
+  test("accounts hides removed accounts unless --all, and never offers them a credential", async () => {
+    const live = { accountSlot: "codex-live", provider: "codex", status: "active", revokedAtMs: null };
+    // An older cloud still calls a revoked account expired-or-revoked; revokedAtMs decides.
+    const revoked = { accountSlot: "codex-gone", provider: "codex", status: "expired-or-revoked", revokedAtMs: 1 };
+    const ended = { accountSlot: "codex-done", provider: "codex", status: "ended", revokedAtMs: null };
+    // Positive control: an expired credential on a live account still says how to repair it.
+    const expired = { accountSlot: "codex-stale", provider: "codex", status: "expired-or-revoked", revokedAtMs: null };
+    server.codingAccounts = [live, revoked, ended, expired];
+    try {
+      expect(await main(["accounts"], ctx)).toBe(0);
+      const text = ctx.out.join("\n");
+      expect(text).toContain("codex-live");
+      expect(text).not.toContain("codex-gone");
+      expect(text).not.toContain("codex-done");
+      expect(text).toMatch(/codex-stale .*replace its credential/);
+      expect(text).toContain("2 removed accounts are kept for history and never used again; catalyst accounts --all lists them.");
+
+      const all = makeCtx(home);
+      expect(await main(["accounts", "--all"], all)).toBe(0);
+      const lines = all.out;
+      for (const slot of ["codex-gone", "codex-done"]) {
+        const line = lines.find((l) => l.startsWith(slot))!;
+        expect(line).toContain("removed — kept for history, never used again");
+        expect(line).not.toMatch(/replace|credential/i);
+      }
+
+      const json = makeCtx(home);
+      expect(await main(["accounts", "--json"], json)).toBe(0);
+      const body = JSON.parse(json.out.join("\n")) as { accounts: { accountSlot: string; removed: boolean }[]; removedHidden: number };
+      expect(body.accounts.map((a) => a.accountSlot)).toEqual(["codex-live", "codex-stale"]);
+      expect(body.removedHidden).toBe(2);
+      const jsonAll = makeCtx(home);
+      expect(await main(["accounts", "--all", "--json"], jsonAll)).toBe(0);
+      const every = JSON.parse(jsonAll.out.join("\n")) as { accounts: { accountSlot: string; removed: boolean }[] };
+      expect(every.accounts.filter((a) => a.removed).map((a) => a.accountSlot)).toEqual(["codex-gone", "codex-done"]);
+
+      // Only removed accounts left: say none can take work, never "none are enrolled".
+      server.codingAccounts = [revoked, ended];
+      const none = makeCtx(home);
+      expect(await main(["accounts"], none)).toBe(0);
+      expect(none.out.join("\n")).toContain("No AI account in this workspace can take work.");
+      expect(none.out.join("\n")).not.toContain("No coding accounts are enrolled");
+    } finally {
+      server.codingAccounts = undefined;
+    }
+  });
   test("history renders the ticket's phases, failure, rounds and lease", async () => {
     expect(await main(["history", "ENG-2"], ctx)).toBe(0);
     const text = ctx.out.join("\n");
