@@ -151,11 +151,11 @@ describe("ENV_SHELL_START_SCRIPT, run with sh against a fake mise on PATH", () =
     expect(r.stdout + r.stderr).not.toContain("postgres://secret");
   });
 
-  test("shell: install, then exec mise exec <specs> -- bash -l; the shell's own exit code comes back", () => {
+  test("shell: install, then exec mise exec <specs> -- bash; the shell's own exit code comes back", () => {
     const r = runScript("shell", ["node@22", "bun@1.3.14"], { FAKE_BASH_EXIT: "3" });
     expect(r.status).toBe(3);
-    expect(r.stdout).toBe("bash -l mark=1\n");
-    expect(calls()).toEqual(["install node@22 bun@1.3.14", "exec node@22 bun@1.3.14 -- bash -l"]);
+    expect(r.stdout).toBe("bash  mark=1\n");
+    expect(calls()).toEqual(["install node@22 bun@1.3.14", "exec node@22 bun@1.3.14 -- bash"]);
   });
 
   test(`a failed install exits ${START_EXIT_TOOLCHAIN}`, () => {
@@ -168,6 +168,45 @@ describe("ENV_SHELL_START_SCRIPT, run with sh against a fake mise on PATH", () =
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("bash -l mark=none\n");
     expect(calls()).toEqual([]);
+  });
+});
+
+// CTC-6153: a login shell re-reads the profile, and Ubuntu's /etc/profile replaces PATH, so the
+// toolchain mise put first on PATH was lost. A real bash with a profile that resets PATH stands in for it.
+describe("ENV_SHELL_START_SCRIPT with a real bash: the toolchain PATH survives into the shell", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "catalyst-env-path-"));
+    spawnSync("mkdir", ["-p", join(dir, "bin"), join(dir, "tool"), join(dir, "home")]);
+    // Like real mise: put the toolchain's bin first on PATH, then exec the command after "--".
+    writeFileSync(
+      join(dir, "bin", "mise"),
+      ["#!/bin/sh", 'case "$1" in install) exit 0 ;; exec) shift; while [ "$1" != "--" ]; do shift; done; shift; PATH="$TOOL_DIR:$PATH" exec "$@" ;; esac'].join("\n"),
+    );
+    chmodSync(join(dir, "bin", "mise"), 0o755);
+    writeFileSync(join(dir, "home", ".bash_profile"), "PATH=/usr/bin:/bin\n");
+    writeFileSync(join(dir, "home", ".bashrc"), "");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  // Review P2 on #410: a forced interactive shell ignored set -u errors in piped input and exited 0.
+  test.skipIf(!existsSync("/bin/bash"))("piped input keeps non-interactive semantics: a set -u error stops it with a non-zero exit", () => {
+    const r = spawnSync("sh", ["-c", ENV_SHELL_START_SCRIPT, "catalyst-env-shell", "shell", "node@22"], {
+      env: { PATH: `${join(dir, "bin")}:/usr/bin:/bin`, HOME: join(dir, "home"), TOOL_DIR: join(dir, "tool") },
+      input: 'set -u\necho "$CATALYST_TEST_UNSET_VARIABLE"\necho continued\n',
+      encoding: "utf8",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain("continued");
+  });
+
+  test.skipIf(!existsSync("/bin/bash"))("the shell started for declared toolchains still has the toolchain first on PATH", () => {
+    const r = spawnSync("sh", ["-c", ENV_SHELL_START_SCRIPT, "catalyst-env-shell", "shell", "node@22"], {
+      env: { PATH: `${join(dir, "bin")}:/usr/bin:/bin`, HOME: join(dir, "home"), TOOL_DIR: join(dir, "tool") },
+      input: 'echo "PATH=$PATH"\nexit\n',
+      encoding: "utf8",
+    });
+    expect(r.stdout).toMatch(new RegExp(`PATH=${join(dir, "tool")}:`));
   });
 });
 
