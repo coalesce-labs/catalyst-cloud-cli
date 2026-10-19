@@ -51,6 +51,8 @@ export interface FixtureServer {
   /** CTC-1953/CTC-1954 ship ahead of some tenants' mirror; `false` makes those two routes 404 the
    *  way an older cloud does, so the bundle's "needs a newer cloud" path meets a real 404. */
   routesDeployed: boolean;
+  /** CTC-6204 — when set, GET /api/v1/coding-accounts answers these rows instead of CODING_ACCOUNTS. */
+  codingAccounts?: unknown[];
   /** CTC-4744 — when set, GET /api/v1/agent/tenant/readiness?team=<id> answers 200 and calls this,
    *  the way the cloud's read-through recomputes an expired verdict. Unset, the route is a 404. */
   readinessRead?: (teamId: string) => void;
@@ -1293,7 +1295,7 @@ export async function startMeFixture(
     // cloud" path is tested against a real 404 rather than a mocked branch.
     if (path === "/api/v1/coding-accounts") {
       return state.routesDeployed
-        ? send(200, { accounts: CODING_ACCOUNTS })
+        ? send(200, { accounts: state.codingAccounts ?? CODING_ACCOUNTS })
         : send(404, { error: "not found" });
     }
     const executionMatch = /^\/api\/v1\/issues\/([^/]+)\/execution$/.exec(path);

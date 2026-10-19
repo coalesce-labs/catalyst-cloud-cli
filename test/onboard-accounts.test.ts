@@ -459,6 +459,8 @@ describe("--coding-account pins the account setup checks (CTC-4633)", () => {
     [{ quarantined: true }, "coding_account_quarantined"],
     [{ declaredState: "inactive" }, "coding_account_inactive"],
     [{ revokedAtMs: 0 }, "coding_account_ended"],
+    // CTC-6204: a revoked account that is also turned off is ended, never "turn it on".
+    [{ revokedAtMs: 0, declaredState: "inactive" }, "coding_account_ended"],
     [{ renewalStatus: "canceled", accessEndsAtMs: now - 1 }, "coding_account_ended"],
   ])("an unusable named account %o names its own cause, not the workspace's", async (change, reason) => {
     const f = fixture();

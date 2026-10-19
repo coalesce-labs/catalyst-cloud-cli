@@ -391,7 +391,7 @@ describe("each skill's scripts spawn the catalyst verbs it teaches", () => {
       /"contract",\s*"--refresh",\s*"--path",\s*"teams"/,
       /"contract",\s*"--path",\s*"merge\.repositories"/,
       /"environment",\s*"read"/,
-      /"accounts",\s*"--json"/,
+      /"accounts",\s*"--all",\s*"--json"/,
       /"contract",\s*"--path",\s*"readinessChecks"/,
     ],
     "catalyst-github": [
