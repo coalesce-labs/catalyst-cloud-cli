@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { convertLegacyEnvironmentJson } from "./legacy.js";
 import { inventoryRepo } from "./inventory.js";
+import { scanMachine, type MachineOptions, type MachineScan } from "./machine.js";
+import { mcpServerToml, type DraftedMcpServer } from "./scan-claude-mcp.js";
 import type { ScanDeps } from "./types.js";
 import { walkRepo } from "./walk.js";
 
@@ -9,14 +11,36 @@ const SECRET_NAME_RE = /(?:^|_)(?:API_?KEY|AUTH|CREDENTIALS?|PASSWORD|PRIVATE_?K
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_VARIABLES = 128;
 
+/** The draft's secret rule: a name that says it holds a key, a token, a password or a secret. */
+export function isSecretName(name: string): boolean {
+  return SECRET_NAME_RE.test(name);
+}
+
 export type EnvironmentDraft =
-  | { state: "valid"; names: string[]; secretNames: string[]; setup: string[]; verify: string[]; toml: string; sources: string[] }
+  | {
+    state: "valid";
+    names: string[];
+    secretNames: string[];
+    setup: string[];
+    verify: string[];
+    toml: string;
+    sources: string[];
+    mcpServers: DraftedMcpServer[];
+    /** What this computer added; null when the caller did not ask for the machine scan. */
+    machine: MachineScan | null;
+  }
   | { state: "invalid"; errors: string[] };
 
 /** Build a stable, value-free environment table from repository evidence. `.env` is never read:
  *  inventoryRepo's walker only opens supported examples and source/config files. The legacy
- *  declaration is parsed for names and explicit secret flags, and no legacy value escapes. */
-export function draftEnvironment(root: string, deps: Partial<ScanDeps> = {}): EnvironmentDraft {
+ *  declaration is parsed for names and explicit secret flags, and no legacy value escapes.
+ *  With `options.machine`, the names this computer's `.envrc` exports and Claude Code's HTTP MCP
+ *  servers join the draft (`catalyst env draft`); without it (`catalyst onboard`) nothing changes. */
+export function draftEnvironment(
+  root: string,
+  deps: Partial<ScanDeps> = {},
+  options: { machine?: MachineOptions } = {},
+): EnvironmentDraft {
   const inventory = inventoryRepo(root, deps);
   const files = (deps.listFiles ?? walkRepo)(root);
   const names = new Set<string>();
@@ -26,7 +50,7 @@ export function draftEnvironment(root: string, deps: Partial<ScanDeps> = {}): En
   for (const entry of inventory.entries) {
     if (entry.group === "bindings" || !entry.needsDeclaration || !ENV_NAME_RE.test(entry.name)) continue;
     names.add(entry.name);
-    if (SECRET_NAME_RE.test(entry.name)) secrets.add(entry.name);
+    if (isSecretName(entry.name)) secrets.add(entry.name);
     for (const finding of entry.found) sources.add(finding.file);
   }
 
@@ -39,6 +63,12 @@ export function draftEnvironment(root: string, deps: Partial<ScanDeps> = {}): En
     for (const name of converted.secretNames) secrets.add(name);
     if (converted.variableNames.length > 0) sources.add("catalyst.env.json");
   }
+
+  const machine = options.machine === undefined ? null : scanMachine(root, options.machine);
+  for (const name of machine?.names ?? []) names.add(name);
+  for (const name of machine?.secretNames ?? []) secrets.add(name);
+  for (const source of machine?.sources ?? []) sources.add(source);
+  const mcpServers = machine?.claude?.servers ?? [];
 
   const sortedNames = [...names].sort((a, b) => a.localeCompare(b, "en"));
   if (sortedNames.length > MAX_VARIABLES) {
@@ -58,7 +88,7 @@ export function draftEnvironment(root: string, deps: Partial<ScanDeps> = {}): En
     "required = false",
     "",
   ].join("\n"));
-  chunks.push(...standard.setup, ...standard.verify);
+  chunks.push(...mcpServers.map(mcpServerToml), ...standard.setup, ...standard.verify);
   const toml = `${chunks.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
   return {
     state: "valid",
@@ -68,6 +98,8 @@ export function draftEnvironment(root: string, deps: Partial<ScanDeps> = {}): En
     verify: standard.verify,
     toml,
     sources: [...sources].sort((a, b) => a.localeCompare(b, "en")),
+    mcpServers,
+    machine,
   };
 }
 

@@ -1,4 +1,3 @@
-import { createInterface } from "node:readline/promises";
 import { positionals, type ParsedArgs } from "./args.js";
 import { requireConfig, type Ctx } from "./config.js";
 import { CliError, UsageError } from "./errors.js";
@@ -8,28 +7,15 @@ import {
   isMachineMutation,
   type MachineInventory,
 } from "./machine-inventory.js";
-import { stdinIsTty } from "./prompt.js";
+import { confirmYesNo } from "./prompt.js";
 
 export interface HostsDeps {
   confirm?: (name: string) => Promise<boolean>;
 }
 async function confirmRemove(name: string): Promise<boolean> {
-  if (!stdinIsTty()) return false;
-  const prompt = createInterface({
-    input: process.stdin,
-    output: process.stderr,
-  });
-  try {
-    return /^(y|yes)$/i.test(
-      (
-        await prompt.question(
-          `Remove ${name} from this account? It will stop receiving work. [y/N] `,
-        )
-      ).trim(),
-    );
-  } finally {
-    prompt.close();
-  }
+  return confirmYesNo(
+    `Remove ${name} from this account? It will stop receiving work. [y/N] `,
+  );
 }
 export function machineLines(inventory: MachineInventory): string[] {
   const lines = inventory.machines.map(

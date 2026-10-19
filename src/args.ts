@@ -373,7 +373,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
   env: {
     root: {
       value: true,
-      help: "draft: repository directory (default: current directory)",
+      help: "draft, import: repository directory (default: current directory)",
     },
     write: {
       value: false,
@@ -382,6 +382,18 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     diff: {
       value: false,
       help: "draft: show the generated TOML as an additions-only diff",
+    },
+    "import-values": {
+      value: false,
+      help: "draft: after --write, store this computer's values for the declared names without asking",
+    },
+    repo: {
+      value: true,
+      help: "draft --import-values, import: the repository (owner/name); default: this checkout's GitHub origin",
+    },
+    yes: {
+      value: false,
+      help: "import: store without asking (needed without a terminal)",
     },
   },
   var: {
@@ -570,7 +582,7 @@ export const VERB_USAGE: Record<string, string> = {
   seat: "seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE] [--key-env NAME]",
   mcp: "mcp <add <name> --url URL <--auth none|--bearer SECRET_NAME|--header NAME=SECRET_NAME...>|list|remove <name>> [--json]",
   team: "team <list|check <KEY>|check --all|map <KEY> [--stage role=StateName]... [--yes --plan-hash H]|adopt <KEY> [--undo] [--yes --plan-hash H]|migrate <KEY> [--choice sourceId=destinationId]... [--retire] [--yes --plan-hash H]|checklist <KEY>> [--json]",
-  env: "env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write]> [--json]   (THIS repository, offline — no login, no network)",
+  env: "env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write [--import-values]] | import [--root DIR] [--repo owner/name] [--yes]> [--json]   (THIS repository; offline with no login, except import and --import-values, which sign in and store values)",
   environment:
     "environment [read] [--json] | environment propose --file <path>|--stdin [--expect-revision N] [--approve] [--json] | environment approve [--revision N --hash H] [--json]   (your ACCOUNT's declaration; needs login)",
   secret:
