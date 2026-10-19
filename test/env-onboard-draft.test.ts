@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { draftOnboardSettings } from "../src/env/onboard-draft.js";
 import { validateFullSettings } from "../vendor/settings/index.js";
+import { envrcText, writeMachine } from "./env-machine-fixture.js";
 
 describe("draftOnboardSettings", () => {
   it("composes the explicit team with the complete value-free environment draft", () => {
@@ -100,5 +103,19 @@ describe("draftOnboardSettings", () => {
       state: "invalid",
       errors: ["legacy declaration is not valid JSON"],
     });
+  });
+
+  it("is unchanged by this computer's .envrc and ~/.claude.json: the onboarding draft never runs the machine scan", () => {
+    const { root } = writeMachine();
+    writeFileSync(join(root, ".env.example"), "PUBLIC_URL=https://placeholder.invalid\n");
+    const withMachine = draftOnboardSettings(root, "CTC");
+    rmSync(join(root, ".envrc"));
+    const without = draftOnboardSettings(root, "CTC");
+    expect(withMachine.state).toBe("draft");
+    expect(withMachine).toEqual(without);
+    if (withMachine.state !== "draft") throw new Error("expected a draft");
+    expect(withMachine.toml).not.toContain("mcp_servers");
+    expect(withMachine.names).toEqual(["PUBLIC_URL"]);
+    expect(envrcText()).toContain("GITHUB_TOKEN");
   });
 });
