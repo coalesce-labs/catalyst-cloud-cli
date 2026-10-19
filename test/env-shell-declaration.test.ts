@@ -178,15 +178,27 @@ describe("resolveShellVariables", () => {
   });
 
   // CTC-6152: Windows environment names are case-insensitive, so docker_host reaches the docker client as DOCKER_HOST.
-  test("reserved names and prefixes match case-insensitively: docker_host, Path and mise_data_dir are skipped", () => {
-    const names = ["docker_host", "Docker_Context", "Path", "home", "mise_data_dir", "otel_service_name", "git_config_count"];
-    const r = resolveShellVariables(
-      names.map((name) => ({ name, required: true, secret: false })),
-      { env: {}, envFiles: [{ path: ".env", values: Object.fromEntries(names.map((n) => [n, "x"])) }] },
+  const mixedCase = ["docker_host", "Docker_Context", "Path", "home", "mise_data_dir", "otel_service_name", "git_config_count"];
+  const resolveMixed = (platform: NodeJS.Platform) =>
+    resolveShellVariables(
+      mixedCase.map((name) => ({ name, required: true, secret: false })),
+      { env: {}, envFiles: [{ path: ".env", values: Object.fromEntries(mixedCase.map((n) => [n, "x"])) }], platform },
     );
-    expect(r.skippedReserved).toEqual(names);
+
+  test("on Windows, reserved names and prefixes match case-insensitively: docker_host, Path and mise_data_dir are skipped", () => {
+    const r = resolveMixed("win32");
+    expect(r.skippedReserved).toEqual(mixedCase);
     expect(r.values).toEqual({});
-    expect(isReservedVariableName("database_url")).toBe(false);
+    expect(isReservedVariableName("database_url", "win32")).toBe(false);
+  });
+
+  test("on Linux and macOS, lowercase names are distinct and pass through: user and home are not USER and HOME", () => {
+    for (const platform of ["linux", "darwin"] as const) {
+      const r = resolveMixed(platform);
+      expect(r.skippedReserved).toEqual([]);
+      expect(Object.keys(r.values)).toEqual(mixedCase);
+      expect(isReservedVariableName("HOME", platform)).toBe(true);
+    }
   });
 
   test("DOCKER_HOST and DOCKER_CONTEXT from an env file are skipped: they would move the docker client itself", () => {

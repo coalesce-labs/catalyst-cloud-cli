@@ -98,11 +98,11 @@ export const RESERVED_VARIABLE_NAMES: ReadonlySet<string> = new Set([
 // DOCKER_HOST or DOCKER_CONTEXT from an --env-file would move `docker run` to another engine.
 const RESERVED_PREFIXES = ["MISE_", "OTEL_", "GIT_CONFIG_", "DOCKER_"];
 
-// Compared upper-cased: Windows environment names are case-insensitive, so a declared docker_host
-// reaches the docker client as DOCKER_HOST (CTC-6152).
-export function isReservedVariableName(name: string): boolean {
-  const upper = name.toUpperCase();
-  return RESERVED_VARIABLE_NAMES.has(upper) || RESERVED_PREFIXES.some((prefix) => upper.startsWith(prefix));
+// On Windows, environment names are case-insensitive, so a declared docker_host reaches the docker
+// client as DOCKER_HOST; compare upper-cased there. Elsewhere user and USER are distinct (CTC-6152).
+export function isReservedVariableName(name: string, platform: NodeJS.Platform = process.platform): boolean {
+  const key = platform === "win32" ? name.toUpperCase() : name;
+  return RESERVED_VARIABLE_NAMES.has(key) || RESERVED_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
 export const TERMINAL_SOURCE = "this terminal";
@@ -125,6 +125,8 @@ export function resolveShellVariables(
   input: {
     env: NodeJS.ProcessEnv;
     envFiles: readonly { path: string; values: NodeJS.Dict<string> }[];
+    /** The host the docker client runs on; decides whether reserved names match case-insensitively. */
+    platform?: NodeJS.Platform;
   },
 ): ResolvedVariables {
   const values: Record<string, string> = {};
@@ -134,7 +136,7 @@ export function resolveShellVariables(
   const skippedReserved: string[] = [];
   const used = new Set<string>();
   for (const variable of declared) {
-    if (isReservedVariableName(variable.name)) {
+    if (isReservedVariableName(variable.name, input.platform)) {
       skippedReserved.push(variable.name);
       continue;
     }

@@ -148,7 +148,7 @@ export async function runEnvShell(args: ParsedArgs, ctx: Ctx, deps: EnvShellDeps
       return refuse({ code: "env_file_unreadable", message: `could not read --env-file ${path}` });
     }
   }
-  const variables = resolveShellVariables(declaration.variables, { env: ctx.env, envFiles });
+  const variables = resolveShellVariables(declaration.variables, { env: ctx.env, envFiles, platform: deps.platform });
   if (variables.missingRequired.length > 0)
     return refuse({
       code: "variables_missing",
