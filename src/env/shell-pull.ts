@@ -24,7 +24,7 @@ export const PULL_USERNAME = "x-catalyst-pull";
 
 /** Docker's rule: the first path component is a registry when it has a "." or ":" or is "localhost". */
 export function registryOf(ref: string): string {
-  const name = ref.split("@")[0]!;
+  const name = ref.split("@", 1)[0] ?? ref;
   const slash = name.indexOf("/");
   if (slash < 0) return "docker.io";
   const first = name.slice(0, slash);

@@ -151,7 +151,7 @@ describe("catalyst env shell --check", () => {
       "Ready: catalyst env shell opens this environment.",
     ]);
     expect(rec.calls).toEqual(["server", "imagePresent", "run:capture"]);
-    expect(rec.runs[0]!.argv).toContain(`type=bind,src=${root},dst=/workspace`);
+    expect(rec.runs[0]?.argv).toContain(`type=bind,src=${root},dst=/workspace`);
   });
 
   test("the oakmont example: variables set, secret and optional, as designed", async () => {
@@ -170,7 +170,7 @@ describe("catalyst env shell --check", () => {
     const { docker } = recordingPort();
     expect(await shell(["--check", "--json"], docker)).toBe(0);
     expect(ctx.out).toHaveLength(1);
-    expect(JSON.parse(ctx.out[0]!)).toEqual({
+    expect(JSON.parse(ctx.out[0] ?? "")).toEqual({
       ok: true,
       repository: "oakmont-labs/web",
       declaration: ".catalyst/catalyst.toml",
@@ -227,15 +227,15 @@ describe("catalyst env shell --check", () => {
     const absent = recordingPort({ present: false });
     expect(await shell(["--check", "--json"], absent.docker)).toBe(0);
     expect(absent.rec.calls).toEqual(["server", "imagePresent", "endpoint", "pull", "run:capture"]);
-    expect(absent.rec.pulls[0]!.config).toEqual({ auths: { "https://index.docker.io/v1/": {} } });
-    expect(JSON.parse(ctx.out[0]!).image).toEqual({ reference: IMAGE, source: "downloaded", credential: "none" });
+    expect(absent.rec.pulls[0]?.config).toEqual({ auths: { "https://index.docker.io/v1/": {} } });
+    expect(JSON.parse(ctx.out[0] ?? "").image).toEqual({ reference: IMAGE, source: "downloaded", credential: "none" });
     expect(ctx.err).toContain("  Downloading it with no credential (about 2.3 GB, once per image)…");
 
     ctx.out.length = 0;
     const present = recordingPort({ present: true });
     expect(await shell(["--check", "--json"], present.docker)).toBe(0);
     expect(present.rec.calls).not.toContain("pull");
-    expect(JSON.parse(ctx.out[0]!).image.source).toBe("present");
+    expect(JSON.parse(ctx.out[0] ?? "").image.source).toBe("present");
   });
 
   test("works with no customer.json (not signed in) for Catalyst's image", async () => {
@@ -259,7 +259,7 @@ describe("refusals", () => {
     ctx.err.length = 0;
     expect(await shell([...args, "--check", "--json"], docker, over)).toBe(1);
     expect(ctx.out).toHaveLength(1);
-    const body = JSON.parse(ctx.out[0]!) as { ok: boolean; refusal: { code: string; message: string; names?: string[] } };
+    const body = JSON.parse(ctx.out[0] ?? "") as { ok: boolean; refusal: { code: string; message: string; names?: string[] } };
     expect(body.ok).toBe(false);
     return body.refusal;
   };
@@ -271,7 +271,7 @@ describe("refusals", () => {
     expect(await main(["env", "shell", "--check", "--root", empty], ctx, deps(ok))).toBe(1);
     expect(ctx.err).toEqual([`No .catalyst/catalyst.toml in ${empty}. Draft one with: catalyst env draft --write`]);
     expect(await main(["env", "shell", "--check", "--json", "--root", join(empty, "nope")], ctx, deps(ok))).toBe(1);
-    expect(JSON.parse(ctx.out.at(-1)!).refusal.code).toBe("declaration_missing");
+    expect(JSON.parse(ctx.out.at(-1) ?? "").refusal.code).toBe("declaration_missing");
     rmSync(empty, { recursive: true, force: true });
 
     writeDeclaration(repo, '[environment]\n[[environment.variables]]\nname = "1BAD"\n');
@@ -307,7 +307,7 @@ describe("refusals", () => {
     writeDeclaration(comma, OAKMONT);
     ctx.out.length = 0;
     expect(await main(["env", "shell", "--check", "--json", "--root", comma], ctx, deps(ok))).toBe(1);
-    expect(JSON.parse(ctx.out[0]!).refusal).toEqual({
+    expect(JSON.parse(ctx.out[0] ?? "").refusal).toEqual({
       code: "repository_path_unsupported",
       message: `env shell cannot mount ${comma}: the path contains a comma.`,
     });
@@ -351,11 +351,11 @@ describe("catalyst env shell (interactive)", () => {
     const { docker, rec } = recordingPort({ runCode: 3 });
     expect(await shell([], docker)).toBe(3);
     expect(rec.runs).toHaveLength(1);
-    expect(rec.runs[0]!.mode).toBe("interactive");
-    const argv = rec.runs[0]!.argv;
+    expect(rec.runs[0]?.mode).toBe("interactive");
+    const argv = rec.runs[0]?.argv ?? [];
     expect(argv.slice(0, 6)).toEqual(["run", "--rm", "--pull", "never", "-i", "-t"]);
     expect(argv.slice(-4)).toEqual(["catalyst-env-shell", "shell", "node@22", "bun@1.3.14"]);
-    expect(rec.runs[0]!.env.TERM).toBe("xterm-256color");
+    expect(rec.runs[0]?.env.TERM).toBe("xterm-256color");
     expect(ctx.out).toEqual([
       "Environment for oakmont-labs/web, from .catalyst/catalyst.toml",
       `  Image: ${SHORT} (already on this computer)`,
@@ -376,7 +376,8 @@ describe("catalyst env shell (interactive)", () => {
     ctx.env = { ...ctx.env, CLOUDFLARE_API_TOKEN: "cf-secret-token", TERM: "screen" };
     const { docker, rec } = recordingPort();
     expect(await shell(["--env-file", envFile], docker)).toBe(0);
-    const run = rec.runs[0]!;
+    const run = rec.runs[0];
+    if (!run) throw new Error("docker run was not called");
     expect(run.env.DATABASE_URL).toBe(VALUES.DATABASE_URL);
     expect(run.env.STRIPE_SECRET_KEY).toBe(VALUES.STRIPE_SECRET_KEY);
     expect(run.env.SENTRY_DSN).toBe("https://dsn-secret@example.invalid/1");
@@ -403,7 +404,7 @@ describe("catalyst env shell (interactive)", () => {
     expect(ctx.out).toContain("  Note: env shell sets PATH itself, so the declared value is not used.");
     expect(ctx.out).toContain("  Toolchain: none declared");
     expect(ctx.out).toContain("  Variables: DEMO set from this terminal");
-    const argv = rec.runs[0]!.argv;
+    const argv = rec.runs[0]?.argv ?? [];
     expect(argv).not.toContain("-t");
     expect(argv).not.toContain("PATH");
     expect(argv).toContain("DEMO");
@@ -431,7 +432,7 @@ describe("catalyst env shell (interactive)", () => {
     }));
     expect(code).toBe(0);
     expect(asked).toEqual([process.cwd()]);
-    expect(rec.runs[0]!.argv).toContain(`type=bind,src=${repo},dst=/workspace`);
+    expect(rec.runs[0]?.argv).toContain(`type=bind,src=${repo},dst=/workspace`);
   });
 
   test("real git: run from a subdirectory with no --root, the checkout's top level is mounted", async () => {
@@ -446,7 +447,7 @@ describe("catalyst env shell (interactive)", () => {
     } finally {
       process.chdir(cwd);
     }
-    expect(rec.runs[0]!.argv).toContain(`type=bind,src=${repo},dst=/workspace`);
+    expect(rec.runs[0]?.argv).toContain(`type=bind,src=${repo},dst=/workspace`);
   });
 
   test("a worktree's git common dir outside the root is mounted; one inside is not", async () => {
@@ -454,11 +455,11 @@ describe("catalyst env shell (interactive)", () => {
     try {
       const outside = recordingPort();
       expect(await shell([], outside.docker, { gitCommonDir: async () => common })).toBe(0);
-      expect(outside.rec.runs[0]!.argv).toContain(`type=bind,src=${common},dst=${common}`);
+      expect(outside.rec.runs[0]?.argv).toContain(`type=bind,src=${common},dst=${common}`);
       const inside = recordingPort();
       mkdirSync(join(repo, ".git"));
       expect(await shell([], inside.docker, { gitCommonDir: async () => join(repo, ".git") })).toBe(0);
-      expect(inside.rec.runs[0]!.argv.filter((word) => word === "--mount")).toHaveLength(2);
+      expect(inside.rec.runs[0]?.argv.filter((word) => word === "--mount")).toHaveLength(2);
     } finally {
       rmSync(common, { recursive: true, force: true });
     }
@@ -507,7 +508,7 @@ describe("signed in, credential fallback", () => {
       ],
     });
     expect(await shell(["--check", "--json", "--image", REF], docker)).toBe(0);
-    expect(JSON.parse(ctx.out[0]!).image).toEqual({ reference: REF, source: "downloaded", credential: "issued" });
+    expect(JSON.parse(ctx.out[0] ?? "").image).toEqual({ reference: REF, source: "downloaded", credential: "issued" });
     expect(server.writes.map((w) => [w.path, w.body])).toEqual([
       [`${FIXTURE_ROUTE_PREFIX}/registry/pull-credential`, { owner: "oakmont-labs", name: "web" }],
     ]);

@@ -140,10 +140,10 @@ export async function runEnvShell(args: ParsedArgs, ctx: Ctx, deps: EnvShellDeps
   }
 
   // 4. Variables.
-  const envFiles: { path: string; values: Record<string, string> }[] = [];
+  const envFiles: { path: string; values: NodeJS.Dict<string> }[] = [];
   for (const path of flagList(args, "env-file")) {
     try {
-      envFiles.push({ path, values: parseEnv(readFileSync(resolve(path), "utf8")) as Record<string, string> });
+      envFiles.push({ path, values: parseEnv(readFileSync(resolve(path), "utf8")) });
     } catch {
       return refuse({ code: "env_file_unreadable", message: `could not read --env-file ${path}` });
     }
@@ -270,6 +270,8 @@ export async function runEnvShell(args: ParsedArgs, ctx: Ctx, deps: EnvShellDeps
       message: `The environment check did not finish (exit ${result.code}). Run catalyst env shell --check again; if it repeats, open the shell and run mise doctor.`,
     });
   const byName = new Map(declaration.variables.map((v) => [v.name, v]));
+  const resolvedBySpec = new Map(report.toolchains.map((t) => [t.spec, t.resolved]));
+  const resolvedOf = (t: ShellToolchain) => resolvedBySpec.get(`${t.name}@${t.version}`) ?? "";
   if (json) {
     ctx.stdout(
       JSON.stringify({
@@ -277,7 +279,7 @@ export async function runEnvShell(args: ParsedArgs, ctx: Ctx, deps: EnvShellDeps
         repository,
         declaration: DECLARATION,
         image: { reference: image, source: present ? "present" : "downloaded", credential },
-        toolchains: declaration.toolchains.map((t, index) => ({ name: t.name, version: t.version, resolved: report.toolchains[index]!.resolved })),
+        toolchains: declaration.toolchains.map((t) => ({ name: t.name, version: t.version, resolved: resolvedOf(t) })),
         variables: report.variables.map((v) => ({
           name: v.name,
           required: byName.get(v.name)?.required === true,
@@ -291,7 +293,7 @@ export async function runEnvShell(args: ParsedArgs, ctx: Ctx, deps: EnvShellDeps
   say(
     declaration.toolchains.length === 0
       ? "  Toolchain: none declared"
-      : `  Toolchain: ${declaration.toolchains.map((t, index) => `${t.name} ${t.version} → ${report.toolchains[index]!.resolved}`).join(", ")}`,
+      : `  Toolchain: ${declaration.toolchains.map((t) => `${t.name} ${t.version} → ${resolvedOf(t)}`).join(", ")}`,
   );
   say(
     `  Variables: ${

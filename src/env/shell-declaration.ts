@@ -94,7 +94,9 @@ export const RESERVED_VARIABLE_NAMES: ReadonlySet<string> = new Set([
   "TERM",
   "CLAUDE_CODE_ENABLE_TELEMETRY",
 ]);
-const RESERVED_PREFIXES = ["MISE_", "OTEL_", "GIT_CONFIG_"];
+// DOCKER_: a value rides the docker client's own environment to reach the container, so a declared
+// DOCKER_HOST or DOCKER_CONTEXT from an --env-file would move `docker run` to another engine.
+const RESERVED_PREFIXES = ["MISE_", "OTEL_", "GIT_CONFIG_", "DOCKER_"];
 
 export function isReservedVariableName(name: string): boolean {
   return RESERVED_VARIABLE_NAMES.has(name) || RESERVED_PREFIXES.some((prefix) => name.startsWith(prefix));
@@ -119,7 +121,7 @@ export function resolveShellVariables(
   declared: readonly ShellVariable[],
   input: {
     env: NodeJS.ProcessEnv;
-    envFiles: readonly { path: string; values: Record<string, string> }[];
+    envFiles: readonly { path: string; values: NodeJS.Dict<string> }[];
   },
 ): ResolvedVariables {
   const values: Record<string, string> = {};
@@ -141,8 +143,9 @@ export function resolveShellVariables(
       source = TERMINAL_SOURCE;
     } else {
       for (const file of input.envFiles) {
-        if (Object.hasOwn(file.values, variable.name)) {
-          value = file.values[variable.name];
+        const fromFile = Object.hasOwn(file.values, variable.name) ? file.values[variable.name] : undefined;
+        if (typeof fromFile === "string") {
+          value = fromFile;
           source = file.path;
         }
       }

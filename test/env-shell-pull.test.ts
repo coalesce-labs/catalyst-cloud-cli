@@ -128,7 +128,7 @@ describe("downloadImage", () => {
     expect(pulls).toEqual([
       { ref: RUNNER_HOST_IMAGES.runner, host: HOST, config: { auths: { "https://index.docker.io/v1/": {} } } },
     ]);
-    expect(pulls[0]!.config).toEqual(CREDENTIAL_FREE_CONFIG);
+    expect(pulls[0]?.config).toEqual(CREDENTIAL_FREE_CONFIG);
     expect(notes).toContain("  Downloading it with no credential (about 2.3 GB, once per image)…");
     expect(notes).toContain("  Downloaded.");
     expect(server.requests).toEqual([]);
@@ -170,9 +170,9 @@ describe("downloadImage", () => {
     expect(roots).toEqual([ROOT]);
     expect(ROUTE_PATH.startsWith("/api/v1/agent/")).toBe(false);
     expect(server.writes).toHaveLength(1);
-    expect(server.writes[0]!.method).toBe("POST");
-    expect(server.writes[0]!.path).toBe(ROUTE_PATH);
-    expect(server.writes[0]!.body).toEqual({ owner: "oakmont-labs", name: "web" });
+    expect(server.writes[0]?.method).toBe("POST");
+    expect(server.writes[0]?.path).toBe(ROUTE_PATH);
+    expect(server.writes[0]?.body).toEqual({ owner: "oakmont-labs", name: "web" });
   });
 
   test("issued and covering the image: second pull carries {auths:{<registry>:{auth: base64('x-catalyst-pull:ctcpull_…')}}}; credential 'issued'", async () => {
@@ -182,7 +182,7 @@ describe("downloadImage", () => {
     const result = await download(docker);
     expect(result).toEqual({ ok: true, credential: "issued" });
     expect(pulls).toHaveLength(2);
-    expect(pulls[0]!.config).toEqual(CREDENTIAL_FREE_CONFIG);
+    expect(pulls[0]?.config).toEqual(CREDENTIAL_FREE_CONFIG);
     expect(pulls[1]).toEqual({
       ref: REF,
       host: HOST,

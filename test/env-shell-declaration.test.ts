@@ -177,6 +177,16 @@ describe("resolveShellVariables", () => {
     expect(isReservedVariableName("DATABASE_URL")).toBe(false);
   });
 
+  test("DOCKER_HOST and DOCKER_CONTEXT from an env file are skipped: they would move the docker client itself", () => {
+    const r = resolveShellVariables(
+      [{ name: "DOCKER_HOST", required: true, secret: false }, { name: "DOCKER_CONTEXT", required: false, secret: false }],
+      { env: {}, envFiles: [{ path: ".env", values: { DOCKER_HOST: "tcp://docker:2375", DOCKER_CONTEXT: "other" } }] },
+    );
+    expect(r.skippedReserved).toEqual(["DOCKER_HOST", "DOCKER_CONTEXT"]);
+    expect(r.values).toEqual({});
+    expect(r.missingRequired).toEqual([]);
+  });
+
   test("no value appears in any returned list or message", () => {
     const r = resolveShellVariables(decl, { env: { DATABASE_URL: "postgres://secret" }, envFiles: [] });
     expect(JSON.stringify({ ...r, values: undefined })).not.toContain("postgres://secret");
