@@ -64,6 +64,7 @@ export const CAPABILITIES: readonly Capability[] = [
   { verb: "project wip-limit set", does: "set a project's new-start WIP limit (0 to 9999, or back to the workspace default)", needs: "admin", routes: [agent("POST", "team-wip-limit")], since: "0.13.1" },
   { verb: "repo agents-block", does: "add or refresh the one Catalyst block in a checkout's AGENTS.md, in the working tree, for the person to commit and open as a pull request", needs: "member", routes: [], since: "0.13.1" },
   { verb: "repo agent-setup", does: "read a checkout's agent setup (AGENTS.md, CLAUDE.md, .agents and .claude skills and rules) and, on request, make it portable in the working tree", needs: "member", routes: [], since: "0.13.1" },
+  { verb: "env shell", does: "open this repository's environment on this computer: Catalyst's image, the declared toolchain and variables (needs Docker; no login for Catalyst's image)", needs: "member", routes: [], since: "0.16.20" },
   { verb: "legacy", does: "find leftovers of the old local Catalyst runtime on this machine and, on a yes, remove them through their own tools", needs: "member", routes: [], since: "0.13.1" },
   { verb: "environment read", does: "read the workspace-wide environment declaration", needs: "member", routes: [agent("GET", "account-environment")], since: "0.8.0" },
   { verb: "environment propose", does: "propose the workspace-wide environment declaration (names only)", needs: "admin", routes: [agent("POST", "account-environment/propose")], since: "0.8.0" },

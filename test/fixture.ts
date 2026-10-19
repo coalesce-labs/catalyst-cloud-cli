@@ -4,7 +4,7 @@
 // can assert a header was sent; `budgetExhausted` turns the agent POSTs into 429s naming the budget.
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { TenantContract } from "../src/contract-types";
-import { buildFixtureContract, FIXTURE_ACCOUNT } from "./fixture-contract";
+import { buildFixtureContract, FIXTURE_ACCOUNT, FIXTURE_ROUTE_PREFIX } from "./fixture-contract";
 
 export const FIXTURE_ME_BODY = {
   account: FIXTURE_ACCOUNT,
@@ -93,6 +93,8 @@ export interface FixtureServer {
   release?: { status: number; body: unknown };
   /** The contract's `ticket-release-class` route answers this when set. */
   releaseClass?: { status: number; body: unknown };
+  /** CTC-3550 — `POST <prefix>/registry/pull-credential` answers this (status + body) when set; 404 otherwise. */
+  pullCredential?: { status: number; body: unknown };
   /** CTC-2545 — the account-scope environment declaration, as a REAL little state machine rather than
    *  a canned body: propose bumps a revision and a hash, approve is a compare-and-set against them.
    *  A canned pair would let a verb that approved the wrong revision pass, which is the one thing
@@ -1434,6 +1436,18 @@ export async function startMeFixture(
         (put(n, v.trim()).created ? created : rotated).push(n);
       }
       return send(200, { created, rotated, errors, declared: declared() });
+    }
+
+    // CTC-3550 — the image download credential, ahead of the generic agent-POST branch so the write
+    // budget and the canned `{id, ok}` reply never answer it. Tests opt in by adding the route.
+    if (
+      req.method === "POST" &&
+      path === `${FIXTURE_ROUTE_PREFIX}/registry/pull-credential`
+    ) {
+      state.writes.push({ method: "POST", path, headers: req.headers, body });
+      return state.pullCredential
+        ? send(state.pullCredential.status, state.pullCredential.body)
+        : send(404, { error: "not found" });
     }
 
     if (req.method === "POST" && postRoutes().has(path)) {

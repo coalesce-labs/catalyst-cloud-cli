@@ -241,6 +241,8 @@ Your personal key reads everything the skills need — tickets, pull requests, t
 - Read pull-request labels or the reviewer's reaction. The mirror does not carry them; GitHub's own page does.
 - Compute a flow number — cycle time, throughput, or how long pull requests have been open. Nothing serves those yet, so say they are not computed rather than counting something else and calling it that.
 
+`catalyst env shell` opens this repository's environment on your computer: the image Catalyst's agents work in, the toolchain your `.catalyst/catalyst.toml` declares, and the variables it names, with values taken from your terminal or an `--env-file`. It needs Docker (Docker Desktop, OrbStack or Docker Engine) and no sign-in. The first run downloads the image, about 2.3 GB, with no credential. `catalyst env shell --check` prepares the same environment and reports each toolchain and variable without opening a shell.
+
 ## Versions and origins
 
 The package pins the contract range `1.x || 2.x`, recorded in `package.json` under `catalystCloud.tenantContractRange`, and reports it in `--version`, `status` and `login`. An account whose contract version falls outside that range is refused with one line naming both versions; update the bundle. Every skill carries a `vendored-from:` line naming this package as its origin, and that line now also carries the version it was vendored at; all of them are written in this repository for customer accounts.
