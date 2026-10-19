@@ -363,7 +363,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
   },
   accounts: {
-    all: { value: false, help: "also list removed accounts, which are kept for history and never used again" },
+    all: { value: false, help: "also list removed accounts, which are kept for history and take no work" },
   },
   seat: {
     size: { value: true, help: "model size: big or med" },

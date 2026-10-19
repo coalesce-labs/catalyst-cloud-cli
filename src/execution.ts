@@ -360,7 +360,7 @@ export async function cmdQueue(args: ParsedArgs, ctx: Ctx): Promise<number> {
 export const ACCOUNT_STATUS: Record<string, string> = {
   "expired-or-revoked": "credential expired or missing — replace its credential on the AI accounts page (Settings → AI accounts → the account → Replace credential) before it can take work",
   // CTC-6204: revoked and ended accounts share one history-only end state (Ryan, 2026-10-19).
-  ended: "removed — kept for history, never used again",
+  ended: "removed — kept for history, takes no work",
   "out-of-rotation": "paused — its owner took it out of rotation",
   walled: "walled — the provider's usage limit is spent for now",
   active: "active — observed working",
@@ -455,7 +455,7 @@ export async function cmdAccounts(args: ParsedArgs, ctx: Ctx): Promise<number> {
     return 0;
   }
   const addAt = `${normalizeBaseUrl(cfg.baseUrl)}/settings/coding-accounts`;
-  const hiddenLine = `${hidden} removed account${hidden === 1 ? " is" : "s are"} kept for history and never used again; catalyst accounts --all lists ${hidden === 1 ? "it" : "them"}.`;
+  const hiddenLine = `${hidden} removed account${hidden === 1 ? " is" : "s are"} kept for history and take no work; catalyst accounts --all lists ${hidden === 1 ? "it" : "them"}.`;
   if (accounts.length === 0) {
     ctx.stdout(`No coding accounts are enrolled in this workspace. A workspace owner or admin adds one at ${addAt}; there is no command for that yet.`);
     return 0;

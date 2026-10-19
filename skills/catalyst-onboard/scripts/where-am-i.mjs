@@ -32,7 +32,7 @@ const NOTES = [
   "Reads, in this order: `status` (machine), `ready --json` (machine checks and project checks, kept apart),",
   "`replica status --probe --json` and `events status --from-cache --probe --json` (optional local freshness),",
   "`me --json` and personal connection statuses (person), `contract --path …` for the account, the projects and the repositories,",
-  "`contract --path codingAccounts` and `accounts --json` (coding accounts, and which one needs a new credential), and each",
+  "`contract --path codingAccounts` and `accounts --all --json` (coding accounts, and which one needs a new credential), and each",
   "project's hosts_current check with its fixedWhere (host), and each project's environment_declared check with its per-repository notes (repository declarations). The teams read is refreshed, so a mapping just saved reads back mapped.",
   "Reads `capabilities --json` once: when the installed CLI can run a step for this person's role (`team check`, `team map`), the next step is that command; otherwise the page, with who can.",
   "Reads `legacy --json` when the CLI has the verb: leftovers of the old local Catalyst runtime become a machine line and a note; removing them is the person's yes.",
@@ -716,7 +716,8 @@ const credentialProblem = (a) => {
   return null;
 };
 const readAccountRows = () => {
-  const acc = runCli(["accounts", "--json"]);
+  // --all: the CLI leaves removed accounts out by default, and the retire note needs them.
+  const acc = runCli(["accounts", "--all", "--json"]);
   const doc = tryJson(acc.stdout);
   const rows = Array.isArray(doc)
     ? doc

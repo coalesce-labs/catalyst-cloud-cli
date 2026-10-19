@@ -451,14 +451,14 @@ describe("running / queue / accounts", () => {
       expect(text).not.toContain("codex-gone");
       expect(text).not.toContain("codex-done");
       expect(text).toMatch(/codex-stale .*replace its credential/);
-      expect(text).toContain("2 removed accounts are kept for history and never used again; catalyst accounts --all lists them.");
+      expect(text).toContain("2 removed accounts are kept for history and take no work; catalyst accounts --all lists them.");
 
       const all = makeCtx(home);
       expect(await main(["accounts", "--all"], all)).toBe(0);
       const lines = all.out;
       for (const slot of ["codex-gone", "codex-done"]) {
         const line = lines.find((l) => l.startsWith(slot))!;
-        expect(line).toContain("removed — kept for history, never used again");
+        expect(line).toContain("removed — kept for history, takes no work");
         expect(line).not.toMatch(/replace|credential/i);
       }
 
