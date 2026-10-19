@@ -1,4 +1,6 @@
-import {readFileSync} from 'node:fs';
+import {chmodSync,existsSync,mkdirSync,mkdtempSync,readFileSync,writeFileSync} from 'node:fs';
+import {execFileSync,spawnSync} from 'node:child_process';
+import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {join} from 'node:path';
 import {expect,test} from 'vitest';
@@ -19,7 +21,7 @@ test('customer package carries the four exact reviewed native producer artifacts
  }
 });
 
-import {EGRESS_ARTIFACTS,NATIVE_EGRESS_DIR,nativeEgressReady,nativeEgressInstallCommands,type EgressRead} from '../src/onboard-runner-egress.js';
+import {EGRESS_ARTIFACTS,EGRESS_INSTALLER,NATIVE_EGRESS_DIR,egressInstallCommand,nativeEgressReady,nativeEgressInstallCommands,type EgressRead} from '../src/onboard-runner-egress.js';
 const now=Date.now();
 function fixture(){
  const state={uid:0,symlink:false,corrupt:false,enabled:true,proof:{version:1,enforcement:'nftables-docker-forward-v1',bridge:'catalyst-sess0',verifiedAtMs:now}};
@@ -33,7 +35,8 @@ function fixture(){
 }
 test('genuine producer bytes, root-owned proof and active timer are required',async()=>{
  const f=fixture();expect(await nativeEgressReady(now,undefined,f.io)).toBe(true);expect(f.calls).toHaveLength(4);
- expect(nativeEgressInstallCommands()).toBe(`sudo sh '${join(packageRoot(),'vendor/install-session-egress.sh')}'`);
+ expect(nativeEgressInstallCommands()).toBe(egressInstallCommand(join(packageRoot(),'vendor')));
+ expect(nativeEgressInstallCommands()).toMatch(/^sudo sh -c '[^\n]+$/);
 });
 test.each(['non-root','symlink','changed producer','disabled timer','stale','future','wrong bridge'])('%s cannot certify native egress',async kind=>{
  const f=fixture();if(kind==='non-root')f.state.uid=1000;if(kind==='symlink')f.state.symlink=true;if(kind==='changed producer')f.state.corrupt=true;if(kind==='disabled timer')f.state.enabled=false;if(kind==='stale')f.state.proof.verifiedAtMs=now-900001;if(kind==='future')f.state.proof.verifiedAtMs=now+300001;if(kind==='wrong bridge')f.state.proof.bridge='other';
@@ -50,4 +53,24 @@ test('the session egress installer pins every artifact the readiness check reads
  expect(script).toContain('systemctl daemon-reload');
  expect(script).toContain('systemctl enable --now catalyst-session-egress.service catalyst-session-egress-attest.timer');
  expect(script).toContain('/usr/bin/python3 /usr/lib/catalyst/session-egress.py attest');
+});
+
+// CTC-6180 review P1: root runs only a copy whose digest it checked, never the user-writable file.
+test('the installer itself is pinned by digest',()=>{
+ expect(createHash('sha256').update(readFileSync(join(packageRoot(),'vendor',EGRESS_INSTALLER.name))).digest('hex')).toBe(EGRESS_INSTALLER.digest);
+});
+const hasSha256sum=spawnSync('sh',['-c','command -v sha256sum']).status===0;
+test.skipIf(!hasSha256sum)('the printed command runs the checked copy and refuses a changed installer',()=>{
+ const vendor=join(mkdtempSync(join(tmpdir(),'egress-cmd-')),"it's vendor");mkdirSync(vendor);
+ const marker=join(vendor,'ran');
+ const script=`#!/bin/sh\nprintf '%s' "$1" > '${marker.replaceAll("'","'\\''")}'\n`;
+ writeFileSync(join(vendor,EGRESS_INSTALLER.name),script);chmodSync(join(vendor,EGRESS_INSTALLER.name),0o644);
+ const digest=createHash('sha256').update(script).digest('hex');
+ execFileSync('sh',['-c',egressInstallCommand(vendor,digest,'')]);
+ expect(readFileSync(marker,'utf8')).toBe(vendor);
+ writeFileSync(marker,'');writeFileSync(join(vendor,EGRESS_INSTALLER.name),script+'echo changed\n');
+ const changed=spawnSync('sh',['-c',egressInstallCommand(vendor,digest,'')]);
+ expect(changed.status).not.toBe(0);
+ expect(readFileSync(marker,'utf8')).toBe('');
+ expect(existsSync(join(vendor,EGRESS_INSTALLER.name))).toBe(true);
 });

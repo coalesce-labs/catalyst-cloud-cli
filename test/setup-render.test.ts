@@ -1,7 +1,10 @@
 // setup-render.test.ts — CTC-4625: what `catalyst setup` looks like on a terminal and in a pipe.
 // The renderer decides colour, marks, links and width once, from the stream and the environment,
 // and never lets a decoration reach a pipe.
+import { spawnSync } from "node:child_process";
 import { describe, expect, test } from "vitest";
+import { onboardReasonText } from "../src/onboard-next.js";
+import type { OnboardJournal } from "../src/onboard.js";
 import {
   createSetupRenderer,
   terminalTraits,
@@ -498,3 +501,25 @@ test.each([true, false])("a command line in an item stays whole at 80 columns (t
   expect(lines.filter((line) => line.includes("sudo"))).toHaveLength(1);
   expect(lines.slice(0, 2).every((line) => line.length <= 80)).toBe(true);
 });
+
+// CTC-6180 review P2: the enroll command stays one whole, shell-valid line at 60 columns.
+test.each([["ENG", "catalyst onboard --runner --team ENG"], [undefined, "catalyst onboard --runner"]])(
+  "the enroll command for team %s renders whole and runnable at 60 columns",
+  (teamKey, command) => {
+    const journal = {
+      steps: teamKey
+        ? [{ id: "linear.team", state: "done", evidence: { team: "team-1", teamKey } }]
+        : [],
+    } as unknown as OnboardJournal;
+    const text = onboardReasonText(
+      { id: "capacity", state: "waiting", reason: "capacity_admission_unverified" },
+      { journal },
+    );
+    const out = sink(true, 60);
+    createSetupRenderer(out, tty).item("1. ", text);
+    const lines = out.text().split("\n");
+    expect(lines).toContain(`     ${command}`);
+    expect(lines.filter((line) => line.includes("--runner"))).toHaveLength(1);
+    expect(spawnSync("sh", ["-n", "-c", command]).status).toBe(0);
+  },
+);

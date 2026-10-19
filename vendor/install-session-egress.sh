@@ -1,13 +1,14 @@
 #!/bin/sh
 # Installs Catalyst's session egress service on a native Linux runner machine, from the files
-# that ship with this catalyst CLI. Run it as root: sudo sh <this file>. It copies the files
-# into a root-owned folder, checks their fingerprints there, and installs only checked bytes.
+# that ship with this catalyst CLI. Setup prints the one command that runs it as root from a
+# checked root-owned copy, passing the CLI's vendor folder as $1. It copies the files into a
+# root-owned folder, checks their fingerprints there, and installs only checked bytes.
 set -eu
 if [ "$(id -u)" != 0 ]; then
   echo "Run this with sudo: sudo sh '$0'" >&2
   exit 1
 fi
-src="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/self-host/linux-session-egress"
+src="${1:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}/self-host/linux-session-egress"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 for name in session-egress.py catalyst-session-egress.service catalyst-session-egress-attest.service catalyst-session-egress-attest.timer; do

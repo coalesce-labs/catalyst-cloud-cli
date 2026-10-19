@@ -649,9 +649,10 @@ test("closed runner admission names the enroll command for this computer and how
   expect(text).toContain("No runner is allowed to take work");
   expect(text).toContain("catalyst onboard --runner --team ENG");
   expect(text).toContain("ask Catalyst support to turn on cloud runners");
-  expect(warned("capacity_admission_unverified", { id: "capacity" })).toContain(
-    "catalyst onboard --runner --team <TEAM KEY>",
-  );
+  // CTC-6180 review: with no team key the printed command is still runnable as is.
+  const unknown = warned("capacity_admission_unverified", { id: "capacity" });
+  expect(unknown.split("\n").at(-1)).toBe("catalyst onboard --runner");
+  expect(unknown).not.toContain("<TEAM KEY>");
 });
 
 test("the daily update explains the service manager it needs and that it is optional", () => {

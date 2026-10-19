@@ -625,8 +625,12 @@ export function onboardReasonText(
       : "This setup step is not available on this server yet. Run catalyst onboard after the server update.";
   }
   // CTC-6180: the command that enrolls this computer, named with its team.
-  if (reason === "capacity_admission_unverified")
-    return `No runner is allowed to take work for this workspace yet. To run work on this computer, run catalyst onboard --runner --team ${onboardTeamKey(context.journal) ?? "<TEAM KEY>"} here; it enrolls this computer as a self-hosted runner. To use Catalyst's cloud runners instead, ask Catalyst support to turn on cloud runners for your workspace, then run catalyst onboard.`;
+  // The command is its own line (never wrapped), and runnable as printed: with no known team key,
+  // setup asks for the team.
+  if (reason === "capacity_admission_unverified") {
+    const key = onboardTeamKey(context.journal);
+    return `No runner is allowed to take work for this workspace yet. To use Catalyst's cloud runners, ask Catalyst support to turn on cloud runners for your workspace, then run catalyst onboard. To run work on this computer instead, enroll it as a self-hosted runner${key ? "" : " (setup asks for your Linear team)"} with:\ncatalyst onboard --runner${key ? ` --team ${key}` : ""}`;
+  }
   if(reason === "runner_native_egress_setup_required"){
     const command=nativeEgressInstallCommands();
     return "Native Linux needs a root-managed session egress service before this computer can take work. It creates the isolated session network and the nftables rules that keep sessions off private addresses and this machine. It needs systemd, python3, Docker and nftables, and setup has not run it. " + (command ? "Review it, run this one command, then run the same setup command:\n"+command : "Setup could not verify its bundled files. Reinstall the CLI, then run the same setup command.");
