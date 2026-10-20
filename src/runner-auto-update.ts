@@ -26,7 +26,8 @@ export interface AutoUpdateDeps {
 }
 
 export type AutoUpdateStatus =
-  | { state: "on"; detail: string; path: string }
+  /** `linger` is set on Linux only: whether the schedule keeps running after this person logs out. */
+  | { state: "on"; detail: string; path: string; linger?: boolean }
   | { state: "off"; detail: string }
   | { state: "unsupported"; detail: string };
 
@@ -110,6 +111,21 @@ export function systemdUnits(deps: Pick<AutoUpdateDeps, "cli" | "path">, dir: st
   };
 }
 
+/** A user timer runs only while this person's systemd user manager does, and without lingering that
+ *  manager stops when they log out of a headless machine. */
+function lingering(run: SchedulerRun, uid: number): boolean {
+  return /Linger=yes/.test(run("loginctl", ["show-user", String(uid), "--property=Linger"]).stdout);
+}
+
+/** Turn lingering on for this person when it is off. On most distributions polkit lets a user in an
+ *  active session, SSH included, do this without sudo (CTC-6264). --no-ask-password: a refusal must
+ *  come back as an answer, never as a prompt. Returns the state read back afterwards. */
+function ensureLingering(run: SchedulerRun, uid: number): boolean {
+  if (lingering(run, uid)) return true;
+  run("loginctl", ["--no-ask-password", "enable-linger"]);
+  return lingering(run, uid);
+}
+
 function writeFileAtomic(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.${process.pid}.tmp`;
@@ -130,7 +146,9 @@ export function autoUpdateStatus(deps: AutoUpdateDeps): AutoUpdateStatus {
     const { timer } = systemdUnitPaths(deps.home);
     if (!existsSync(timer)) return { state: "off", detail: "no_timer" };
     const enabled = run("systemctl", ["--user", "is-enabled", `${AUTO_UPDATE_UNIT}.timer`]);
-    return enabled.status === 0 ? { state: "on", detail: "timer_enabled", path: timer } : { state: "off", detail: "timer_not_enabled" };
+    if (enabled.status !== 0) return { state: "off", detail: "timer_not_enabled" };
+    const linger = lingering(run, deps.uid ?? process.getuid?.() ?? 0);
+    return { state: "on", detail: linger ? "timer_enabled" : "timer_enabled_without_linger", path: timer, linger };
   }
   return { state: "unsupported", detail: `platform_${platform}` };
 }
@@ -165,9 +183,8 @@ export function enableAutoUpdate(deps: AutoUpdateDeps, dir: string): AutoUpdateS
     const enabled = run("systemctl", ["--user", "enable", "--now", `${AUTO_UPDATE_UNIT}.timer`]);
     if (enabled.status !== 0)
       return { state: "off", detail: `systemctl_enable_failed:${enabled.stderr.trim().slice(0, 160)}` };
-    // Without lingering, a user timer stops when this person logs out of a headless machine.
-    const linger = run("loginctl", ["show-user", String(deps.uid ?? process.getuid?.() ?? 0), "--property=Linger"]);
-    return { state: "on", detail: /Linger=yes/.test(linger.stdout) ? "timer_enabled" : "timer_enabled_without_linger", path: paths.timer };
+    const linger = ensureLingering(run, deps.uid ?? process.getuid?.() ?? 0);
+    return { state: "on", detail: linger ? "timer_enabled" : "timer_enabled_without_linger", path: paths.timer, linger };
   }
   return { state: "unsupported", detail: `platform_${platform}` };
 }

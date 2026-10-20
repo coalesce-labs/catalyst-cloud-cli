@@ -17,6 +17,7 @@ import {
   type RunnerUpdateEngine,
 } from "../src/runner-update";
 import {
+  autoUpdateStatus,
   disableAutoUpdate,
   enableAutoUpdate,
   launchAgentPath,
@@ -438,7 +439,9 @@ describe("the update schedule", () => {
     const home = mkdtempSync(join(tmpdir(), "home-"));
     const { calls, run } = recorder();
     const status = enableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "/usr/local/bin/catalyst", path: "/usr/local/bin:/usr/bin:/bin", run }, "/home/x/.local/state/catalyst/runner");
-    expect(status).toMatchObject({ state: "on", detail: "timer_enabled_without_linger" });
+    expect(status).toMatchObject({ state: "on", detail: "timer_enabled_without_linger", linger: false });
+    // It tried to turn lingering on itself, without sudo and without a password prompt.
+    expect(calls).toContain("loginctl --no-ask-password enable-linger");
     const units = systemdUnits({ cli: "/usr/local/bin/catalyst", path: "/usr/local/bin:/usr/bin:/bin" }, "/home/x/.local/state/catalyst/runner");
     expect(readFileSync(systemdUnitPaths(home).service, "utf8")).toBe(units.service);
     expect(units.service).toContain('ExecStart="/usr/local/bin/catalyst" "runner" "update" "--auto" "--dir" "/home/x/.local/state/catalyst/runner"');
@@ -448,6 +451,43 @@ describe("the update schedule", () => {
     expect(calls).toContain("systemctl --user enable --now catalyst-runner-update.timer");
     disableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "x", path: "x", run });
     expect(existsSync(systemdUnitPaths(home).timer)).toBe(false);
+  });
+
+  it("Linux: setup turns lingering on itself when the machine allows it (CTC-6264)", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const calls: string[] = [];
+    let linger = false;
+    const run: SchedulerRun = (cmd, args) => {
+      calls.push([cmd, ...args].join(" "));
+      if (cmd === "loginctl" && args.includes("enable-linger")) linger = true;
+      if (cmd === "loginctl" && args[0] === "show-user") return { status: 0, stdout: `Linger=${linger ? "yes" : "no"}\n`, stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    };
+    const status = enableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run }, "/d");
+    expect(status).toMatchObject({ state: "on", detail: "timer_enabled", linger: true });
+    expect(calls.filter((c) => c.includes("enable-linger"))).toEqual(["loginctl --no-ask-password enable-linger"]);
+    expect(calls.indexOf("loginctl --no-ask-password enable-linger")).toBeGreaterThan(calls.indexOf("systemctl --user enable --now catalyst-runner-update.timer"));
+  });
+
+  it("Linux: lingering already on is left alone", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const calls: string[] = [];
+    const run: SchedulerRun = (cmd, args) => {
+      calls.push([cmd, ...args].join(" "));
+      return { status: 0, stdout: cmd === "loginctl" ? "Linger=yes\n" : "", stderr: "" };
+    };
+    expect(enableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run }, "/d")).toMatchObject({ state: "on", linger: true });
+    expect(calls.some((c) => c.includes("enable-linger"))).toBe(false);
+  });
+
+  it("Linux status reads lingering and never changes it", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const { calls, run } = recorder();
+    enableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run }, "/d");
+    calls.length = 0;
+    expect(autoUpdateStatus({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run })).toMatchObject({ state: "on", detail: "timer_enabled_without_linger", linger: false });
+    expect(calls).toContain("loginctl show-user 1000 --property=Linger");
+    expect(calls.some((c) => c.includes("enable-linger"))).toBe(false);
   });
 
   it("Linux without a user manager is unsupported, and writes nothing", () => {
