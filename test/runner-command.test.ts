@@ -82,6 +82,54 @@ describe("catalyst runner auto-update", () => {
     expect(ctx.out[0]).toContain("sudo loginctl enable-linger $USER");
   });
 
+  it("on, on Linux where lingering could be turned on, says updates keep running after logout and names no sudo step", async () => {
+    const ctx = makeCtx(tempHome());
+    let linger = false;
+    const run: SchedulerRun = (cmd, args) => {
+      if (cmd === "loginctl" && args.includes("enable-linger")) linger = true;
+      return { status: 0, stdout: cmd === "loginctl" ? `Linger=${linger ? "yes" : "no"}\n` : "", stderr: "" };
+    };
+    expect(await main(["runner", "auto-update", "on", "--dir", install()], ctx, { runner: { scheduler: scheduler("linux", run) } })).toBe(0);
+    expect(ctx.out[0]).toContain("keeps checking after you log out");
+    expect(ctx.out[0]).toContain("setup turned on lingering for you");
+    expect(ctx.out[0]).toContain("loginctl disable-linger $USER");
+    expect(ctx.out[0]).not.toContain("sudo");
+  });
+
+  it("on, on Linux where lingering was already on, says nothing about undoing it", async () => {
+    const ctx = makeCtx(tempHome());
+    const run: SchedulerRun = (cmd) => ({ status: 0, stdout: cmd === "loginctl" ? "Linger=yes\n" : "", stderr: "" });
+    expect(await main(["runner", "auto-update", "on", "--dir", install()], ctx, { runner: { scheduler: scheduler("linux", run) } })).toBe(0);
+    expect(ctx.out[0]).toContain("keeps checking after you log out");
+    expect(ctx.out[0]).not.toContain("linger");
+  });
+
+  it("off, on Linux with lingering on, names the undo command and leaves lingering alone", async () => {
+    const ctx = makeCtx(tempHome());
+    const calls: string[] = [];
+    const run: SchedulerRun = (cmd, args) => { calls.push([cmd, ...args].join(" ")); return { status: 0, stdout: cmd === "loginctl" ? "Linger=yes\n" : "", stderr: "" }; };
+    expect(await main(["runner", "auto-update", "off"], ctx, { runner: { scheduler: scheduler("linux", run) } })).toBe(0);
+    expect(ctx.out[0]).toContain("Lingering is still on for you");
+    expect(ctx.out[0]).toContain("loginctl disable-linger $USER");
+    expect(calls.some((c) => c.includes("disable-linger"))).toBe(false);
+  });
+
+  it("on, on Linux where lingering is refused, names the one sudo command and says updates stop at logout", async () => {
+    const ctx = makeCtx(tempHome());
+    const run: SchedulerRun = (cmd) => ({ status: 0, stdout: cmd === "loginctl" ? "Linger=no\n" : "", stderr: "" });
+    expect(await main(["runner", "auto-update", "on", "--dir", install()], ctx, { runner: { scheduler: scheduler("linux", run) } })).toBe(0);
+    expect(ctx.out[0]).toContain("stop when you log out");
+    expect(ctx.out[0]!.match(/sudo loginctl enable-linger \$USER/g)).toHaveLength(1);
+  });
+
+  it("status on Linux carries the linger state in JSON", async () => {
+    const ctx = makeCtx(tempHome());
+    const run: SchedulerRun = (cmd) => ({ status: 0, stdout: cmd === "loginctl" ? "Linger=yes\n" : "", stderr: "" });
+    await main(["runner", "auto-update", "on", "--dir", install()], makeCtx(ctx.home), { runner: { scheduler: scheduler("linux", run) } });
+    expect(await main(["runner", "auto-update", "status", "--json"], ctx, { runner: { scheduler: scheduler("linux", run) } })).toBe(0);
+    expect(JSON.parse(ctx.out[0]!)).toMatchObject({ state: "on", linger: true });
+  });
+
   it("an unsupported platform says to run the update by hand, as JSON too", async () => {
     const ctx = makeCtx(tempHome());
     const run: SchedulerRun = () => ({ status: 0, stdout: "", stderr: "" });

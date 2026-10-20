@@ -26,8 +26,11 @@ export interface AutoUpdateDeps {
 }
 
 export type AutoUpdateStatus =
-  | { state: "on"; detail: string; path: string }
-  | { state: "off"; detail: string }
+  /** `linger` is set on Linux only: whether the schedule keeps running after this person logs out.
+   *  `lingerTurnedOn` says this call turned it on, so the person can be told how to undo it. */
+  | { state: "on"; detail: string; path: string; linger?: boolean; lingerTurnedOn?: boolean }
+  /** `linger` on a Linux `off`: lingering is left as it is, since it may have been on before setup. */
+  | { state: "off"; detail: string; linger?: boolean }
   | { state: "unsupported"; detail: string };
 
 /** `su` and many ssh sessions leave XDG_RUNTIME_DIR unset, so `systemctl --user` cannot find a
@@ -110,6 +113,22 @@ export function systemdUnits(deps: Pick<AutoUpdateDeps, "cli" | "path">, dir: st
   };
 }
 
+/** A user timer runs only while this person's systemd user manager does, and without lingering that
+ *  manager stops when they log out of a headless machine. */
+function lingering(run: SchedulerRun, uid: number): boolean {
+  return /Linger=yes/.test(run("loginctl", ["show-user", String(uid), "--property=Linger"]).stdout);
+}
+
+/** Turn lingering on for this person when it is off. On most distributions polkit lets a user in an
+ *  active session, SSH included, do this without sudo (CTC-6264). --no-ask-password: a refusal must
+ *  come back as an answer, never as a prompt. Returns the state read back afterwards. */
+function ensureLingering(run: SchedulerRun, uid: number): { linger: boolean; turnedOn: boolean } {
+  if (lingering(run, uid)) return { linger: true, turnedOn: false };
+  run("loginctl", ["--no-ask-password", "enable-linger"]);
+  const linger = lingering(run, uid);
+  return { linger, turnedOn: linger };
+}
+
 function writeFileAtomic(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.${process.pid}.tmp`;
@@ -130,7 +149,9 @@ export function autoUpdateStatus(deps: AutoUpdateDeps): AutoUpdateStatus {
     const { timer } = systemdUnitPaths(deps.home);
     if (!existsSync(timer)) return { state: "off", detail: "no_timer" };
     const enabled = run("systemctl", ["--user", "is-enabled", `${AUTO_UPDATE_UNIT}.timer`]);
-    return enabled.status === 0 ? { state: "on", detail: "timer_enabled", path: timer } : { state: "off", detail: "timer_not_enabled" };
+    if (enabled.status !== 0) return { state: "off", detail: "timer_not_enabled" };
+    const linger = lingering(run, deps.uid ?? process.getuid?.() ?? 0);
+    return { state: "on", detail: linger ? "timer_enabled" : "timer_enabled_without_linger", path: timer, linger };
   }
   return { state: "unsupported", detail: `platform_${platform}` };
 }
@@ -165,14 +186,15 @@ export function enableAutoUpdate(deps: AutoUpdateDeps, dir: string): AutoUpdateS
     const enabled = run("systemctl", ["--user", "enable", "--now", `${AUTO_UPDATE_UNIT}.timer`]);
     if (enabled.status !== 0)
       return { state: "off", detail: `systemctl_enable_failed:${enabled.stderr.trim().slice(0, 160)}` };
-    // Without lingering, a user timer stops when this person logs out of a headless machine.
-    const linger = run("loginctl", ["show-user", String(deps.uid ?? process.getuid?.() ?? 0), "--property=Linger"]);
-    return { state: "on", detail: /Linger=yes/.test(linger.stdout) ? "timer_enabled" : "timer_enabled_without_linger", path: paths.timer };
+    const { linger, turnedOn } = ensureLingering(run, deps.uid ?? process.getuid?.() ?? 0);
+    return { state: "on", detail: linger ? "timer_enabled" : "timer_enabled_without_linger", path: paths.timer, linger,
+      ...(turnedOn ? { lingerTurnedOn: true } : {}) };
   }
   return { state: "unsupported", detail: `platform_${platform}` };
 }
 
-/** Stop and remove the schedule's own files. Nothing else. */
+/** Stop and remove the schedule's own files. Nothing else: on Linux it reports lingering but leaves it
+ *  as it is, because it may have been on before setup turned it on. */
 export function disableAutoUpdate(deps: AutoUpdateDeps): AutoUpdateStatus {
   const platform = deps.platform ?? process.platform;
   const run = deps.run ?? defaultRun;
@@ -188,7 +210,7 @@ export function disableAutoUpdate(deps: AutoUpdateDeps): AutoUpdateStatus {
     const paths = systemdUnitPaths(deps.home);
     for (const path of [paths.timer, paths.service]) if (existsSync(path)) unlinkSync(path);
     run("systemctl", ["--user", "daemon-reload"]);
-    return { state: "off", detail: "timer_removed" };
+    return { state: "off", detail: "timer_removed", linger: lingering(run, deps.uid ?? process.getuid?.() ?? 0) };
   }
   return { state: "unsupported", detail: `platform_${platform}` };
 }

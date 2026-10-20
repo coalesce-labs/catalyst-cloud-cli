@@ -41,11 +41,21 @@ function schedulerDeps(ctx: Ctx, deps: RunnerCommandDeps): AutoUpdateDeps {
 }
 
 function statusLine(status: AutoUpdateStatus): string {
-  if (status.state === "on")
-    return status.detail === "timer_enabled_without_linger"
-      ? "Automatic runner updates are on, every 15 minutes while you are logged in. To keep them running after you log out, run: sudo loginctl enable-linger $USER"
+  if (status.state === "on") {
+    if (status.linger === false)
+      return "Automatic runner updates are on, but they stop when you log out: this machine did not let you keep your user services running. Run this once to keep them running: sudo loginctl enable-linger $USER";
+    if (status.lingerTurnedOn)
+      return "Automatic runner updates are on: this machine checks for an approved release every 15 minutes, and keeps checking after you log out. To do that, setup turned on lingering for you, which keeps your user services running after logout. To undo it: loginctl disable-linger $USER";
+    return status.linger
+      ? "Automatic runner updates are on: this machine checks for an approved release every 15 minutes, and keeps checking after you log out."
       : "Automatic runner updates are on: this machine checks for an approved release every 15 minutes.";
-  if (status.state === "off") return `Automatic runner updates are off (${status.detail}). Turn them on with: catalyst runner auto-update on`;
+  }
+  if (status.state === "off") {
+    const off = `Automatic runner updates are off (${status.detail}). Turn them on with: catalyst runner auto-update on`;
+    return status.linger
+      ? `${off}. Lingering is still on for you, which keeps your user services running after logout. If nothing else needs it: loginctl disable-linger $USER`
+      : off;
+  }
   if (status.detail === "no_systemd_user_manager")
     return "Automatic runner updates need your systemd user manager, which is not running for you. Run: sudo loginctl enable-linger $USER, then catalyst runner auto-update on";
   return `Automatic runner updates are not available on this machine (${status.detail}). Run catalyst runner update yourself.`;
