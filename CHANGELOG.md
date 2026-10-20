@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.16.23
 
 You can now answer an ask by telling your agent in chat, and have the agent record it for you. `catalyst ask answer <ask> --proxy --quote "<your exact words>" --said-in <session>` records your words on the ask as an answer by proxy, with `--option <letter>` when you picked one. It is kept apart from answers you give on the ask yourself, and the work the ask held moves on. It works only on your own asks, and only after you turn it on with `catalyst ask proxy on` (`catalyst ask proxy` shows whether it is on; `off` turns it off). If an agent recorded something you did not mean, `catalyst ask disown <ask>` takes it back and reopens the ask. Update the Catalyst plugin's skills with the CLI so your agent knows when it may do this.
 
