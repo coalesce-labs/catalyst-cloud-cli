@@ -105,10 +105,12 @@ export function labelFields(team: ContractTeam, values: string[]): { labelIds?: 
 }
 
 /** Post to a contract route by name; a budget refusal names the contract's daily budget. A 2xx whose body
- *  says the write failed (issue-label answers a batch of failed items with 200) is a failure too. */
-export async function postAgent<T = { id?: string }>(api: ApiClient, doc: TenantContract, routeName: string, body: unknown): Promise<T> {
+ *  says the write failed (issue-label answers a batch of failed items with 200) is a failure too.
+ *  `opts.accept` returns those non-2xx statuses' bodies instead of throwing, for a route whose refusal
+ *  is an answer the caller prints (ask-answer-proxy's 409 and 502). */
+export async function postAgent<T = { id?: string }>(api: ApiClient, doc: TenantContract, routeName: string, body: unknown, opts: { accept?: number[] } = {}): Promise<T> {
   try {
-    const res = await api.postJson<T>(routePath(doc, routeName), body);
+    const res = await api.postJson<T>(routePath(doc, routeName), body, opts);
     const outcome = res.body && typeof res.body === "object" ? (res.body as { outcome?: unknown }).outcome : undefined;
     if (outcome === "failed" || outcome === "rejected" || outcome === "exhausted") {
       const reason = (res.body as { reason?: unknown }).reason;
