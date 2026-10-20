@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.22
+
+A self-hosted Linux machine set up over SSH now keeps updating after you log out, with no `sudo` step. Setup turns on lingering for your user by itself, and says so along with how to undo it (`loginctl disable-linger $USER`). Only when the machine does not allow that does setup name the one `sudo loginctl enable-linger $USER` command, and it says updates stop at logout until you run it. `catalyst runner auto-update status` now says whether updates keep running after you log out. For a machine you already set up, install this version and run `catalyst runner auto-update on`.
+
 ## 0.16.21
 
 `catalyst accounts` now leaves out removed AI accounts: ones an admin revoked, or whose paid access ended. They take no work and take no new credential, so they no longer appear as accounts to repair. The list says how many it left out, and `catalyst accounts --all` shows them, marked "removed — kept for history". Setup now names a revoked account as ended instead of asking you to turn it on. Update the Catalyst plugin's skills along with the CLI: setup's account check uses `--all`, which older CLIs do not know.
