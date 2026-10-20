@@ -464,7 +464,7 @@ describe("the update schedule", () => {
       return { status: 0, stdout: "", stderr: "" };
     };
     const status = enableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run }, "/d");
-    expect(status).toMatchObject({ state: "on", detail: "timer_enabled", linger: true });
+    expect(status).toMatchObject({ state: "on", detail: "timer_enabled", linger: true, lingerTurnedOn: true });
     expect(calls.filter((c) => c.includes("enable-linger"))).toEqual(["loginctl --no-ask-password enable-linger"]);
     expect(calls.indexOf("loginctl --no-ask-password enable-linger")).toBeGreaterThan(calls.indexOf("systemctl --user enable --now catalyst-runner-update.timer"));
   });
@@ -476,8 +476,21 @@ describe("the update schedule", () => {
       calls.push([cmd, ...args].join(" "));
       return { status: 0, stdout: cmd === "loginctl" ? "Linger=yes\n" : "", stderr: "" };
     };
-    expect(enableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run }, "/d")).toMatchObject({ state: "on", linger: true });
+    const status = enableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run }, "/d");
+    expect(status).toMatchObject({ state: "on", linger: true });
+    expect(status).not.toHaveProperty("lingerTurnedOn");
     expect(calls.some((c) => c.includes("enable-linger"))).toBe(false);
+  });
+
+  it("Linux off reports lingering and leaves it as it is", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const calls: string[] = [];
+    const run: SchedulerRun = (cmd, args) => {
+      calls.push([cmd, ...args].join(" "));
+      return { status: 0, stdout: cmd === "loginctl" ? "Linger=yes\n" : "", stderr: "" };
+    };
+    expect(disableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run })).toMatchObject({ state: "off", detail: "timer_removed", linger: true });
+    expect(calls.some((c) => c.includes("disable-linger") || c.includes("enable-linger"))).toBe(false);
   });
 
   it("Linux status reads lingering and never changes it", () => {
