@@ -121,8 +121,8 @@ describe("ask answer --proxy", () => {
   test.each([
     ["not-an-ask", "is not an ask"],
     ["already-resolved", "already has an answer"],
-    ["proxy-answer-already-recorded", "already recorded"],
-    ["proxy-caller-not-owner", "belongs to someone else"],
+    ["proxy-answer-already-recorded", "run it again with the same --quote, --option and --said-at"],
+    ["proxy-caller-not-owner", "If it is your ask, check that your Linear identity is matched: catalyst identity linear status"],
     ["already-in-flight", "being recorded right now"],
     ["something-new", "refused (something-new)"],
   ])("refusal %s is one plain sentence and exit 1", async (reason, says) => {
@@ -131,10 +131,26 @@ describe("ask answer --proxy", () => {
     expect(ctx.out.join("\n")).toContain(says);
   });
 
-  test("a failed record exits non-zero and says it can be run again", async () => {
+  test("a failed record exits non-zero and names the --said-at that finishes the same answer", async () => {
     server.agentWriteReply = () => ({ status: 502, body: { outcome: "record-failed", reason: "linear-unavailable" } });
     expect(await main(["ask", "answer", "ENG-7", "--proxy", "--quote", "yes", "--said-in", "s"], ctx)).toBe(2);
-    expect(ctx.out.join("\n")).toMatch(/not recorded \(linear-unavailable\)\. Nothing changed; run the same command again/);
+    const saidAt = new Date((server.writes[0]!.body as { saidAtMs: number }).saidAtMs).toISOString();
+    const out = ctx.out.join("\n");
+    expect(out).toContain(`did not finish recording (linear-unavailable)`);
+    expect(out).toContain(`--said-at ${saidAt}`);
+    expect(out).not.toContain("Nothing changed");
+  });
+
+  test("a failed record in --json carries the said-at to retry with", async () => {
+    server.agentWriteReply = () => ({ status: 502, body: { outcome: "record-failed", reason: "linear-unavailable" } });
+    expect(await main(["ask", "answer", "ENG-7", "--proxy", "--quote", "yes", "--said-in", "s", "--said-at", "2026-10-20T11:55:00Z", "--json"], ctx)).toBe(2);
+    expect(JSON.parse(ctx.out.join("\n"))).toEqual({ outcome: "record-failed", reason: "linear-unavailable", retrySaidAt: "2026-10-20T11:55:00.000Z" });
+  });
+
+  test("a lowercase ask identifier is sent as the cloud writes it", async () => {
+    server.agentWriteReply = recorded("ENG-7");
+    expect(await main(["ask", "answer", "eng-7", "--proxy", "--quote", "yes", "--said-in", "s"], ctx)).toBe(0);
+    expect((server.writes[0]!.body as { askIssueId: string }).askIssueId).toBe("ENG-7");
   });
 
   test("without --proxy it refuses and points at ask accept, before anything is sent", async () => {

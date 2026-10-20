@@ -185,7 +185,8 @@ export function proxyAnswerBody(args: ParsedArgs, rest: string[], nowMs: number)
     optionIndex = letter.charCodeAt(0) - 65;
   }
   return {
-    askIssueId: ask,
+    // The cloud matches an identifier exactly, so `ctc-12` is sent as `CTC-12`.
+    askIssueId: /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(ask) ? ask.toUpperCase() : ask,
     ownerQuote: quote,
     ...(optionIndex !== undefined ? { optionIndex } : {}),
     saidIn,
@@ -206,7 +207,7 @@ function proxyRefusal(ask: string, reason: string, body: ProxyAnswerBody, option
     case "already-resolved":
       return `${ask} already has an answer. Nothing was recorded.`;
     case "proxy-answer-already-recorded":
-      return `An answer by proxy is already recorded on ${ask}. Nothing was recorded.`;
+      return `An answer by proxy is already recorded on ${ask}, so nothing new was recorded. If an earlier run of this command failed partway, run it again with the same --quote, --option and --said-at to finish recording that answer.`;
     case "readiness-needs-tap":
       return `${ask} must be answered by its owner in the app. An answer by proxy cannot settle it.`;
     case "ask-has-no-team":
@@ -214,7 +215,7 @@ function proxyRefusal(ask: string, reason: string, body: ProxyAnswerBody, option
     case "ask-has-no-owner":
       return `${ask} has no owner, so nobody's chat answer can be recorded on it.`;
     case "proxy-caller-not-owner":
-      return `${ask} belongs to someone else. Only an agent logged in as the ask's owner can record their answer.`;
+      return `${ask} belongs to someone else. Only an agent logged in as the ask's owner can record their answer. If it is your ask, check that your Linear identity is matched: catalyst identity linear status`;
     case "proxy-answering-off":
       return `${ask}'s owner has not turned on answers by proxy, so nothing was recorded. Only the owner can turn it on, by running: catalyst ask proxy on`;
     case "option-out-of-range": {
@@ -233,7 +234,10 @@ function proxyRefusal(ask: string, reason: string, body: ProxyAnswerBody, option
 async function answerByProxy(args: ParsedArgs, ctx: Ctx, doc: TenantContract, api: ApiClient, body: ProxyAnswerBody): Promise<number> {
   const result = await postAgent<Record<string, unknown>>(api, doc, "ask-answer-proxy", body, { accept: [409, 502] });
   const outcome = result.outcome;
-  if (args.json) ctx.stdout(JSON.stringify(result));
+  // A record-failed answer may be partly written, and the cloud finishes it only for the same said-at,
+  // so the retry names the time this run sent rather than letting --said-at default to a new now.
+  const saidAt = new Date(body.saidAtMs).toISOString();
+  if (args.json) ctx.stdout(JSON.stringify(outcome === "record-failed" ? { ...result, retrySaidAt: saidAt } : result));
   const ask = typeof result.askIdentifier === "string" ? result.askIdentifier : body.askIssueId;
   if (outcome === "recorded") {
     if (!args.json) {
@@ -250,7 +254,7 @@ async function answerByProxy(args: ParsedArgs, ctx: Ctx, doc: TenantContract, ap
     return 1;
   }
   if (outcome === "record-failed") {
-    if (!args.json) ctx.stdout(`The answer to ${ask} was not recorded${typeof result.reason === "string" && result.reason ? ` (${result.reason})` : ""}. Nothing changed; run the same command again.`);
+    if (!args.json) ctx.stdout(`The answer to ${ask} did not finish recording${typeof result.reason === "string" && result.reason ? ` (${result.reason})` : ""}; part of it may already be on the ask. Run the same command again with --said-at ${saidAt} to finish it.`);
     return 2;
   }
   throw new CliError(`ask-answer-proxy answered an outcome this CLI does not know: ${JSON.stringify(outcome)}`, "shape");
