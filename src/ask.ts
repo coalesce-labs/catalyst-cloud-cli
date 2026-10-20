@@ -207,7 +207,7 @@ function proxyRefusal(ask: string, reason: string, body: ProxyAnswerBody, option
     case "already-resolved":
       return `${ask} already has an answer. Nothing was recorded.`;
     case "proxy-answer-already-recorded":
-      return `An answer by proxy is already recorded on ${ask}, so nothing new was recorded. If an earlier run of this command failed partway, run it again with the same --quote, --option and --said-at to finish recording that answer.`;
+      return `An answer by proxy is already recorded on ${ask}, so nothing new was recorded. If an earlier run of this command failed partway, run it again from the same login with the same --quote, --option, --said-in, --said-at and --role to finish recording that answer.`;
     case "readiness-needs-tap":
       return `${ask} must be answered by its owner in the app. An answer by proxy cannot settle it.`;
     case "ask-has-no-team":

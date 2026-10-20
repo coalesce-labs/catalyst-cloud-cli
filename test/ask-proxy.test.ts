@@ -121,7 +121,7 @@ describe("ask answer --proxy", () => {
   test.each([
     ["not-an-ask", "is not an ask"],
     ["already-resolved", "already has an answer"],
-    ["proxy-answer-already-recorded", "run it again with the same --quote, --option and --said-at"],
+    ["proxy-answer-already-recorded", "run it again from the same login with the same --quote, --option, --said-in, --said-at and --role"],
     ["proxy-caller-not-owner", "If it is your ask, check that your Linear identity is matched: catalyst identity linear status"],
     ["already-in-flight", "being recorded right now"],
     ["something-new", "refused (something-new)"],
