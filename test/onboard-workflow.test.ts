@@ -264,7 +264,7 @@ function fixture(
     contract,
   };
 }
-function assertInstalled0166() {
+function assertInstalled0169() {
   const declaration: unknown = JSON.parse(
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   );
@@ -275,9 +275,9 @@ function assertInstalled0166() {
     !declaration.dependencies ||
     typeof declaration.dependencies !== "object" ||
     !("@catalyst-cloud/sdk" in declaration.dependencies) ||
-    declaration.dependencies["@catalyst-cloud/sdk"] !== "0.16.6"
+    declaration.dependencies["@catalyst-cloud/sdk"] !== "0.16.9"
   )
-    throw new Error("CLI must declare the exact SDK 0.16.6 dependency");
+    throw new Error("CLI must declare the exact SDK 0.16.9 dependency");
   const require = createRequire(import.meta.url);
   const entry = require.resolve("@catalyst-cloud/sdk");
   const pkg: unknown = JSON.parse(
@@ -287,9 +287,9 @@ function assertInstalled0166() {
     !pkg ||
     typeof pkg !== "object" ||
     !("version" in pkg) ||
-    pkg.version !== "0.16.6"
+    pkg.version !== "0.16.9"
   )
-    throw new Error("actual installed SDK 0.16.6 required");
+    throw new Error("actual installed SDK 0.16.9 required");
 }
 
 describe("existing workflow wire truth", () => {
@@ -427,8 +427,8 @@ describe("actual installed HTTP SDK onboarding verifier", () => {
       expect(readFileSync(configPathFor(f.home))).toEqual(before);
     },
   );
-  test("actual SDK0.16.6 normal HTTP transport verifies only existing mapping, with zero apply/config writes", async () => {
-    assertInstalled0166();
+  test("actual SDK0.16.9 normal HTTP transport verifies only existing mapping, with zero apply/config writes", async () => {
+    assertInstalled0169();
     resetSdkCache();
     const actual = await loadHttpSdk();
     expect(typeof actual.createTenantClient).toBe("function");
@@ -602,7 +602,7 @@ describe("actual installed HTTP SDK onboarding verifier", () => {
 });
 
 test("actual native 30s body deadline joins real cancel/socket closure and held cleanup ACK before canonical unlock", async () => {
-  assertInstalled0166();
+  assertInstalled0169();
   const f = fixture(),
     entered = deferred<void>(),
     cancelled = deferred<void>(),
