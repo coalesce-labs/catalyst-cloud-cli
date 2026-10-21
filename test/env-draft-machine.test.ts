@@ -80,6 +80,19 @@ describe("Scenario: the machine's variables and MCP servers become declarations"
     expect(`${text}${ctx.out.join("\n")}`).not.toContain(literal);
   });
 
+  it("a literal header whose derived name the repository already declares (.env.example) is refused, not drafted over it", () => {
+    const literal = `${SENTINEL}_exa_literal`;
+    const { root, home } = writeMachine({ envrc: null, claude: JSON.stringify({ mcpServers: { exa: { type: "http", url: "https://mcp.exa.ai/mcp", headers: { Authorization: `Bearer ${literal}` } } } }) });
+    writeFileSync(join(root, ".env.example"), "EXA_MCP_TOKEN=\n");
+    const draft = draftEnvironment(root, {}, { machine: { home, env: {} } });
+    if (draft.state !== "valid") throw new Error("expected a draft");
+    expect(draft.mcpServers).toEqual([]);
+    expect(draft.machine?.claude?.notDrafted).toEqual([
+      { name: "exa", reason: "its Authorization header held a value, and the name it would get, EXA_MCP_TOKEN, is already declared; add it by hand" },
+    ]);
+    expect(draft.names).toContain("EXA_MCP_TOKEN");
+  });
+
   it("names referenced by an MCP header are marked secret even when their name does not match the secret rule", () => {
     const { root, home } = writeMachine({ envrc: "export SERVICE_HANDLE=abc\n", claude: JSON.stringify({ mcpServers: { svc: { type: "http", url: "https://mcp.svc.dev/mcp", headers: { "X-Handle": "${SERVICE_HANDLE}" } } } }) });
     const draft = draftEnvironment(root, {}, { machine: { home, env: {} } });
@@ -189,6 +202,19 @@ describe("Scenario: the machine's variables and MCP servers become declarations"
     const bigCtx = makeCtx(home);
     expect(await main(["env", "draft", "--root", big], bigCtx, { env: noTty })).toBe(0);
     expect(bigCtx.out.join("\n")).toContain(".envrc is larger than 1 MiB; it was not read");
+  });
+
+  it("a UTF-16LE .envrc (with its byte-order mark) is decoded; a big-endian one becomes a note", async () => {
+    const { root, home } = writeMachine({ envrc: null, claude: null });
+    writeFileSync(join(root, ".envrc"), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("export WIDE_SETTING=1\n", "utf16le")]));
+    const draft = draftEnvironment(root, {}, { machine: { home, env: {} } });
+    if (draft.state !== "valid") throw new Error("expected a draft");
+    expect(draft.names).toContain("WIDE_SETTING");
+    const be = mkdtempSync(join(tmpdir(), "catalyst-machine-be-"));
+    writeFileSync(join(be, ".envrc"), Buffer.from([0xfe, 0xff, 0x00, 0x65]));
+    const ctx = makeCtx(home);
+    expect(await main(["env", "draft", "--root", be], ctx, { env: noTty })).toBe(0);
+    expect(ctx.out.join("\n")).toContain(".envrc is UTF-16 big-endian, which this reader does not decode; it was not read");
   });
 
   it("the --write gate refuses a draft the full settings check refuses, and writes nothing", async () => {

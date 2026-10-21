@@ -6,7 +6,8 @@
 //
 // A value can come from four places, in this order, and nowhere else:
 //   1. the direnv environment: this process's environment, only when DIRENV_DIR names this
-//      repository and only for names `.envrc` exports (direnv has already run the file);
+//      repository and only for names `.envrc` exports and assigns (direnv has already run the file;
+//      a bare `export NAME` with no assignment would pass on whatever the shell held);
 //   2. a static literal in `.envrc`;
 //   3. a literal header in `~/.claude.json`, only for a variable the draft derived from that header;
 //   4. this process's environment, for a name a `~/.claude.json` header references, since that is
@@ -28,6 +29,7 @@ export function resolveMachineValues(
   root: string,
   options: MachineOptions,
   declared: ReadonlyArray<{ name: string; secret: boolean }>,
+  repositoryNames: ReadonlySet<string> = new Set(),
 ): MachineValues {
   const files = readMachineFiles(root, options);
   const wanted = new Set(declared.map(({ name }) => name));
@@ -36,8 +38,9 @@ export function resolveMachineValues(
   const literals = files.envrcText === undefined ? new Map<string, string>() : envrcLiteralValues(files.envrcText, wanted);
   const direnvDir = options.env.DIRENV_DIR;
   const direnvLoaded = typeof direnvDir === "string" && files.repoRoots.some((path) => direnvDir === `-${path}`);
-  // The draft saw the `.envrc` names when it derived header variables; the same set keeps lookups aligned.
-  const envrcNames = new Set(exported.keys());
+  // The draft saw the repository's names and the `.envrc` names when it derived header variables;
+  // the same set keeps lookups aligned.
+  const envrcNames = new Set([...repositoryNames, ...exported.keys()]);
   const headerLiterals = files.claudeText === undefined ? new Map<string, string>() : claudeHeaderLiterals(files.claudeText, files.repoRoots, wanted, envrcNames);
   const referenced = new Set<string>();
   if (files.claudeText !== undefined) {
@@ -51,7 +54,8 @@ export function resolveMachineValues(
   const noValue: MachineValues["noValue"] = [];
   for (const { name } of declared) {
     const found = pick(
-      direnvLoaded && exported.has(name) ? [options.env[name], "direnv environment"] : undefined,
+      // A bare `export NAME` the file never assigns hands direnv the shell's own value: not the file's.
+      direnvLoaded && exported.has(name) && exported.get(name)?.inherited !== true ? [options.env[name], "direnv environment"] : undefined,
       [literals.get(name), ".envrc"],
       [headerLiterals.get(name), "~/.claude.json"],
       referenced.has(name) ? [options.env[name], "shell environment"] : undefined,

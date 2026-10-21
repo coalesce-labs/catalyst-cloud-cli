@@ -225,6 +225,9 @@ describe("env import", () => {
         { path: "/me/env-vars", body: { scope: "repo", repoId: "repo_1", name: "PLAIN_TOKEN", value: `${SENTINEL}_a` } },
       ]);
       expect(ctx.out[0]).toBe("Reading .catalyst/catalyst.toml: 2 declared names (1 secret).");
+      // --yes skips the prompt, so each name and its value's source is listed before anything is sent.
+      expect(ctx.out).toContain("  PLAIN_TOKEN (plain) from .envrc");
+      expect(ctx.out).toContain("  SECRET_SETTING (secret) from .envrc");
       expect(ctx.out.join("\n")).not.toContain(SENTINEL);
     });
 

@@ -8,7 +8,7 @@ describe("scanEnvrc", () => {
     const scan = scanEnvrc(envrcText());
     expect(scan.exported.map(({ name }) => name)).toEqual(ALL_NAMES);
     expect(scan.exported).toHaveLength(44);
-    expect(scan.exported.find(({ name }) => name === "GITHUB_TOKEN")).toEqual({ name: "GITHUB_TOKEN", line: 4, computed: true });
+    expect(scan.exported.find(({ name }) => name === "GITHUB_TOKEN")).toEqual({ name: "GITHUB_TOKEN", line: 4, computed: true, inherited: false });
     expect(scan.exported.filter(({ name }) => isSecretName(name)).map(({ name }) => name)).toEqual(TOKEN_NAMES);
   });
 
@@ -85,7 +85,7 @@ describe("scanEnvrc", () => {
     "printf \\<<EOF",
   ])("keeps later exports after quoted, commented or escaped heredoc text: %s", (line) => {
     const text = `${line}\nexport API_TOKEN=example\n`;
-    expect(scanEnvrc(text).exported).toContainEqual({ name: "API_TOKEN", line: 2, computed: false });
+    expect(scanEnvrc(text).exported).toContainEqual({ name: "API_TOKEN", line: 2, computed: false, inherited: false });
     expect(envrcLiteralValues(text, new Set(["API_TOKEN"])).get("API_TOKEN")).toBe("example");
   });
 
@@ -97,6 +97,33 @@ describe("scanEnvrc", () => {
   ])("still skips heredoc bodies in command substitutions: %s", (start, end) => {
     const text = [start, "export INSIDE_HEREDOC=hidden", "EOF", end, "export AFTER=ok"].join("\n");
     expect(scanEnvrc(text).exported.map(({ name }) => name)).toEqual(["AFTER", "DOC"]);
+  });
+
+  it("reports every export it drops as notRead: after a multi-line value, behind a guard, declare/typeset -x, an unclosed quote", () => {
+    expect(scanEnvrc('export A="one\ntwo"; export B=2\n').notRead).toEqual([{ line: 2, reason: "a command after a multi-line value" }]);
+    expect(scanEnvrc("export G='one\ntwo' && export H=3\n").notRead).toEqual([{ line: 2, reason: "a command after a multi-line value" }]);
+    expect(scanEnvrc("[ -n x ] && export D=1\n").notRead).toEqual([{ line: 1, reason: "an export this reader does not follow" }]);
+    expect(scanEnvrc("declare -x E=1\ntypeset -x F=2\n").notRead).toEqual([
+      { line: 1, reason: "declare -x, which this reader does not follow" },
+      { line: 2, reason: "typeset -x, which this reader does not follow" },
+    ]);
+    expect(scanEnvrc('export U="never\nexport V=1\nexport W=2\n').notRead).toEqual([
+      { line: 1, reason: "a value that never closes; the lines after it were not read" },
+    ]);
+    // Control: a plain export and a commented one report nothing.
+    expect(scanEnvrc("export OK=1\n# export not this\n").notRead).toEqual([]);
+  });
+
+  it("reads `foo#bar` as one static literal: `#` starts a comment only at the start of a word", () => {
+    expect(scanEnvrc("export C=foo#bar\n").exported).toEqual([{ name: "C", line: 1, computed: false, inherited: false }]);
+    expect(envrcLiteralValues("export C=foo#bar\n", new Set(["C"]))).toEqual(new Map([["C", "foo#bar"]]));
+    expect(envrcLiteralValues("export C=foo #bar\n", new Set(["C"]))).toEqual(new Map([["C", "foo"]]));
+  });
+
+  it("marks a bare `export NAME` the file never assigns as inherited; one it assigns first is not", () => {
+    const scan = scanEnvrc("export SENTRY_DSN\nX=1\nexport X\n");
+    expect(scan.exported.find(({ name }) => name === "SENTRY_DSN")!.inherited).toBe(true);
+    expect(scan.exported.find(({ name }) => name === "X")!.inherited).toBe(false);
   });
 
   it("never returns a value: JSON.stringify(scan) contains no sentinel (positive control: the sentinels are in the input text)", () => {

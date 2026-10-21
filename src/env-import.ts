@@ -16,6 +16,7 @@ import { flagBool, flagString, positionals, type ParsedArgs } from "./args.js";
 import { loadConfig, type Ctx, type CustomerConfig } from "./config.js";
 import { loadContract } from "./contract.js";
 import { UsageError } from "./errors.js";
+import { repositoryNames } from "./env/draft.js";
 import type { MachineOptions } from "./env/machine.js";
 import { resolveMachineValues, type ValueSource } from "./env/machine-values.js";
 import { readDeclaredVariables, validateSettingsToml } from "./env/settings-toml.js";
@@ -109,6 +110,14 @@ function sourceText(from: readonly string[]): string {
   return words.length <= 1 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
 }
 
+/** One line per name that has a value: the name, secret or plain, and where the value came from. No value. */
+export function valueLines(
+  withValue: ReadonlyArray<{ name: string; secret: boolean }>,
+  values: ReadonlyMap<string, { from: ValueSource }>,
+): string[] {
+  return withValue.map(({ name, secret }) => `  ${name} (${secret ? "secret" : "plain"}) from ${values.get(name)?.from ?? "?"}`);
+}
+
 interface ImportInput {
   root: string;
   repo: string;
@@ -125,7 +134,9 @@ async function importValues(input: ImportInput): Promise<{ code: number; report:
   const { root, repo, cfg, ctx, deps, declared } = input;
   const say = (line: string) => { if (!input.json) ctx.stdout(line); };
   const machine: MachineOptions = { home: ctx.home, env: ctx.env, ...deps.machine };
-  const resolved = resolveMachineValues(root, machine, declared);
+  // The same repository names the draft saw, so a header variable resolves only where it was drafted.
+  const repository = repositoryNames(root);
+  const resolved = resolveMachineValues(root, machine, declared, repository.state === "valid" ? repository.names : new Set());
   const fromSet = new Set<ValueSource>();
   for (const { from } of resolved.values.values()) {
     if (from === "direnv environment") fromSet.add(".envrc");
@@ -142,6 +153,7 @@ async function importValues(input: ImportInput): Promise<{ code: number; report:
     renderNoValue(say, report, repo, secretFlag);
     return { code: 0, report };
   }
+  for (const line of valueLines(withValue, resolved.values)) say(line);
   if (input.confirm === "ask") {
     if (input.json || !(deps.isTty ?? stdinIsTty)()) {
       say("env import stores values in Catalyst; pass --yes to confirm without a terminal. Nothing was stored.");

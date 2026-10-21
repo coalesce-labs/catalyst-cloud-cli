@@ -64,8 +64,10 @@ function repoRootsFor(root: string): string[] {
   return roots;
 }
 
-/** Scan this computer for names. Missing files leave their half null, so the draft is unchanged. */
-export function scanMachine(root: string, options: MachineOptions): MachineScan {
+/** Scan this computer for names. Missing files leave their half null, so the draft is unchanged.
+ *  `repositoryNames` are the names the repository already declares; a derived MCP header variable
+ *  may take neither one of those nor an `.envrc` export. */
+export function scanMachine(root: string, options: MachineOptions, repositoryNames: ReadonlySet<string> = new Set()): MachineScan {
   const files = readMachineFiles(root, options);
   const envrc = files.envrcText === undefined ? null : scanEnvrc(files.envrcText);
   const names = new Set<string>();
@@ -76,7 +78,7 @@ export function scanMachine(root: string, options: MachineOptions): MachineScan 
     if (isSecretName(entry.name)) secrets.add(entry.name);
   }
   if (envrc !== null && envrc.exported.length > 0) sources.push(".envrc");
-  const claude = files.claudeText === undefined ? null : scanClaudeMcp(files.claudeText, files.repoRoots, names);
+  const claude = files.claudeText === undefined ? null : scanClaudeMcp(files.claudeText, files.repoRoots, new Set([...repositoryNames, ...names]));
   for (const server of claude?.servers ?? []) {
     for (const name of server.references) {
       names.add(name);
@@ -86,6 +88,15 @@ export function scanMachine(root: string, options: MachineOptions): MachineScan 
   if (claude !== null && claude.servers.length > 0) sources.push("~/.claude.json");
   const sort = (values: Iterable<string>) => [...values].sort((a, b) => a.localeCompare(b, "en"));
   return { envrc, claude, names: sort(names), secretNames: sort(secrets), sources, notes: files.notes };
+}
+
+/** UTF-8 (with or without a byte-order mark) or UTF-16LE with its mark, as Windows editors save it. */
+function decode(bytes: Buffer): { text?: string; note?: string } {
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return { text: bytes.subarray(2).toString("utf16le") };
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return { note: "is UTF-16 big-endian, which this reader does not decode; it was not read" };
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return { text: bytes.subarray(3).toString("utf8") };
+  if (bytes.includes(0)) return { note: "holds NUL bytes, so it is not UTF-8 text; it was not read" };
+  return { text: bytes.toString("utf8") };
 }
 
 function readGuarded(path: string, cap: number): { text?: string; note?: string } {
@@ -113,7 +124,7 @@ function readGuarded(path: string, cap: number): { text?: string; note?: string 
       if (n === 0) break;
       offset += n;
     }
-    return { text: buffer.subarray(0, offset).toString("utf8") };
+    return decode(buffer.subarray(0, offset));
   } finally {
     closeSync(fd);
   }

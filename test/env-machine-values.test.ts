@@ -48,6 +48,23 @@ describe("resolveMachineValues", () => {
     expect(resolved.noValue).toEqual([{ name: "FOO_MCP_TOKEN", computed: true }]);
   });
 
+  it("a derived name the repository already declares never takes the header literal (the draft refused that server)", () => {
+    const literal = `${SENTINEL}_exa_literal`;
+    const { root, home } = writeMachine({ envrc: null, claude: JSON.stringify({ mcpServers: { exa: { type: "http", url: "https://mcp.exa.ai/mcp", headers: { Authorization: `Bearer ${literal}` } } } }) });
+    const refused = resolveMachineValues(root, { home, env: {} }, declare(["EXA_MCP_TOKEN"], true), new Set(["EXA_MCP_TOKEN"]));
+    expect(refused.values.size).toBe(0);
+    // Control: with no repository name in the way, the same file supplies the literal.
+    expect(resolveMachineValues(root, { home, env: {} }, declare(["EXA_MCP_TOKEN"], true)).values.get("EXA_MCP_TOKEN")?.from).toBe("~/.claude.json");
+  });
+
+  it("a bare `export NAME` the .envrc never assigns does not take the direnv environment (it is the shell's value)", () => {
+    const { root, home } = writeMachine({ claude: null, envrc: "export SENTRY_DSN\nASSIGNED=1\nexport ASSIGNED\n" });
+    const env = { DIRENV_DIR: `-${root}`, SENTRY_DSN: `${SENTINEL}_inherited`, ASSIGNED: "1" };
+    const resolved = resolveMachineValues(root, { home, env }, declare(["SENTRY_DSN", "ASSIGNED"]));
+    expect(resolved.values.has("SENTRY_DSN")).toBe(false);
+    expect(resolved.values.get("ASSIGNED")).toEqual({ value: "1", from: "direnv environment" });
+  });
+
   it("a name a header references as ${NAME} takes ctx.env[NAME]", () => {
     const { root, home } = writeMachine({ envrc: null });
     const env = { LINEAR_API_KEY: `${SENTINEL}_linear_shell`, UNREFERENCED: `${SENTINEL}_other` };

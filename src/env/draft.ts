@@ -41,30 +41,12 @@ export function draftEnvironment(
   deps: Partial<ScanDeps> = {},
   options: { machine?: MachineOptions } = {},
 ): EnvironmentDraft {
-  const inventory = inventoryRepo(root, deps);
+  const repository = repositoryNames(root, deps);
+  if (repository.state === "invalid") return repository;
+  const { names, secrets, sources } = repository;
   const files = (deps.listFiles ?? walkRepo)(root);
-  const names = new Set<string>();
-  const secrets = new Set<string>();
-  const sources = new Set<string>();
 
-  for (const entry of inventory.entries) {
-    if (entry.group === "bindings" || !entry.needsDeclaration || !ENV_NAME_RE.test(entry.name)) continue;
-    names.add(entry.name);
-    if (isSecretName(entry.name)) secrets.add(entry.name);
-    for (const finding of entry.found) sources.add(finding.file);
-  }
-
-  const legacyPath = join(root, "catalyst.env.json");
-  const legacy = deps.readFile !== undefined ? deps.readFile(legacyPath) : readOptional(legacyPath);
-  if (legacy !== undefined) {
-    const converted = convertLegacyEnvironmentJson(legacy);
-    if (converted.state === "invalid") return converted;
-    for (const name of converted.variableNames) names.add(name);
-    for (const name of converted.secretNames) secrets.add(name);
-    if (converted.variableNames.length > 0) sources.add("catalyst.env.json");
-  }
-
-  const machine = options.machine === undefined ? null : scanMachine(root, options.machine);
+  const machine = options.machine === undefined ? null : scanMachine(root, options.machine, new Set(names));
   for (const name of machine?.names ?? []) names.add(name);
   for (const name of machine?.secretNames ?? []) secrets.add(name);
   for (const source of machine?.sources ?? []) sources.add(source);
@@ -101,6 +83,34 @@ export function draftEnvironment(
     mcpServers,
     machine,
   };
+}
+
+/** The names the repository itself declares: its examples, source and config files, and the legacy
+ *  `catalyst.env.json`. A derived MCP header variable must not take one of these (`scanMachine`). */
+export function repositoryNames(
+  root: string,
+  deps: Partial<ScanDeps> = {},
+): { state: "valid"; names: Set<string>; secrets: Set<string>; sources: Set<string> } | { state: "invalid"; errors: string[] } {
+  const inventory = inventoryRepo(root, deps);
+  const names = new Set<string>();
+  const secrets = new Set<string>();
+  const sources = new Set<string>();
+  for (const entry of inventory.entries) {
+    if (entry.group === "bindings" || !entry.needsDeclaration || !ENV_NAME_RE.test(entry.name)) continue;
+    names.add(entry.name);
+    if (isSecretName(entry.name)) secrets.add(entry.name);
+    for (const finding of entry.found) sources.add(finding.file);
+  }
+  const legacyPath = join(root, "catalyst.env.json");
+  const legacy = deps.readFile !== undefined ? deps.readFile(legacyPath) : readOptional(legacyPath);
+  if (legacy !== undefined) {
+    const converted = convertLegacyEnvironmentJson(legacy);
+    if (converted.state === "invalid") return converted;
+    for (const name of converted.variableNames) names.add(name);
+    for (const name of converted.secretNames) secrets.add(name);
+    if (converted.variableNames.length > 0) sources.add("catalyst.env.json");
+  }
+  return { state: "valid", names, secrets, sources };
 }
 
 /** Conservative package.json/lockfile inference. No repository script is executed. */

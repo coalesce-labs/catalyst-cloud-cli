@@ -160,8 +160,12 @@ function readEntries(text: string, repoRoots: readonly string[]): ConfigEntry[] 
     for (const [configName, raw] of Object.entries(parsed.mcpServers)) byName.set(configName, { configName, scope: "user", raw });
   }
   const projects = isRecord(parsed.projects) ? parsed.projects : {};
-  for (const root of new Set(repoRoots)) {
-    const project = projects[root];
+  // Claude Code keys projects by path as it saw it: on Windows `C:/Users/…` while Node gives
+  // `C:\Users\…`. Compare the two spellings, not the exact key.
+  const projectKeys = new Map(Object.keys(projects).map((key) => [projectPathKey(key), key]));
+  for (const root of new Set(repoRoots.map(projectPathKey))) {
+    const key = projectKeys.get(root);
+    const project = key === undefined ? undefined : projects[key];
     if (!isRecord(project) || !isRecord(project.mcpServers)) continue;
     for (const [configName, raw] of Object.entries(project.mcpServers)) {
       byName.delete(configName);
@@ -246,12 +250,20 @@ function checkUrl(raw: unknown): string | null {
   if (isPrivateHost(url.hostname)) return "it points at this computer or a private network";
   if (url.protocol !== "https:") return "its URL does not use https";
   if (url.pathname.split("/").some(looksLikeKey)) return "its URL path looks like it carries a key; add it by hand";
+  if (url.hostname.split(".").some(looksLikeKey)) return "its URL host looks like it carries a key; add it by hand";
   return null;
 }
 
-/** A path segment shaped like a key: long, and mixing letters with digits. `mcp`, `v1` and `sse` are not. */
+/** A path segment or host label shaped like a key: long, and mixing letters with digits, including
+ *  base64's `+` and `=` and percent-escapes. `mcp`, `v1` and `sse` are not. */
 function looksLikeKey(segment: string): boolean {
-  return segment.length >= 20 && /^[A-Za-z0-9_.~-]+$/.test(segment) && /[A-Za-z]/.test(segment) && /[0-9]/.test(segment);
+  return segment.length >= 20 && /^[A-Za-z0-9_.~+=%-]+$/.test(segment) && /[A-Za-z]/.test(segment) && /[0-9]/.test(segment);
+}
+
+/** One spelling of a project path: forward slashes, a lower-case drive letter, no trailing slash. */
+function projectPathKey(path: string): string {
+  const slashed = path.replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, drive: string) => `${drive.toLowerCase()}:`);
+  return slashed.length > 1 ? slashed.replace(/\/+$/, "") : slashed;
 }
 
 function isPrivateHost(hostname: string): boolean {

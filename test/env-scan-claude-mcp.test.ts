@@ -35,6 +35,14 @@ describe("scanClaudeMcp", () => {
     expect(scanClaudeMcp(text, ["/link/app", "/real/app"], new Set()).servers.map(({ name }) => name)).toEqual(["linear"]);
   });
 
+  it("matches a Windows project key spelled with forward slashes against a root spelled with backslashes", () => {
+    const text = JSON.stringify({ projects: { "C:/Users/dev/app": { mcpServers: { linear: http({ Authorization: "Bearer ${LINEAR_API_KEY}" }) } } } });
+    expect(scanClaudeMcp(text, ["C:\\Users\\dev\\app"], new Set()).servers.map(({ name, scope }) => [name, scope])).toEqual([["linear", "project"]]);
+    expect(scanClaudeMcp(text, ["c:\\Users\\dev\\app\\"], new Set()).servers).toHaveLength(1);
+    // Control: another path does not match.
+    expect(scanClaudeMcp(text, ["C:\\Users\\dev\\other"], new Set()).servers).toHaveLength(0);
+  });
+
   it("turns `Bearer ${NAME}` into `Bearer $NAME` and `${NAME}` / `${NAME:-default}` into `$NAME`, and lists NAME in references", () => {
     const scan = scanOf({
       a: http({ Authorization: "Bearer ${A_TOKEN}" }),
@@ -131,6 +139,20 @@ describe("scanClaudeMcp", () => {
     expect(scan.servers.map(({ name }) => name)).toEqual(["v1"]);
     expect(scan.notDrafted).toEqual([{ name: "zapier", reason: "its URL path looks like it carries a key; add it by hand" }]);
     expect(JSON.stringify(scan)).not.toContain(key);
+  });
+
+  it("also refuses a key in the host name or in a path segment with base64's + and =", () => {
+    const key = `${SENTINEL}0123456789abcdef`;
+    const scan = scanOf({
+      host: http({ Authorization: "Bearer ${HOST_TOKEN}" }, `https://${key.toLowerCase().replace(/_/g, "-")}.mcp.example.com/mcp`),
+      b64: http({ Authorization: "Bearer ${B64_TOKEN}" }, "https://mcp.example.com/s/AbCd1234+EfGh5678=IjKl/mcp"),
+      plain: http({ Authorization: "Bearer ${PLAIN_TOKEN}" }, "https://mcp.example.com/v1/mcp"),
+    });
+    expect(scan.servers.map(({ name }) => name)).toEqual(["plain"]);
+    expect(scan.notDrafted).toEqual([
+      { name: "b64", reason: "its URL path looks like it carries a key; add it by hand" },
+      { name: "host", reason: "its URL host looks like it carries a key; add it by hand" },
+    ]);
   });
 
   it("normalizes `My Server` to `my-server` and keeps configName", () => {

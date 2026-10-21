@@ -17,7 +17,11 @@ const ASSIGN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 const BARE_ASSIGN_RE = /^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 const NAMES_ONLY_RE = /^([A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)\s*(?:#.*)?$/;
 const HEREDOC_RE = /^<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/;
-const UNQUOTED_LITERAL_RE = /^[A-Za-z0-9_./:@%+,=-]+$/;
+// `#` only starts a comment at the start of a word, so `foo#bar` is one literal.
+const UNQUOTED_LITERAL_RE = /^[A-Za-z0-9_./:@%+,=#-]+$/;
+// An `export` that is not the line's first word: `[ -n x ] && export D=1`, `A=1; export A`.
+const INNER_EXPORT_RE = /(?:^|[\s;&|(){}])export\s/;
+const DECLARE_EXPORT_RE = /^\s*(?:declare|typeset)\s+-[A-Za-z]*x/;
 const PEM_BEGIN = "-----BEGIN";
 const PEM_END = "-----END";
 
@@ -36,6 +40,8 @@ export interface EnvrcExport {
   line: number;
   /** True when the value is not a static literal: a command, another variable, or a multi-line value. */
   computed: boolean;
+  /** True for `export NAME` with no assignment in the file: direnv passes on the shell's own value. */
+  inherited: boolean;
 }
 
 export interface EnvrcScan {
@@ -56,7 +62,7 @@ function isMachineSetting(name: string): boolean {
 export function scanEnvrc(text: string): EnvrcScan {
   const parsed = parseEnvrc(text);
   return {
-    exported: parsed.exported.map(({ name, line, computed }) => ({ name, line, computed })),
+    exported: parsed.exported.map(({ name, line, computed, inherited }) => ({ name, line, computed, inherited })),
     skippedNames: parsed.skippedNames,
     notRead: parsed.notRead,
   };
@@ -79,6 +85,7 @@ function parseEnvrc(text: string): { exported: ParsedExport[]; skippedNames: str
   const notRead: Array<{ line: number; reason: string }> = [];
   // Non-null while a value opened on an earlier line is still open; those lines are value material.
   let open: { kind: "quote"; quote: '"' | "'" } | { kind: "pem" } | { kind: "heredoc"; word: string } | { kind: "backslash" } | null = null;
+  let openedOn = 0;
 
   const record = (name: string, line: number, value: ValueRead | null) => {
     if (isMachineSetting(name)) {
@@ -87,8 +94,9 @@ function parseEnvrc(text: string): { exported: ParsedExport[]; skippedNames: str
     }
     const literal = value === null ? bare.get(name) : value.literal;
     const computed = value === null ? literal === undefined : value.literal === undefined && !value.empty;
+    const inherited = value === null && !bare.has(name);
     exported.delete(name);
-    exported.set(name, { name, line, computed, literal });
+    exported.set(name, { name, line, computed, inherited, literal });
   };
 
   for (let i = 0; i < lines.length; i++) {
@@ -100,7 +108,12 @@ function parseEnvrc(text: string): { exported: ParsedExport[]; skippedNames: str
       } else if (open.kind === "heredoc") {
         if (line.trim() === open.word) open = null;
       } else if (open.kind === "quote") {
-        if (closingIndex(line, open.quote, 0) >= 0) open = null;
+        const close = closingIndex(line, open.quote, 0);
+        if (close >= 0) {
+          open = null;
+          // `"…\n…" ; export B=2`: the words after the closing quote are a command this reader skips.
+          if (!isTrailingComment(line.slice(close + 1))) notRead.push({ line: lineNo, reason: "a command after a multi-line value" });
+        }
       } else if (!line.endsWith("\\")) open = null;
       continue;
     }
@@ -120,6 +133,7 @@ function parseEnvrc(text: string): { exported: ParsedExport[]; skippedNames: str
           record(assign[1]!, lineNo, value);
         }
         open = heredoc ? { kind: "heredoc", word: heredoc[1]! } : value.open;
+        if (open !== null) openedOn = lineNo;
         continue;
       }
       const namesOnly = NAMES_ONLY_RE.exec(rest);
@@ -130,6 +144,7 @@ function parseEnvrc(text: string): { exported: ParsedExport[]; skippedNames: str
       notRead.push({ line: lineNo, reason: "an export this reader does not follow" });
       if (heredoc) open = { kind: "heredoc", word: heredoc[1]! };
       else if (line.endsWith("\\")) open = { kind: "backslash" };
+      if (open !== null) openedOn = lineNo;
       continue;
     }
     const command = trimmed.split(/\s+/)[0]!;
@@ -137,15 +152,27 @@ function parseEnvrc(text: string): { exported: ParsedExport[]; skippedNames: str
       notRead.push({ line: lineNo, reason: command });
       continue;
     }
+    if (DECLARE_EXPORT_RE.test(line)) {
+      notRead.push({ line: lineNo, reason: `${command} -x, which this reader does not follow` });
+      continue;
+    }
     const bareAssign = BARE_ASSIGN_RE.exec(line);
     if (bareAssign) {
       const value = readValue(bareAssign[2]!);
       bare.set(bareAssign[1]!, value.extra ? undefined : value.literal);
+      if (value.extra && INNER_EXPORT_RE.test(line)) notRead.push({ line: lineNo, reason: "an export this reader does not follow" });
       open = heredoc ? { kind: "heredoc", word: heredoc[1]! } : value.open;
+      if (open !== null) openedOn = lineNo;
       continue;
     }
+    if (INNER_EXPORT_RE.test(line)) notRead.push({ line: lineNo, reason: "an export this reader does not follow" });
     if (heredoc) open = { kind: "heredoc", word: heredoc[1]! };
     else if (line.endsWith("\\")) open = { kind: "backslash" };
+    if (open !== null) openedOn = lineNo;
+  }
+  if (open !== null && open.kind !== "backslash") {
+    // An unclosed quote, PEM block or heredoc swallowed every later line; say so instead of a short list.
+    notRead.push({ line: openedOn, reason: "a value that never closes; the lines after it were not read" });
   }
 
   return {
