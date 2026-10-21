@@ -17,7 +17,10 @@ const HOME = "/home/catalyst";
 export const ENV_SHELL_START_SCRIPT = [
   "set -u",
   'mode="$1"; shift',
-  `if [ "$#" -gt 0 ]; then mise install "$@" >&2 || exit ${START_EXIT_TOOLCHAIN}; fi`,
+  // Only a spec nothing installed satisfies is installed. `mise install node@22` resolves "22" against
+  // the online list and downloads the newest 22.x even when the image has an older 22.x, while
+  // `mise where` (and `mise exec`) prefer an installed match (CTC-6389).
+  `for spec in "$@"; do mise where "$spec" >/dev/null 2>&1 || mise install "$spec" >&2 || exit ${START_EXIT_TOOLCHAIN}; done`,
   'if [ "$mode" = check ]; then',
   '  for spec in "$@"; do printf \'toolchain\\t%s\\t%s\\n\' "$spec" "$(basename "$(mise where "$spec")")"; done',
   "  for name in ${CATALYST_ENV_NAMES:-}; do",
