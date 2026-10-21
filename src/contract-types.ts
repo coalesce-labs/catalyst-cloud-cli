@@ -178,6 +178,8 @@ export interface TenantContract {
   /** The customer skill bundle the cloud expects, when it publishes one (catalyst-cloud#3746). OPTIONAL:
    *  an older cloud omits it, and `ready` reads it defensively — an absent field emits nothing. */
   skillsBundle?: { package: string; minVersion: string };
+  /** The workspace's MCP portal (CTC-6103). Older clouds omit it; readers refuse instead of guessing. */
+  portal?: { url: string } | null;
   readinessChecks: readonly { id: string; severity: string; needsAnswer: boolean }[];
   humans: readonly { linearUserId: string; role: "owner" | "admin" }[];
   asks: { approvalsTeamId: string | null };

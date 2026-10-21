@@ -66,6 +66,7 @@ describe("the table itself", () => {
     expect(needs["team map"]).toBe("admin");
     expect(needs["team adopt"]).toBe("admin");
     expect(needs["team list"]).toBe("member");
+    expect(needs["mcp status"]).toBe("member");
     expect(needs["ready"]).toBe("member");
     expect(needs["environment approve"]).toBe("admin");
     expect(needs["project wip-limit get"]).toBe("member");
@@ -136,4 +137,11 @@ describe("the verb", () => {
     expect(await main(["capabilities", "--json"], offline)).toBe(0);
     expect(JSON.parse(offline.out.join("\n")).capabilities.length).toBe(CAPABILITIES.length);
   });
+});
+
+test("mcp status is an available member read with no agent route dependencies", () => {
+  expect(CAPABILITIES.find((row) => row.verb === "mcp status")).toMatchObject({
+    verb: "mcp status", needs: "member", routes: [], since: "0.16.24",
+  });
+  expect(reportCapabilities(null).find((row) => row.verb === "mcp status")?.availability).toBe("available");
 });

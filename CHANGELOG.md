@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+New: `catalyst mcp status <server>` shows one MCP server's state, how it authenticates, how many of its tools are granted to this machine's login, and how many tools it offers. It then lists the server's last 50 tool calls: when each ran, the ticket and phase it ran for, the tool, how long it took and the outcome. A call that failed names its reason in plain words. The command exits 0 whenever it could read the server, even when some of the calls failed. `--json` prints the server's status and calls exactly as Catalyst Cloud returns them.
+
 ## 0.16.23
 
 You can now answer an ask by telling your agent in chat, and have the agent record it for you. `catalyst ask answer <ask> --proxy --quote "<your exact words>" --said-in <session>` records your words on the ask as an answer by proxy, with `--option <letter>` when you picked one. It is kept apart from answers you give on the ask yourself, and the work the ask held moves on. It works only on your own asks, and only after you turn it on with `catalyst ask proxy on` (`catalyst ask proxy` shows whether it is on; `off` turns it off). If an agent recorded something you did not mean, `catalyst ask disown <ask>` takes it back and reopens the ask. Update the Catalyst plugin's skills with the CLI so your agent knows when it may do this.
