@@ -71,6 +71,7 @@ export const CAPABILITIES: readonly Capability[] = [
   { verb: "environment approve", does: "approve the workspace-wide environment declaration", needs: "admin", routes: [agent("POST", "account-environment/approve")], since: "0.8.0" },
   { verb: "secret set|import", does: "enter a repository secret's value from this terminal, never echoed", needs: "admin", routes: [], since: "0.8.0" },
   { verb: "var set|import", does: "enter plain environment variable values from this terminal, never echoed", needs: "admin", routes: [], since: "0.13.2" },
+  { verb: "env import", does: "store this computer's values for the names .catalyst/catalyst.toml declares, never printed", needs: "admin", routes: [], since: "0.16.20" },
   { verb: "accounts", does: "read the workspace's coding accounts and which can take work", needs: "member", routes: [], since: "0.5.0" },
   { verb: "explain|running|queue|history", does: "read why a ticket runs or waits, what runs now, and what is queued", needs: "member", routes: [], since: "0.1.0" },
   { verb: "write comment|state|label|create|reaction|attachment|session", does: "act on a ticket as the person, through the agent proxy", needs: "member", routes: [agent("POST", "issue-comment"), agent("POST", "issue-state"), agent("POST", "issue-label"), agent("POST", "issue-create")], since: "0.1.0" },
