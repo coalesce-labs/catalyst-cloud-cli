@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -112,9 +112,12 @@ describe("ENV_SHELL_START_SCRIPT, run with sh against a fake mise on PATH", () =
       [
         "#!/bin/sh",
         'echo "$*" >> "$FAKE_LOG"',
+        // Like real mise: `where` finds only an installed spec; `install` takes the newest published
+        // version matching the spec (FAKE_LATEST, else <version>.0), whatever is installed already.
+        'tool="${2%%@*}"; version="${2#*@}"; installed="$FAKE_DIR/installed-$2"',
         'case "$1" in',
-        '  install) exit "${FAKE_INSTALL_EXIT:-0}" ;;',
-        '  where) tool="${2%%@*}"; version="${2#*@}"; echo "/x/installs/$tool/$version.0" ;;',
+        '  install) [ "${FAKE_INSTALL_EXIT:-0}" = 0 ] || exit "$FAKE_INSTALL_EXIT"; echo "${FAKE_LATEST:-$version.0}" > "$installed" ;;',
+        '  where) [ -f "$installed" ] || { echo "mise ERROR $2 is not installed" >&2; exit 1; }; echo "/x/installs/$tool/$(cat "$installed")" ;;',
         '  exec) shift; while [ "$1" != "--" ]; do shift; done; shift; MISE_MARK=1 exec "$@" ;;',
         "esac",
       ].join("\n"),
@@ -130,18 +133,35 @@ describe("ENV_SHELL_START_SCRIPT, run with sh against a fake mise on PATH", () =
 
   const runScript = (mode: string, specs: string[], env: Record<string, string> = {}) =>
     spawnSync("sh", ["-c", ENV_SHELL_START_SCRIPT, "catalyst-env-shell", mode, ...specs], {
-      env: { PATH: `${bin}:/usr/bin:/bin`, FAKE_LOG: log, ...env },
+      env: { PATH: `${bin}:/usr/bin:/bin`, FAKE_LOG: log, FAKE_DIR: dir, ...env },
       encoding: "utf8",
     });
   const calls = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []);
 
-  test("check: installs all specs once, prints one toolchain line per spec and one variable line per name, exits 0", () => {
+  test("check: installs each spec nothing installed satisfies, prints one toolchain line per spec and one variable line per name, exits 0", () => {
     const r = runScript("check", ["node@22", "bun@1.3.14"], { CATALYST_ENV_NAMES: "DATABASE_URL SENTRY_DSN", DATABASE_URL: "x" });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe(
       "toolchain\tnode@22\t22.0\ntoolchain\tbun@1.3.14\t1.3.14.0\nvariable\tDATABASE_URL\tset\nvariable\tSENTRY_DSN\tunset\n",
     );
-    expect(calls()).toEqual(["install node@22 bun@1.3.14", "where node@22", "where bun@1.3.14"]);
+    expect(calls()).toEqual([
+      "where node@22",
+      "install node@22",
+      "where bun@1.3.14",
+      "install bun@1.3.14",
+      "where node@22",
+      "where bun@1.3.14",
+    ]);
+  });
+
+  // CTC-6389: the image has node 22.23.3 and upstream has published 22.23.4. `mise install node@22`
+  // would download 22.23.4; the installed 22.x satisfies the spec, so nothing is installed for it.
+  test("check: a spec an installed version satisfies is not installed again when a newer patch is published", () => {
+    writeFileSync(join(dir, "installed-node@22"), "22.23.3\n");
+    const r = runScript("check", ["node@22"], { FAKE_LATEST: "22.23.4" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("toolchain\tnode@22\t22.23.3\n");
+    expect(calls()).toEqual(["where node@22", "where node@22"]);
   });
 
   test("check: a set-but-empty variable reads set; an unset one reads unset; no value is printed", () => {
@@ -151,11 +171,17 @@ describe("ENV_SHELL_START_SCRIPT, run with sh against a fake mise on PATH", () =
     expect(r.stdout + r.stderr).not.toContain("postgres://secret");
   });
 
-  test("shell: install, then exec mise exec <specs> -- bash; the shell's own exit code comes back", () => {
+  test("shell: install what is missing, then exec mise exec <specs> -- bash; the shell's own exit code comes back", () => {
     const r = runScript("shell", ["node@22", "bun@1.3.14"], { FAKE_BASH_EXIT: "3" });
     expect(r.status).toBe(3);
     expect(r.stdout).toBe("bash  mark=1\n");
-    expect(calls()).toEqual(["install node@22 bun@1.3.14", "exec node@22 bun@1.3.14 -- bash"]);
+    expect(calls()).toEqual([
+      "where node@22",
+      "install node@22",
+      "where bun@1.3.14",
+      "install bun@1.3.14",
+      "exec node@22 bun@1.3.14 -- bash",
+    ]);
   });
 
   test(`a failed install exits ${START_EXIT_TOOLCHAIN}`, () => {
@@ -230,6 +256,8 @@ test.skipIf(!realMise)("real mise: check resolves node@22 from the image without
     });
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/^toolchain\tnode@22\t22\.[0-9]+\.[0-9]+\n$/);
+    // The image's own 22.x, however many newer 22.y releases upstream has published since (CTC-6389).
+    expect(readdirSync("/opt/catalyst/toolchain/installs/node")).toContain(r.stdout.trim().split("\t")[2]);
     // Resolved from the image's own copy: nothing was downloaded into the shell's data dir.
     expect(existsSync(join(home, "data", "installs", "node"))).toBe(false);
   } finally {
