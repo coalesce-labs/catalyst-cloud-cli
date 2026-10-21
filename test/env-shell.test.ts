@@ -30,7 +30,7 @@ const OAKMONT = [
   "",
 ].join("\n");
 const VALUES = { DATABASE_URL: "postgres://localhost/web-secret", STRIPE_SECRET_KEY: "sk_test_SECRET" };
-const RESOLVED: Record<string, string> = { "node@22": "22.23.3", "bun@1.3.14": "1.3.14" };
+const RESOLVED: Record<string, string> = { "node@22": "22.23.3", "bun@1.3.14": "1.3.14", "bun@1.4.2": "1.4.2" };
 
 interface Recorded {
   calls: string[];
@@ -146,7 +146,7 @@ describe("catalyst env shell --check", () => {
     expect(ctx.out).toEqual([
       "Environment for coalesce-labs/catalyst-cloud-cli, from .catalyst/catalyst.toml",
       `  Image: ${SHORT} (already on this computer)`,
-      "  Toolchain: node 22 → 22.23.3, bun 1.3.14 → 1.3.14",
+      "  Toolchain: node 22 → 22.23.3, bun 1.4.2 → 1.4.2",
       "  Variables: none declared",
       "Ready: catalyst env shell opens this environment.",
     ]);

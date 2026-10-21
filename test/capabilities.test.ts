@@ -63,6 +63,7 @@ describe("the table itself", () => {
   test("the team verbs the setup guide relies on are declared admin, and reads are member", () => {
     const needs = Object.fromEntries(CAPABILITIES.map((c) => [c.verb, c.needs]));
     expect(needs["team check"]).toBe("admin");
+    expect(needs["env import"]).toBe("admin");
     expect(needs["team map"]).toBe("admin");
     expect(needs["team adopt"]).toBe("admin");
     expect(needs["team list"]).toBe("member");

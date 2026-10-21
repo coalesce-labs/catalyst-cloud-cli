@@ -48,7 +48,7 @@ interface SetResponse {
   message?: string;
 }
 
-interface ImportResponse {
+export interface ImportResponse {
   created?: string[];
   rotated?: string[];
   errors?: Array<{ name: string; reason: string }>;
@@ -66,7 +66,7 @@ export interface SecretDeps {
 }
 
 /** Why an import line was not stored, in words a person can act on. */
-const IMPORT_REASONS: Record<string, string> = {
+export const IMPORT_REASONS: Record<string, string> = {
   name_exists: "already set for this repository; pass --rotate <NAME> to replace it",
   name_taken_by_env_var: "already a plain environment variable; a name is a secret or a variable, never both",
   invalid_name: "not an env-style name (A-Z, 0-9 and _, starting with a letter)",
@@ -104,7 +104,7 @@ function requireRepo(args: ParsedArgs, verb: string): string {
 }
 
 /** The cloud's refusal, in its own words, plus what to do for the two we can explain. */
-function refusalLine(status: number, body: { error?: string; message?: string }, repo: string): string {
+export function refusalLine(status: number, body: { error?: string; message?: string }, repo: string): string {
   if (status === 401) {
     return "refused (401): the cloud did not accept your credential here. If `catalyst me` works, this cloud predates secret writes from the CLI and needs a newer release; otherwise log in again.";
   }
@@ -123,7 +123,7 @@ function renderDeclared(declared: DeclaredStatus | null | undefined, repo: strin
   return [`declared but still without a value (${declared.missing.length}): ${declared.missing.join(", ")}`];
 }
 
-const ACCEPT = [400, 401, 403, 404, 409, 422];
+export const ACCEPT = [400, 401, 403, 404, 409, 422];
 
 async function readStdinText(): Promise<string> {
   const chunks: Buffer[] = [];

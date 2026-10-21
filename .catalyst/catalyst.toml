@@ -12,8 +12,9 @@ linear_team = "CTC"
 policy = "codex-attestation"
 
 # The same install and checks the ci.yml pull request gate runs. The evals job is left out: it needs an Anthropic key and a Claude Code install.
+# bun is the runner image's own 1.4.2: mise cannot install bun, so any other version fails toolchain_missing (CTC-6377). ci.yml keeps its own pins.
 [environment]
-toolchains = [{ name = "node", version = "22" }, { name = "bun", version = "1.3.14" }]
+toolchains = [{ name = "node", version = "22" }, { name = "bun", version = "1.4.2" }]
 
 [[environment.setup]]
 name = "install-dependencies"

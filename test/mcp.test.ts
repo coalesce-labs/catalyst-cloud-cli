@@ -226,8 +226,8 @@ describe("catalyst mcp status", () => {
     expect(await main(["mcp", "status", "workos"], ctx)).toBe(2);
     expect(ctx.err.join("\n")).toContain("https://evil.example");
     expect(ctx.err.join("\n")).toContain("https://cloud.example");
-    expect(requests).toHaveLength(1);
-    expect(requests.some((r) => r.includes("https://evil.example"))).toBe(false);
+    // The contract read is the only request: nothing reached the other origin.
+    expect(requests).toEqual(["GET https://cloud.example/api/v1/agent/contract Bearer ctc_acct_test"]);
     expect(ctx.out).toEqual([]);
   });
 
