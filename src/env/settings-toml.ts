@@ -68,6 +68,14 @@ export function validateSettingsToml(text: string): SettingsCheck {
     : { state: "valid", errors: [], variableNames };
 }
 
+/** The declared variables and their secret flags, or null unless the file passes `validateSettingsToml`.
+ *  Names and flags only: the check refuses a `value` key, so none can be read here. */
+export function readDeclaredVariables(text: string): Array<{ name: string; secret: boolean }> | null {
+  if (validateSettingsToml(text).state !== "valid") return null;
+  const parsed = parse(text) as { environment?: { variables?: Array<Record<string, unknown>> } };
+  return (parsed.environment?.variables ?? []).map((raw) => ({ name: String(raw.name), secret: raw.secret === true }));
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
