@@ -10,13 +10,13 @@ import {
 const toolchains = (body: string) => `[environment]\ntoolchains = ${body}\n`;
 
 describe("readShellDeclaration", () => {
-  test("this repository's own file: toolchains node 22 and bun 1.3.14, no variables", () => {
+  test("this repository's own file: toolchains node 22 and bun 1.4.2, no variables", () => {
     const text = readFileSync(".catalyst/catalyst.toml", "utf8");
     expect(readShellDeclaration(text)).toEqual({
       state: "valid",
       toolchains: [
         { name: "node", version: "22" },
-        { name: "bun", version: "1.3.14" },
+        { name: "bun", version: "1.4.2" },
       ],
       variables: [],
     });
