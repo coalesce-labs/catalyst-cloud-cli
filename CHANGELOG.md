@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.16.23
+
+You can now answer an ask by telling your agent in chat, and have the agent record it for you. `catalyst ask answer <ask> --proxy --quote "<your exact words>" --said-in <session>` records your words on the ask as an answer by proxy, with `--option <letter>` when you picked one. It is kept apart from answers you give on the ask yourself, and the work the ask held moves on. It works only on your own asks, and only after you turn it on with `catalyst ask proxy on` (`catalyst ask proxy` shows whether it is on; `off` turns it off). If an agent recorded something you did not mean, `catalyst ask disown <ask>` takes it back and reopens the ask. Update the Catalyst plugin's skills with the CLI so your agent knows when it may do this.
+
+## 0.16.22
+
+A self-hosted Linux machine set up over SSH now keeps updating after you log out, with no `sudo` step. Setup turns on lingering for your user by itself, and says so along with how to undo it (`loginctl disable-linger $USER`). Only when the machine does not allow that does setup name the one `sudo loginctl enable-linger $USER` command, and it says updates stop at logout until you run it. `catalyst runner auto-update status` now says whether updates keep running after you log out. For a machine you already set up, install this version and run `catalyst runner auto-update on`.
+
+## 0.16.21
+
+`catalyst accounts` now leaves out removed AI accounts: ones an admin revoked, or whose paid access ended. They take no work and take no new credential, so they no longer appear as accounts to repair. The list says how many it left out, and `catalyst accounts --all` shows them, marked "removed — kept for history". Setup now names a revoked account as ended instead of asking you to turn it on. Update the Catalyst plugin's skills along with the CLI: setup's account check uses `--all`, which older CLIs do not know.
+
+## 0.16.20
+
+Setup on Linux now prints every command whole, on its own line, so you can copy it from any terminal width. When this computer still needs the session egress service, setup prints one `sudo` command that checks the installer's fingerprint and installs and starts the service. Run it, then run the same setup command again. When nothing may take work for your workspace yet, setup now names the command that enrolls this computer as a self-hosted machine: `catalyst onboard --runner --team <your team>`.
+
+New: `catalyst env shell` opens your repository's declared environment on your own computer in Docker, with the declared toolchain versions on `PATH`.
+
 ## 0.16.19
 
 A self-hosted Mac whose `catalyst` command was installed with Homebrew's Node now keeps its images current and finishes setup's private thoughts storage step. Before, Docker Desktop could not read a file the check needs from the Homebrew folder, so every update and that setup step stopped. Install this version; the next 15-minute check updates the machine.

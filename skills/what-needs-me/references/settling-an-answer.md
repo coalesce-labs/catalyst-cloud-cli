@@ -6,6 +6,8 @@ The answer lives on the ask. Wherever it arrived (the ask's thread, a held ticke
 
 **1. Post the answer where it should live.** An answer given anywhere but the ask's thread becomes a comment on the ask, as the app actor, quoting them and attributing it ("the owner answered in chat: option B"), through the `catalyst-linear` skill's comment script, which returns the comment id.
 
+An answer the owner gave you directly in this chat can instead be recorded by proxy, when they have turned that on: `catalyst ask answer <ask> --proxy` (SKILL.md, "An answer the owner gives you in chat"). The cloud records it on the ask and notes it on the held tickets in one call, so skip these three steps and tell the owner what you recorded.
+
 **2. Record it.** `node scripts/settle.mjs <ask> --answer <commentId> --role <role>` calls the cloud's ask-accept with the ask, the answering comment and the role doing the recording. The script first checks the comment is really on the ask (an id from a different ticket is refused before anything is written), then records, then reads the ask's blocking relations.
 
 **3. Release the held work.** On every open ticket the ask blocks, the script posts one bookkeeping comment naming the ask, the comment id and the answer's first line, so the next agent there reads the decision; the marker keeps it from waking anyone. `--no-release-note` skips this for tickets about to be canceled.

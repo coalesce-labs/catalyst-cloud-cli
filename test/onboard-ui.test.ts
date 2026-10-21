@@ -644,11 +644,15 @@ test("missing AI accounts name the saved workspace's AI accounts page and an API
   expect(warned("account_enrollment_required")).not.toContain("undefined");
 });
 
-test("closed runner admission names a self-hosted host or cloud runners from Catalyst", () => {
-  const text = warned("capacity_admission_unverified", { id: "capacity" });
+test("closed runner admission names the enroll command for this computer and how to ask for cloud runners", () => {
+  const text = warned("capacity_admission_unverified", { id: "capacity", journal: adoptedTeam() });
   expect(text).toContain("No runner is allowed to take work");
-  expect(text).toContain("Enroll a self-hosted runner host");
-  expect(text).toContain("ask Catalyst to enable cloud runners");
+  expect(text).toContain("catalyst onboard --runner --team ENG");
+  expect(text).toContain("ask Catalyst support to turn on cloud runners");
+  // CTC-6180 review: with no team key the printed command is still runnable as is.
+  const unknown = warned("capacity_admission_unverified", { id: "capacity" });
+  expect(unknown.split("\n").at(-1)).toBe("catalyst onboard --runner");
+  expect(unknown).not.toContain("<TEAM KEY>");
 });
 
 test("the daily update explains the service manager it needs and that it is optional", () => {

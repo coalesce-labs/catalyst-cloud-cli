@@ -76,6 +76,9 @@ export const CAPABILITIES: readonly Capability[] = [
   { verb: "explain|running|queue|history", does: "read why a ticket runs or waits, what runs now, and what is queued", needs: "member", routes: [], since: "0.1.0" },
   { verb: "write comment|state|label|create|reaction|attachment|session", does: "act on a ticket as the person, through the agent proxy", needs: "member", routes: [agent("POST", "issue-comment"), agent("POST", "issue-state"), agent("POST", "issue-label"), agent("POST", "issue-create")], since: "0.1.0" },
   { verb: "ask raise|accept|list", does: "raise a decision to a human, or answer one", needs: "member", routes: [agent("POST", "ask"), agent("POST", "ask-accept")], since: "0.1.0" },
+  { verb: "ask answer --proxy", does: "record an answer the ask's owner gave in chat, quoted exactly, when the owner has turned answers by proxy on", needs: "member", routes: [agent("POST", "ask-answer-proxy")], since: "0.16.23" },
+  { verb: "ask proxy status|on|off", does: "read or set whether agents may record an answer you give them in chat (your own login only)", needs: "member", routes: [], since: "0.16.23" },
+  { verb: "ask disown", does: "take back an answer recorded by proxy on your ask, reopening it (your own login only)", needs: "member", routes: [], since: "0.16.23" },
   { verb: "release", does: "release a parked ticket or a whole failure class back to work", needs: "admin", routes: [agent("POST", "ticket-release"), agent("POST", "ticket-release-class")], since: "0.6.0" },
   { verb: "mcp add|list|remove", does: "register an MCP server for the workspace by vault-secret name", needs: "admin", routes: [agent("POST", "mcp")], since: "0.9.0" },
 ];

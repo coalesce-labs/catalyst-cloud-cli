@@ -309,7 +309,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     option: {
       value: true,
       repeat: true,
-      help: "raise: an option (repeatable)",
+      help: "raise: an option (repeatable); answer: the letter of the option the owner chose (leave out for free text)",
     },
     default: { value: true, help: "raise: the default if silent" },
     blocks: {
@@ -346,7 +346,20 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
     "ask-key": { value: true, help: "raise: idempotency key" },
     answer: { value: true, help: "accept: the answering comment id" },
-    role: { value: true, help: "accept: the role recording the answer" },
+    role: { value: true, help: "accept/answer: the role recording the answer" },
+    proxy: {
+      value: false,
+      help: "answer: record an answer the ask's owner gave you in chat (required)",
+    },
+    quote: { value: true, help: "answer: the owner's exact words" },
+    "said-in": {
+      value: true,
+      help: "answer: the chat session or channel id where the owner said it",
+    },
+    "said-at": {
+      value: true,
+      help: "answer: when the owner said it, as an ISO-8601 time (default now)",
+    },
   },
   ready: {
     onboarding: {
@@ -362,7 +375,9 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       help: "skip the published-release check (no network)",
     },
   },
-  accounts: {},
+  accounts: {
+    all: { value: false, help: "also list removed accounts, which are kept for history and take no work" },
+  },
   seat: {
     size: { value: true, help: "model size: big or med" },
     stage: { value: true, help: "sized relay stage; defaults from size" },
@@ -589,9 +604,9 @@ export const VERB_USAGE: Record<string, string> = {
     "watch [--team K] [--ticket T]... [--project P] [--exec CMD] [--cursor-file <path>] [--from cursor|head]",
   write:
     "write <comment <ticket> --body|--stdin [--parent] [--bookkeeping] [--as-user] | state <ticket> --slot|--state-id|--state-type | label <ticket> --add... --remove... | create --team --title [--description|--stdin] [--label] [--priority] | reaction <ticket>|--comment <id> --emoji <e> | attachment <ticket> --title --url | session <ticket> [--title] [--plan-file] [--activity]>",
-  ask: "ask <raise --team --title [--context] [--option]... [--default] --blocks <ticket>...|--nothing-to-block [--ask-key] [--gates-pr <n>... --released-by <letter>... [--gates-label hold|hold:preview]... [--gates-repo <owner/name>]] | accept <askTicket> --answer <commentId> --role <role> | list [--anyone] [--json]>",
+  ask: "ask <raise --team --title [--context] [--option]... [--default] --blocks <ticket>...|--nothing-to-block [--ask-key] [--gates-pr <n>... --released-by <letter>... [--gates-label hold|hold:preview]... [--gates-repo <owner/name>]] | accept <askTicket> --answer <commentId> --role <role> | answer <askTicket> --proxy --quote <owner's exact words> [--option <letter>] --said-in <session or channel id> [--said-at <ISO-8601 time>] [--role <role>] | proxy [status|on|off] | disown <askTicket> | list [--anyone]> [--json]",
   ready: "ready [--onboarding] [--local-sync] [--json] [--offline]",
-  accounts: "accounts [--json]",
+  accounts: "accounts [--all] [--json]",
   seat: "seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE] [--key-env NAME]",
   mcp: "mcp <add <name> --url URL <--auth none|--bearer SECRET_NAME|--header NAME=SECRET_NAME...>|list|remove <name>> [--json]",
   team: "team <list|check <KEY>|check --all|map <KEY> [--stage role=StateName]... [--yes --plan-hash H]|adopt <KEY> [--undo] [--yes --plan-hash H]|migrate <KEY> [--choice sourceId=destinationId]... [--retire] [--yes --plan-hash H]|checklist <KEY>> [--json]",
