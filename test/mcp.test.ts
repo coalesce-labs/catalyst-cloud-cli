@@ -160,7 +160,7 @@ const PROVIDER_CALL = {
 };
 const CALLS = { server: "workos", calls: [OK_CALL, DENIED_CALL, PROVIDER_CALL] };
 
-function statusSetup(options: { portal?: { url: string } | null; status?: [number, unknown]; calls?: [number, unknown] } = {}) {
+function statusSetup(options: { portal?: { url: string | null; unavailable?: string | null } | null; status?: [number, unknown]; calls?: [number, unknown] } = {}) {
   const home = tempHome();
   homes.push(home);
   const requests: string[] = [];
@@ -219,6 +219,15 @@ describe("catalyst mcp status", () => {
       expect(ctx.out).toEqual([]);
       expect(ctx.err.join("\n")).toContain("portal.url");
     }
+  });
+
+  it("a current cloud with portal.url null names the unavailable reason instead of asking for an upgrade", async () => {
+    const { ctx, requests } = statusSetup({ portal: { url: null, unavailable: "app_origin_not_portal_fronted" } });
+    expect(await main(["mcp", "status", "workos", "--json"], ctx)).toBe(2);
+    expect(ctx.err.join("\n")).toContain("app_origin_not_portal_fronted");
+    expect(ctx.err.join("\n")).not.toContain("newer Catalyst Cloud");
+    expect(requests).toEqual(["GET https://cloud.example/api/v1/agent/contract Bearer ctc_acct_test"]);
+    expect(ctx.out).toEqual([]);
   });
 
   it("a portal.url on another origin is refused before any portal request", async () => {

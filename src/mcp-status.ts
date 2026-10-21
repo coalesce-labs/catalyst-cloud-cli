@@ -39,6 +39,13 @@ export interface PortalServerCalls {
 
 function portalBase(doc: TenantContract, cfg: CustomerConfig): { origin: string; path: string } {
   const raw = doc.portal?.url;
+  if (doc.portal && !raw) {
+    // A current cloud that names why it publishes no portal URL: refuse with that reason, not "upgrade".
+    throw new CliError(
+      `mcp status cannot reach this workspace's MCP portal: the cloud publishes no portal.url (${doc.portal.unavailable ?? "no reason given"}). Ask your operator to configure the portal host.`,
+      "portal-unavailable",
+    );
+  }
   if (!raw) {
     throw new CliError(
       `mcp status needs a newer Catalyst Cloud than ${normalizeBaseUrl(cfg.baseUrl)} is running: its contract names no MCP portal (portal.url). Nothing is wrong with your workspace.`,
