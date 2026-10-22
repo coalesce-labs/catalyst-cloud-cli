@@ -14,7 +14,7 @@ import { startMeFixture, type FixtureServer } from "./fixture";
 import { makeCtx, seedJoined, tempHome, type TestCtx } from "./helpers";
 
 const IMAGE = RUNNER_HOST_IMAGES.runner;
-const SHORT = "ghcr.io/coalesce-labs/catalyst-runner@sha256:a19f7b0859a9…";
+const SHORT = "ghcr.io/coalesce-labs/catalyst-runner@sha256:598fd0ef2675…";
 const OAKMONT = [
   "[environment]",
   'toolchains = [{ name = "node", version = "22" }, { name = "bun", version = "1.3.14" }]',

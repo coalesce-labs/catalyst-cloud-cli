@@ -43,17 +43,18 @@ import {
 /** The Compose project name the vendored file declares. */
 export const RUNNER_PROJECT = "catalyst-host";
 export const RUNNER_SESSION_NETWORK = "catalyst-session-v1";
-/** Catalyst's approved host release, generation 2 (hr-a19f7b0859a98147-9a96426c93e32173-63a9b20c3be3dc3e):
- * runner, supervisor and watchdog all built from catalyst-cloud 2ec4a551. A machine set up from these
+/** Catalyst's approved host release, generation 48 (hr-598fd0ef2675bfd8-69310962e37ad7f2-2d264b793edb843e):
+ * the runner built from catalyst-cloud caf921a4, the supervisor and watchdog from a4165555, the
+ * first supervisor that serves several teams (CTC-4455). A machine set up from these
  * pins then follows newer approved releases itself (`catalyst runner update`, CTC-4646).
  * Explicit environment values override these pins; a saved runner image is preserved. */
 export const RUNNER_HOST_IMAGES = {
   supervisor:
-    "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:9a96426c93e32173a67e849aa5a462e9f5466b872e4117f9a8a7df1972b2a136",
+    "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:69310962e37ad7f21ccab5c131b0734f106a6b0cc9fb163cb5d8917c9d7a2fc1",
   watchdog:
-    "ghcr.io/coalesce-labs/catalyst-deadline-watchdog@sha256:63a9b20c3be3dc3ea328d77aa68dece942a40be46cb3126d9a7868e082828feb",
+    "ghcr.io/coalesce-labs/catalyst-deadline-watchdog@sha256:2d264b793edb843e47b4c5a86fa6133dd2bd0b5ecdc0b7e997368893de074b28",
   runner:
-    "ghcr.io/coalesce-labs/catalyst-runner@sha256:a19f7b0859a9814740935f7aadd8fe5c5c9c5974f9a5956a057b983ada16ea01",
+    "ghcr.io/coalesce-labs/catalyst-runner@sha256:598fd0ef2675bfd8e0665f70ef4ed8bf30706fba25fa2c39fc0df0801512a423",
 } as const;
 export const IMAGE_REF = /^[a-z0-9][a-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}$/;
 const HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
