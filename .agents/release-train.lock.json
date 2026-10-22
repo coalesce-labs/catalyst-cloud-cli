@@ -5,7 +5,7 @@
   "files": [
     {
       "path": ".agents/skills/release-train/SKILL.md",
-      "sha256": "50432b407f23c5bd02058dd5c24679df061ed3441adf671ebc59327c5e1a926b"
+      "sha256": "64b87cb6762377064000460eb0368a427b64c3336f77129ee8f1b31bc7848d27"
     },
     {
       "path": ".agents/skills/release-train/evals/README.md",

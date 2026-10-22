@@ -63,7 +63,7 @@ jobs:
           if ! out=$(node scripts/release-train-check.mjs --publish cli --dry-run 2>&1); then
             echo "::error::$out"
             if [[ "$out" == *"differs from canonical"* ]]; then
-              echo "::error::Copy https://staging.catalystcloud.dev/release-train.json and pin the SDK, sdk-replica-node and schema versions it declares (as #433 and #448 did)."
+              echo "::error::Copy https://staging.catalystcloud.dev/release-train.json: its line, state, approval or members changed (CTC-6446: it names no member patch)."
             fi
             exit 1
           fi
