@@ -56,6 +56,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     check: { value: false, help: "read the approved release and say what would change, without changing it" },
     auto: { value: false, help: "one-line output for the scheduled run" },
     dir: { value: true, help: "the runner directory (default: the one setup created)" },
+    fleet: { value: false, help: "update a multi-team supervisor fleet's compose.json in --dir" },
   },
   login: {
     "start-replica": {
@@ -577,7 +578,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
 export const VERB_USAGE: Record<string, string> = {
   hosts:
     "hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name> [--json]",
-  runner: "runner update [--check] [--dir <runner directory>] | runner auto-update [status|on|off]",
+  runner: "runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off]",
   setup:
     "setup [onboard options]   (sets up Catalyst step by step; same as catalyst onboard) | setup --engine <file> --engine-sha256 <hex> [-- <install options>]   (run by install.sh; install.sh --help lists the options)",
   login:
