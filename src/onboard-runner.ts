@@ -668,9 +668,7 @@ function parseHosts(body: unknown): ListedHost[] | null {
       typeof host.hostName !== "string" ||
       typeof host.team !== "string" ||
       (host.teams !== undefined &&
-        (!Array.isArray(host.teams) ||
-          host.teams.length > 16 ||
-          !host.teams.every((team) => typeof team === "string"))) ||
+        (!Array.isArray(host.teams) || !host.teams.every((team) => typeof team === "string"))) ||
       !(host.revokedAtMs === null || typeof host.revokedAtMs === "number") ||
       (host.capability !== null &&
         (!capability ||
