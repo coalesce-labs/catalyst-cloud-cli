@@ -32,11 +32,16 @@ import {
 // credential, read-only. Readiness is per scope: every scope that logged `supervisor_scope_qualified`
 // in the minutes before the update must log it again from the new container, which must stay up with
 // no restart and log no `host_not_ready` for those scopes. Otherwise the previous `compose.json` comes
-// back and the supervisor is recreated on it.
+// back and the supervisor is recreated on it. That scope set is saved before the recreate and removed
+// once it qualifies or rolls back, so a run killed in between is finished by the next one.
 
 export const FLEET_COMPOSE_FILE = "compose.json";
 export const PREVIOUS_COMPOSE_FILE = "compose.release-previous.json";
 const CANDIDATE_COMPOSE_FILE = "compose.release-candidate.json";
+/** The scopes the supervisor served before a recreate, kept until that recreate is qualified or rolled
+ *  back. A run that was killed in between finds it and qualifies against it, never against the new
+ *  container's own log, which would read an unqualified supervisor as serving. */
+export const IN_FLIGHT_FILE = "fleet-update-in-flight.json";
 /** How far back a qualification counts as current before the update. The supervisor repeats it
  *  on every loop while a scope is ready, so a ready scope logs it many times in this window. */
 const QUALIFIED_LOOKBACK_MS = 5 * 60_000;
@@ -135,6 +140,25 @@ export function notReadyScope(text: string, scopes: ReadonlySet<string>): string
   return null;
 }
 
+function readInFlight(dir: string): Set<string> | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(dir, IN_FLIGHT_FILE), "utf8"));
+    if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.scopes)) return null;
+    const scopes = parsed.scopes.filter((scope): scope is string => typeof scope === "string");
+    return scopes.length > 0 ? new Set(scopes) : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearInFlight(dir: string): void {
+  try {
+    unlinkSync(join(dir, IN_FLIGHT_FILE));
+  } catch {
+    // Already gone.
+  }
+}
+
 export async function runFleetUpdate(engine: FleetUpdateEngine, options: FleetUpdateOptions): Promise<UpdateResult> {
   const { dir } = options;
   const now = options.now ?? Date.now;
@@ -188,16 +212,21 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
   if (live === undefined) return done("retained", "docker_unavailable", tagged);
   const runs = (images: FleetImages) =>
     !!live?.running && live.image === images.supervisor && live.runnerImage === images.runner;
-  if (decision.action === "verify" && changed.length === 0 && runs(target)) return done("current", "not_newer");
+  const inFlight = readInFlight(dir);
+  if (inFlight === null && decision.action === "verify" && changed.length === 0 && runs(target)) return done("current", "not_newer");
   if (options.check)
     return done("planned", changed.length > 0 ? `would_update:${changed.join(",")}` : "already_configured", { ...tagged, generation: release.generation });
 
-  // The scopes the running supervisor qualifies are what the new one has to qualify again.
-  if (!live?.running) return done("retained", "supervisor_not_running", { ...tagged, exitCode: 1 });
-  const recent = await engine.logs(live.id, new Date(now() - QUALIFIED_LOOKBACK_MS).toISOString(), signal);
-  if (recent === null) return done("retained", "docker_unavailable", tagged);
-  const scopes = qualifiedScopes(recent);
-  if (scopes.size === 0) return done("retained", "no_qualified_scope", { ...tagged, exitCode: 1 });
+  // The scopes the running supervisor qualifies are what the new one has to qualify again, unless an
+  // earlier run stopped mid-recreate: then the scopes it saved are the baseline.
+  let scopes = inFlight;
+  if (scopes === null) {
+    if (!live?.running) return done("retained", "supervisor_not_running", { ...tagged, exitCode: 1 });
+    const recent = await engine.logs(live.id, new Date(now() - QUALIFIED_LOOKBACK_MS).toISOString(), signal);
+    if (recent === null) return done("retained", "docker_unavailable", tagged);
+    scopes = qualifiedScopes(recent);
+    if (scopes.size === 0) return done("retained", "no_qualified_scope", { ...tagged, exitCode: 1 });
+  }
 
   const record = (outcome: UpdateOutcome, detail: string, previous: FleetImages | null, exitCode = 0): UpdateResult => {
     writeReleaseState(dir, {
@@ -210,7 +239,7 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
     });
     return { outcome, detail, generation: release.generation, exitCode, ...tagged };
   };
-  if (changed.length === 0 && runs(target)) return record("recorded", "already_running_release", null);
+  if (inFlight === null && changed.length === 0 && runs(target)) return record("recorded", "already_running_release", null);
 
   // What a failure goes back to: today's file, or for a half-applied file the one saved before it.
   let rollbackText: string | null = composeText;
@@ -246,8 +275,10 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
 
   // From here the machine changes. The previous file is the rollback.
   if (changed.length > 0) writePrivateAtomic(join(dir, PREVIOUS_COMPOSE_FILE), composeText);
+  writePrivateAtomic(join(dir, IN_FLIGHT_FILE), `${JSON.stringify({ version: 1, scopes: [...scopes].sort(), atMs: now() })}\n`);
   writePrivateAtomic(composePath, candidateText);
   if ((await engine.recreate(dir, project, signal)) && (await qualify(engine, dir, project, target, scopes, options, now))) {
+    clearInFlight(dir);
     if (changed.length > 0) await engine.removeImages(changed.map((c) => current[c]), signal);
     // The recreate must leave every running phase container as it was: it is re-adopted, not restarted.
     const childrenAfter = await engine.children(signal);
@@ -269,6 +300,8 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
   writePrivateAtomic(composePath, rollbackText);
   const restored = (await engine.recreate(dir, project, signal)) &&
     (await qualify(engine, dir, project, rollbackImages, scopes, options, now));
+  // A rollback that did not qualify keeps the baseline for the next run.
+  if (restored) clearInFlight(dir);
   return done(restored ? "rolled_back" : "failed", restored ? "new_supervisor_not_qualified" : "rollback_not_qualified",
     { ...tagged, exitCode: 1 });
 }
@@ -314,6 +347,7 @@ const CONTAINER_ID = /^[0-9a-f]{12,64}$/;
 export function credentialMount(compose: Record<string, unknown>, service: Record<string, unknown>, file: string): string | null {
   const project = typeof compose.name === "string" ? compose.name : "";
   const topLevel = isRecord(compose.volumes) ? compose.volumes : {};
+  let best: { target: string; mount: string | null } | null = null;
   for (const entry of Array.isArray(service.volumes) ? service.volumes : []) {
     let source: unknown;
     let target: unknown;
@@ -326,14 +360,16 @@ export function credentialMount(compose: Record<string, unknown>, service: Recor
     }
     if (typeof source !== "string" || typeof target !== "string" || source === "") continue;
     if (file !== target && !file.startsWith(`${target.replace(/\/$/, "")}/`)) continue;
-    if (type === "bind") return `type=bind,src=${source},dst=${target},readonly`;
-    if (type !== "volume") return null;
+    // The deepest mount holding the file is the one the container reads it from.
+    if (best !== null && best.target.length >= target.length) continue;
     const declared = topLevel[source];
     const name = isRecord(declared) && typeof declared.name === "string" ? declared.name
       : isRecord(declared) && declared.external === true ? source : `${project}_${source}`;
-    return /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name) ? `type=volume,src=${name},dst=${target},readonly` : null;
+    const mount = type === "bind" ? `type=bind,src=${source},dst=${target},readonly`
+      : type === "volume" && /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name) ? `type=volume,src=${name},dst=${target},readonly` : null;
+    best = { target, mount };
   }
-  return null;
+  return best?.mount ?? null;
 }
 
 /** The real engine: the docker CLI, and the setup engine's own pull. */

@@ -7,6 +7,7 @@ import { readReleaseState, type ReleaseComponent } from "../src/runner-update";
 import {
   credentialMount,
   FLEET_COMPOSE_FILE,
+  IN_FLIGHT_FILE,
   notReadyScope,
   PREVIOUS_COMPOSE_FILE,
   qualifiedScopes,
@@ -161,6 +162,48 @@ describe("fleet update: one release for the whole fleet, the supervisor recreate
     expect(calls.removed).toEqual([OLD.runner, OLD.supervisor]);
     expect(readReleaseState(dir)).toMatchObject({ generation: 2, previous: { ...OLD, watchdog: "" }, last: { outcome: "updated" } });
     expect(existsSync(join(dir, "update.lock"))).toBe(false);
+    expect(existsSync(join(dir, IN_FLIGHT_FILE))).toBe(false);
+  });
+
+  it("a fleet already running the release, rolled by hand, is recorded with no recreate", async () => {
+    const { dir, text } = install(NEW);
+    const { engine, calls } = fake(dir);
+    expect(await runFleetUpdate(engine, { dir, ...clock() }))
+      .toMatchObject({ outcome: "recorded", detail: "already_running_release", generation: 2, exitCode: 0 });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(text);
+    expect(calls.recreate + calls.prepared.length).toBe(0);
+  });
+
+  describe("a run killed between the recreate and the end of qualify", () => {
+    /** compose.json already names the release, the saved previous file and baseline are on disk, and
+     *  the new supervisor's own log shows only CTC: it must not be taken as the baseline. */
+    function interrupted() {
+      const { dir } = install(NEW);
+      const previous = `${JSON.stringify(composeFile(OLD), null, 2)}\n`;
+      writeFileSync(join(dir, PREVIOUS_COMPOSE_FILE), previous, { mode: 0o600 });
+      writeFileSync(join(dir, IN_FLIGHT_FILE), JSON.stringify({ version: 1, scopes: ["tenant-0/CTC", "tenant-3/WID"], atMs: 1 }));
+      return { dir, previous };
+    }
+
+    it("NEGATIVE: the next run qualifies against the saved scopes and rolls back to the saved previous file", async () => {
+      const { dir, previous } = interrupted();
+      const onlyCtc = qualifiedLine("tenant-0", "CTC");
+      const { engine, calls } = fake(dir, { before: onlyCtc, logsFor: (i) => (i.runner === NEW.runner ? onlyCtc : SERVING) });
+      expect(await runFleetUpdate(engine, { dir, ...clock() }))
+        .toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_qualified", exitCode: 1 });
+      expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(previous);
+      expect(calls.recreate).toBe(2);
+      expect(existsSync(join(dir, IN_FLIGHT_FILE))).toBe(false);
+      expect(readReleaseState(dir).generation).toBeNull();
+    });
+
+    it("the next run finishes it when the new supervisor does serve every saved scope", async () => {
+      const { dir } = interrupted();
+      const { engine, calls } = fake(dir);
+      expect(await runFleetUpdate(engine, { dir, ...clock() })).toMatchObject({ outcome: "updated", detail: "reconciled", generation: 2 });
+      expect(calls.recreate).toBe(1);
+      expect(existsSync(join(dir, IN_FLIGHT_FILE))).toBe(false);
+    });
   });
 
   it.each([
@@ -241,6 +284,9 @@ describe("fleet update: reading the logs and the credential mount", () => {
     expect(credentialMount(compose, { volumes: ["cred:/run/cred:ro"] }, "/run/cred/credential"))
       .toBe("type=volume,src=catalyst-fleet_cred,dst=/run/cred,readonly");
     expect(credentialMount(compose, service, "/somewhere/else")).toBeNull();
+    const nested = { volumes: ["outer:/run/catalyst", "inner:/run/catalyst/root-credential:ro", "late:/run"] };
+    expect(credentialMount(compose, nested, "/run/catalyst/root-credential/credential"))
+      .toBe("type=volume,src=catalyst-fleet_inner,dst=/run/catalyst/root-credential,readonly");
   });
 });
 
