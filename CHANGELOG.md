@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.25
+
+A self-hosted machine that runs several teams' work from one `compose.json` can now take each approved release by itself. Run `catalyst runner update --fleet --dir <the folder that holds compose.json>`, by hand or on a schedule. It switches only the supervisor to the approved images and leaves work that is already running alone. If the machine's teams are not ready again within four minutes, it puts the previous images back. `--check` shows what would change without changing anything.
+
 ## 0.16.24
 
 One self-hosted machine can now work for several Linear teams. On a machine already set up for one team, run `catalyst setup --runner` with another team selected, and setup adds that team instead of stopping. Each team's own setting still decides whether its work may run there, and the machine asks each of its teams for work in turn. A new machine starts on Catalyst's current approved release, which can serve several teams from its first setup; a machine you already set up gets that release on its next 15-minute update check.
