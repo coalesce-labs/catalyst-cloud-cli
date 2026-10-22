@@ -153,6 +153,7 @@ interface Host {
   hostId: string;
   hostName: string;
   team: string;
+  teams?: string[];
   enrollmentKind: string;
   revokedAtMs: number | null;
   capability: {
@@ -252,6 +253,13 @@ function fixture(
       receivedAtMs: now.getTime(),
     } as Host["capability"],
     mints: [] as unknown[],
+    // CTC-4455: "absent" answers the add-team route as an older cloud does (404).
+    teamRoute: "absent" as "absent" | "ok" | "team_limit",
+    // How many add-team requests the cloud answers `supervisor_outdated` before accepting.
+    teamOutdated: 0,
+    teamAdds: [] as unknown[],
+    // The cloud accepts the add, but its listing never shows the team.
+    teamListingLags: false,
   };
   const engine = options.engine ?? fakeEngine();
   const requests: string[] = [];
@@ -323,6 +331,22 @@ function fixture(
         }
       }
       return Response.json({ hosts: state.hosts });
+    }
+    const teamAdd = /^\/api\/v1\/hosts\/([^/]+)\/teams$/.exec(url.pathname);
+    if (teamAdd && method === "POST" && state.teamRoute !== "absent") {
+      const body = JSON.parse(String(init?.body)) as { team: string };
+      state.teamAdds.push(body);
+      const host = state.hosts.find((h) => h.hostId === teamAdd[1]);
+      if (!host) return Response.json({ ok: false, error: "unknown_host" }, { status: 404 });
+      if (state.teamRoute === "team_limit")
+        return Response.json({ ok: false, error: "team_limit" }, { status: 409 });
+      if (state.teamOutdated > 0) {
+        state.teamOutdated--;
+        return Response.json({ ok: false, error: "supervisor_outdated" }, { status: 409 });
+      }
+      const teams = [...new Set([...(host.teams ?? [host.team]), body.team])];
+      if (!state.teamListingLags) host.teams = teams;
+      return Response.json({ ok: true, hostId: host.hostId, teams, added: true });
     }
     if (url.pathname === "/api/v1/hosts/join-tokens" && method === "POST") {
       state.mints.push(JSON.parse(String(init?.body)));
@@ -1113,6 +1137,89 @@ describe("bringing the host up", () => {
       reason: "runner_enrolled_for_other_team",
     });
     expect(f.state.mints).toHaveLength(1);
+    expect(f.engine.calls).not.toContain("composeUp");
+  });
+
+  test("CTC-4455: a runner enrolled for another team serves the selected team once setup adds it", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "ok";
+    f.engine.calls.length = 0;
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostId: "host-1" } });
+    expect(f.state.teamAdds).toEqual([{ version: 1, team: "A" }]);
+    expect(f.state.hosts[0]!.teams).toEqual(["B", "A"]);
+    expect(f.state.mints).toHaveLength(1);
+    expect(f.requests).toContain("POST /api/v1/hosts/host-1/teams?account=account-a");
+    secretsNowhere(f);
+  });
+
+  test("CTC-4455: an older supervisor is started from this release before the team is added", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "ok";
+    f.state.teamOutdated = 1;
+    f.engine.calls.length = 0;
+    expect(await run(f)).toMatchObject({ state: "done" });
+    expect(f.state.teamAdds).toHaveLength(2);
+    expect(f.engine.calls).toContain("composeUp");
+    expect(f.state.hosts[0]!.teams).toEqual(["B", "A"]);
+  });
+
+  test("CTC-4455: a supervisor that never serves a set of teams stops setup once the wait runs out", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "ok";
+    f.state.teamOutdated = 100;
+    expect(await run(f)).toMatchObject({ state: "waiting", reason: "runner_supervisor_outdated" });
+    // One add before compose, then ceil(waitMs / pollMs) = ceil(20s / 5s) after it.
+    expect(f.state.teamAdds).toHaveLength(1 + 4);
+    expect(f.state.hosts[0]!.teams).toBeUndefined();
+  });
+
+  test("CTC-4455: an accepted add that the runner listing never shows is named after act", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "ok";
+    f.state.teamListingLags = true;
+    expect(await run(f)).toMatchObject({ state: "waiting", reason: "runner_team_not_added" });
+    expect(f.state.teamAdds).toHaveLength(1);
+    // This run: check pending, act done, then check names the team.
+    expect(f.results.slice(-3)).toMatchObject([{ state: "pending" }, { state: "done" }, { state: "waiting" }]);
+  });
+
+  test("CTC-4455: without the runner flag, a team the runner does not serve yet is named, not added", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "ok";
+    // A yes saved by an earlier run only reports on the runner.
+    f.journal.steps = [...f.journal.steps.filter((step) => step.id !== "runner"),
+      { id: "runner", state: "done", evidence: { selected: true } }];
+    const adapter = onboardRunnerAdapter({ engine: f.engine, sleep: async () => {} });
+    expect(await adapter.check(f.ctx, f.journal)).toMatchObject({
+      state: "waiting",
+      reason: "runner_needs_runner_flag",
+    });
+    expect(f.state.teamAdds).toHaveLength(0);
+  });
+
+  test("CTC-4455: a runner at its team limit is refused before this machine changes", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "team_limit";
+    f.engine.calls.length = 0;
+    expect(await run(f)).toMatchObject({ state: "waiting", reason: "runner_team_limit" });
     expect(f.engine.calls).not.toContain("composeUp");
   });
 
