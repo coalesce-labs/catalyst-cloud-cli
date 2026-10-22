@@ -71,7 +71,7 @@ export type DesiredReleaseRead =
   | { kind: "unreachable"; detail: string; hostId: string }
   | { kind: "no_credential" };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const posInt = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0;
@@ -166,13 +166,13 @@ export function readReleaseState(dir: string): ReleaseState {
 }
 
 /** Write a private file by rename, so a reader never sees half of it. */
-function writePrivateAtomic(path: string, text: string): void {
+export function writePrivateAtomic(path: string, text: string): void {
   const temp = `${path}.${process.pid}.tmp`;
   writeFileSync(temp, text, { mode: 0o600 });
   renameSync(temp, path);
 }
 
-function writeReleaseState(dir: string, state: ReleaseState): void {
+export function writeReleaseState(dir: string, state: ReleaseState): void {
   writePrivateAtomic(join(dir, RELEASE_STATE_FILE), `${JSON.stringify(state, null, 2)}\n`);
 }
 
@@ -424,7 +424,7 @@ const alive = (pid: number): boolean => {
 
 /** An exclusive lock file holding the owner's pid. It is taken over only when that process is gone,
  *  never by age: one run can legitimately take longer than any fixed limit (three image pulls). */
-function takeLock(dir: string, nowMs: number): string | null {
+export function takeLock(dir: string, nowMs: number): string | null {
   const path = join(dir, LOCK_FILE);
   const token = `${process.pid} ${nowMs}\n`;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -446,7 +446,7 @@ function takeLock(dir: string, nowMs: number): string | null {
   return null;
 }
 
-function releaseLock(dir: string, token: string): void {
+export function releaseLock(dir: string, token: string): void {
   const path = join(dir, LOCK_FILE);
   try {
     if (readFileSync(path, "utf8") === token) unlinkSync(path);
@@ -457,7 +457,7 @@ function releaseLock(dir: string, token: string): void {
 
 /** Runs inside the supervisor image with its own environment. Prints one JSON object, never the
  *  secret: the bearer is built and sent from inside the container. */
-const DESIRED_RELEASE_SCRIPT = `(async () => {
+export const DESIRED_RELEASE_SCRIPT = `(async () => {
   const out = (v) => process.stdout.write(JSON.stringify(v));
   let state;
   try { state = JSON.parse(require("node:fs").readFileSync(process.env.CATALYST_HOST_CREDENTIAL_FILE, "utf8")); }
@@ -480,7 +480,7 @@ const DESIRED_RELEASE_SCRIPT = `(async () => {
   }
 })();`;
 
-const HOST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+export const HOST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /** The real engine: the docker CLI and the setup engine's own pull, custody and Compose steps. */
 export function dockerRunnerUpdateEngine(

@@ -18,17 +18,20 @@ import {
   updateResultLines,
   type RunnerUpdateEngine,
 } from "./runner-update.js";
+import { dockerFleetUpdateEngine, runFleetUpdate, type FleetUpdateEngine } from "./runner-update-fleet.js";
 
-// `catalyst runner update [--check] [--auto] [--dir <dir>]` and
-// `catalyst runner auto-update [status|on|off]` (CTC-4646).
+// `catalyst runner update [--check] [--auto] [--dir <dir>] [--fleet]` and
+// `catalyst runner auto-update [status|on|off]` (CTC-4646). `--fleet` updates a multi-team
+// supervisor fleet's `compose.json` in `--dir` instead of a single runner's `.env` (CTC-6530).
 
 export interface RunnerCommandDeps {
   engine?: RunnerUpdateEngine;
+  fleetEngine?: FleetUpdateEngine;
   scheduler?: Partial<AutoUpdateDeps>;
 }
 
 const USAGE =
-  "catalyst runner update [--check] [--dir <runner directory>] | runner auto-update [status|on|off]";
+  "catalyst runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off]";
 
 function schedulerDeps(ctx: Ctx, deps: RunnerCommandDeps): AutoUpdateDeps {
   const cli = deps.scheduler?.cli ?? resolve(process.argv[1] ?? "catalyst");
@@ -76,8 +79,11 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
   if (action === "update" && parts.length === 1) {
     const check = flagBool(args, "check");
     const auto = flagBool(args, "auto");
-    const engine = deps.engine ?? dockerRunnerUpdateEngine({ env: ctx.env });
-    const result = await runRunnerUpdate(engine, { dir: dir(), check });
+    const fleet = flagBool(args, "fleet");
+    if (fleet && dirFlag === undefined) throw new UsageError("--fleet needs --dir, the directory that holds compose.json");
+    const result = fleet
+      ? await runFleetUpdate(deps.fleetEngine ?? dockerFleetUpdateEngine({ env: ctx.env }), { dir: dir(), check })
+      : await runRunnerUpdate(deps.engine ?? dockerRunnerUpdateEngine({ env: ctx.env }), { dir: dir(), check });
     if (args.json) ctx.stdout(JSON.stringify(result));
     else if (auto) ctx.stdout(`${ctx.now().toISOString()} ${result.outcome} ${result.detail} generation=${result.generation ?? "none"}`);
     else for (const line of updateResultLines(result)) ctx.stdout(line);
