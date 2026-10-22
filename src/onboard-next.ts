@@ -244,7 +244,15 @@ const REASONS: Record<string, string> = {
   runner_enrollment_unavailable:
     "Setup could not read this workspace's runner hosts. Run catalyst onboard again to retry.",
   runner_enrolled_for_other_team:
-    "This runner is enrolled for another Linear team. Keep using that team, or ask your administrator to revoke the old enrollment before setting up this machine for the selected team.",
+    "This runner is enrolled for another Linear team, and Catalyst could not add the selected team to it. Keep using that team, or ask your administrator to revoke the old enrollment before setting up this machine for the selected team.",
+  runner_team_not_added:
+    "This runner does not serve the selected Linear team yet. Run catalyst setup --runner to add the team to it.",
+  runner_team_limit:
+    "This runner already serves 16 Linear teams, the most one runner can serve. Set up another machine for the selected team.",
+  runner_team_add_failed:
+    "Setup could not add the selected Linear team to this runner. Run catalyst setup --runner again to retry.",
+  runner_supervisor_outdated:
+    "This runner's supervisor has not reported that it can serve several teams yet. Run docker compose -p catalyst-host logs supervisor to check it is running, then run catalyst setup --runner again.",
   runner_enrollment_revoked:
     "Catalyst confirms that this machine's saved enrollment was revoked. Keep its credential and organization key. Ask your workspace administrator to review the enrollment before replacing it, then run catalyst setup --runner.",
   runner_credential_unverified:
