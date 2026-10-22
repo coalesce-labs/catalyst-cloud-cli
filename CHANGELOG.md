@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.16.24
+
+One self-hosted machine can now work for several Linear teams. On a machine already set up for one team, run `catalyst setup --runner` with another team selected, and setup adds that team instead of stopping. Each team's own setting still decides whether its work may run there, and the machine asks each of its teams for work in turn. A new machine starts on Catalyst's current approved release, which can serve several teams from its first setup; a machine you already set up gets that release on its next 15-minute update check.
 
 New: `catalyst mcp status <server>` shows one MCP server's state, how it authenticates, how many of its tools are granted to this machine's login, and how many tools it offers. It then lists the server's last 50 tool calls: when each ran, the ticket and phase it ran for, the tool, how long it took and the outcome. A call that failed names its reason in plain words. The command exits 0 whenever it could read the server, even when some of the calls failed. `--json` prints the server's status and calls exactly as Catalyst Cloud returns them.
 
