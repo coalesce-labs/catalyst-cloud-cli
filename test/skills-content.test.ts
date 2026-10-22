@@ -798,8 +798,8 @@ describe("the package manifest", () => {
     // CTC-4625: fast-wrap-ansi is the wrapper @clack/prompts itself ships with (already in the
     // tree); `catalyst setup` wraps with it directly, so it is declared at the same pinned version.
     expect(manifest.dependencies).toEqual({
-      "@catalyst-cloud/sdk": "0.16.10",
-      "@catalyst-cloud/sdk-replica-node": "0.16.10",
+      "@catalyst-cloud/sdk": "0.16.11",
+      "@catalyst-cloud/sdk-replica-node": "0.16.11",
       "@clack/prompts": "1.8.1",
       "fast-wrap-ansi": "0.2.2",
       "fast-string-width": "3.0.2",
