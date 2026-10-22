@@ -60,10 +60,14 @@ jobs:
       # 0.16.24). `--dry-run` runs the same comparison without needing a release tag.
       - name: Release declaration matches the deployed cloud
         run: |
-          node scripts/release-train-check.mjs --publish cli --dry-run || {
-            echo "::error::release-train.json differs from https://staging.catalystcloud.dev/release-train.json. Copy the deployed file and pin the SDK, sdk-replica-node and schema versions it declares (as #433 and #448 did)."
+          if ! out=$(node scripts/release-train-check.mjs --publish cli --dry-run 2>&1); then
+            echo "::error::$out"
+            if [[ "$out" == *"differs from canonical"* ]]; then
+              echo "::error::Copy https://staging.catalystcloud.dev/release-train.json and pin the SDK, sdk-replica-node and schema versions it declares (as #433 and #448 did)."
+            fi
             exit 1
-          }
+          fi
+          echo "$out"
 
       - name: Typecheck
         run: bun run typecheck
