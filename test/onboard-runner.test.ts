@@ -976,7 +976,7 @@ describe("prerequisites", () => {
       expect(ref).toMatch(/^ghcr\.io\/coalesce-labs\/[a-z-]+@sha256:[0-9a-f]{64}$/);
   });
 
-  const PUBLIC_RUNNER = "ghcr.io/coalesce-labs/catalyst-runner@sha256:a19f7b0859a9814740935f7aadd8fe5c5c9c5974f9a5956a057b983ada16ea01";
+  const PUBLIC_RUNNER = "ghcr.io/coalesce-labs/catalyst-runner@sha256:598fd0ef2675bfd8e0665f70ef4ed8bf30706fba25fa2c39fc0df0801512a423";
   function defaultFixture() {
     const engine = fakeEngine();
     engine.images.set(RUNNER_HOST_IMAGES.supervisor, "arm64");
