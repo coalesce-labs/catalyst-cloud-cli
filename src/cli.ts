@@ -209,7 +209,7 @@ export function usageText(): string {
     "  catalyst seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE]",
     "  catalyst hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name>",
     "  catalyst runner update [--check] | runner auto-update [status|on|off]   (move this machine's runner to the approved release)",
-    "  catalyst mcp add|list|remove (vault references only)",
+    "  catalyst mcp add|list|remove (vault references only) | mcp status <name>   (a server's state, grants and last 50 tool calls)",
     "  catalyst contract [--refresh] [--path <a.b.c>]",
     "  catalyst query <issues|issue <id>|pulls|pull <id>|projects|cycles|search <terms>|changes --since <cursor|head>>",
     '  catalyst replica <start [--detach]|stop|status [--probe]|sql "<select>"|schema [table]>',
