@@ -81,6 +81,7 @@ export const CAPABILITIES: readonly Capability[] = [
   { verb: "ask disown", does: "take back an answer recorded by proxy on your ask, reopening it (your own login only)", needs: "member", routes: [], since: "0.16.23" },
   { verb: "release", does: "release a parked ticket or a whole failure class back to work", needs: "admin", routes: [agent("POST", "ticket-release"), agent("POST", "ticket-release-class")], since: "0.6.0" },
   { verb: "mcp add|list|remove", does: "register an MCP server for the workspace by vault-secret name", needs: "admin", routes: [agent("POST", "mcp")], since: "0.9.0" },
+  { verb: "mcp status", does: "read an MCP server's state, auth kind, grants for this key, tool count and its last 50 tool calls with each failure's reason", needs: "member", routes: [], since: "0.16.24" },
 ];
 
 export type CapabilityAvailability = "available" | "needs_newer_cloud" | "cloud_unread";
