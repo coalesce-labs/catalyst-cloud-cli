@@ -164,11 +164,11 @@ describe("repository lifecycle discovery", () => {
       routes: repoRoutes.map(({ method, path }) => ({ method, path })),
     });
   });
-  test("both rows name 0.16.25, the first release that carries them, not the published 0.16.24", () => {
+  test("both rows name 0.16.26, the first release that carries them, not 0.16.24 or 0.16.25", () => {
     const report = reportCapabilities(repoRoutes);
     for (const verb of ["repo status", "repo pause|resume"]) {
-      expect(CAPABILITIES.find((row) => row.verb === verb)?.since).toBe("0.16.25");
-      expect(report.find((row) => row.verb === verb)?.since).toBe("0.16.25");
+      expect(CAPABILITIES.find((row) => row.verb === verb)?.since).toBe("0.16.26");
+      expect(report.find((row) => row.verb === verb)?.since).toBe("0.16.26");
     }
   });
   test("all exact routes make both rows available", () => {
