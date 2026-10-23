@@ -72,6 +72,20 @@ describe("installed CLI release reporting", () => {
     expect(new Headers(captured[2]!.headers).get("content-type")).toBe("application/json");
     expect(new Headers(captured[2]!.headers).get("x-catalyst-cli-version")).toBe("0.16.29");
   });
+  test("a Headers-like object from another library keeps every header it carries", async () => {
+    const captured: RequestInit[] = [];
+    const transport: typeof fetch = async (_input, init) => { captured.push(init ?? {}); return new Response("{}"); };
+    class ForeignHeaders {
+      private readonly map = new Map([["authorization", "Bearer foreign"], ["content-type", "application/json"]]);
+      forEach(fn: (value: string, name: string) => void) { this.map.forEach((value, name) => fn(value, name)); }
+      *[Symbol.iterator]() { yield* this.map.entries(); }
+    }
+    await reportCliVersion(transport, "0.16.29", () => [origin])(`${origin}/api/v1/me`, { headers: new ForeignHeaders() as unknown as HeadersInit });
+    const sent = new Headers(captured[0]!.headers);
+    expect(sent.get("authorization")).toBe("Bearer foreign");
+    expect(sent.get("content-type")).toBe("application/json");
+    expect(sent.get("x-catalyst-cli-version")).toBe("0.16.29");
+  });
   test("does not decorate unrelated initial destinations, provider calls or malformed release values", async () => {
     const captured: RequestInit[] = [];
     const transport: typeof fetch = async (_input, init) => { captured.push(init ?? {}); return new Response("{}"); };

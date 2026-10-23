@@ -22,7 +22,9 @@ export function reportCliVersion(transport: typeof fetch, version: string, origi
 /** Adds the header in the shape the caller used, so a transport that reads a plain record keeps
  *  reading one. A caller's own copy of the header, in any case, is replaced. */
 function withVersion(headers: HeadersInit | undefined, version: string): HeadersInit {
-  if (headers instanceof Headers) {
+  // A Headers from another realm or library fails instanceof, and Object.entries would read it as
+  // empty and drop every header the caller sent. Anything iterable that is not an array is copied.
+  if (headers instanceof Headers || (!Array.isArray(headers) && typeof (headers as Headers | undefined)?.forEach === "function")) {
     const copy = new Headers(headers);
     copy.set(HEADER, version);
     return copy;
