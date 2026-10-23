@@ -189,11 +189,16 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       value: false,
       help: "status --from-cache: compare the local event cursor with the cloud event head",
     },
-    type: { value: true, help: "exact event type" },
+    type: { value: true, help: "exact event type, or for wait-for a family such as pr.*" },
     ticket: {
       value: true,
       help: "ticket identifier found in the event",
     },
+    repo: { value: true, repeat: true, help: "wait-for: repository as owner/name (repeatable)" },
+    ref: { value: true, repeat: true, help: "wait-for: branch as owner/name:branch (repeatable)" },
+    pr: { value: true, repeat: true, help: "wait-for: pull request as owner/name#number (repeatable)" },
+    session: { value: true, repeat: true, help: "wait-for: phase session as TICKET/phase#attempt (repeatable)" },
+    to: { value: true, help: "wait-for: me, for events addressed to this login" },
     after: {
       value: true,
       help: "event sequence to read after (tail and wait-for default to new events only)",
@@ -509,6 +514,10 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
   },
   identity: {},
+  messages: {
+    ticket: { value: true, help: "read: the ticket whose messages to read" },
+    since: { value: true, help: "read: the first message sequence to read (inclusive)" },
+  },
   capabilities: {},
   project: {
     team: {
@@ -604,7 +613,7 @@ export const VERB_USAGE: Record<string, string> = {
     'replica <start [--detach]|stop|status [--probe] [--json]|sql "<select>"|schema [table]> [--db <path>]',
   runtime: "runtime <status [--json]|install|path|uninstall>",
   events:
-    "events <tail|wait-for|query|status [--probe] [--json]> [--type NAME] [--ticket CTC-N] [--after SEQUENCE] [--limit N] [--timeout SECONDS] [--directory PATH]",
+    "events <tail|wait-for|query|status [--probe] [--json]> [--type NAME] [--ticket CTC-N] [--repo O/N] [--ref O/N:BRANCH] [--pr O/N#N] [--session T/PHASE#N] [--to me] [--after SEQUENCE] [--limit N] [--timeout SECONDS] [--directory PATH]",
   explain: "explain <ticket> [--history] [--json]",
   history: "history <ticket> [--json]",
   running: "running [--ticket T --phase P] [--json]",
@@ -626,6 +635,7 @@ export const VERB_USAGE: Record<string, string> = {
     "secret set <NAME> --repo <owner/name> [--command '<cmd>'] [--json]   (value from --command, stdin, or a hidden prompt) | secret import <file> --repo <owner/name> [--names NAME[,NAME...]] [--rotate NAME]... [--json]",
   var: "var <set NAME|import <file>> [--repo <owner/name>] [--names NAME[,NAME...]] [--json]   (plain environment variables; set reads stdin or a hidden prompt)",
   identity: "identity linear <status|options|set> [<linearUserId>] [--json]",
+  messages: "messages read --ticket CTC-N [--since SEQUENCE] [--json]",
   capabilities: "capabilities [--json]",
   project:
     "project <list [--json] | wip-limit <get|set <n>|set default> [--team K] [--json]>",

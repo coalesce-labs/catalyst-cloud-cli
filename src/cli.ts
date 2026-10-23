@@ -106,6 +106,7 @@ import { cmdProject } from "./project.js";
 import { cmdRepo } from "./repo.js";
 import { cmdLegacy, type LegacyDeps } from "./legacy.js";
 import { cmdIdentity, type IdentityDeps } from "./identity.js";
+import { cmdMessages, type MessagesDeps } from "./messages.js";
 import { cmdConnections, type ConnectionsDeps } from "./connections.js";
 import {
   cmdOnboard,
@@ -218,6 +219,7 @@ export function usageText(): string {
     '  catalyst replica <start [--detach]|stop|status [--probe]|sql "<select>"|schema [table]>',
     "  catalyst runtime <status [--json]|install|path|uninstall>   (a pinned Node this CLI manages itself)",
     "  catalyst events <tail|wait-for|query|status> [--type NAME] [--ticket CTC-N] [--after SEQUENCE] [--from-cache]",
+    "  catalyst events wait-for [--repo O/N] [--ref O/N:BRANCH] [--pr O/N#N] [--session T/PHASE#N] [--to me] [--type pr.*] [--timeout SECONDS]   (one connection; nothing printed until a match)",
     "  catalyst explain <ticket> | history <ticket> | running [--ticket T --phase P] | queue [--team K]",
     "  catalyst watch [--team K] [--ticket T]... [--project P] [--exec CMD]",
     "  catalyst write <comment|state|label|create|reaction|attachment|session> ...",
@@ -237,6 +239,7 @@ export function usageText(): string {
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
     "  catalyst identity linear <status|options|set> [<linearUserId>] [--json]",
+    "  catalyst messages read --ticket CTC-N [--since SEQUENCE] [--json]   (messages sent to a ticket on your teams)",
     "  catalyst connections personal <linear|github> <start|status> [--wait <seconds>] [--json]",
     "",
     "Every verb takes --help. --json makes the output machine-readable.",
@@ -276,6 +279,7 @@ export interface MainDeps {
   hosts?: HostsDeps;
   runner?: RunnerCommandDeps;
   identity?: IdentityDeps;
+  messages?: MessagesDeps;
   team?: TeamDeps;
   legacy?: LegacyDeps;
   loadSdk?: () => Promise<unknown>;
@@ -761,6 +765,8 @@ export async function main(
         return await cmdLegacy(args, ctx, { localSyncSelected: savedLocalSync(ctx), ...deps.legacy });
       case "identity":
         return await cmdIdentity(args, ctx, deps.identity ?? {});
+      case "messages":
+        return await cmdMessages(args, ctx, deps.messages ?? {});
       case "hosts":
         return await cmdHosts(args, ctx, deps.hosts);
       case "runner":
@@ -836,6 +842,7 @@ const VERB_HELP_KNOWN: Record<string, true> = Object.fromEntries(
     "environment",
     "connections",
     "identity",
+    "messages",
     "mcp",
     "team",
     "capabilities",
