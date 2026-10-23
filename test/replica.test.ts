@@ -243,6 +243,35 @@ describe("replica start backs off and stops after repeated snapshot failures", (
     }
   });
 
+  test("with no override, replica start hands the SDK the 150 s snapshot no-progress bound (CTC-6569)", async () => {
+    await seedJoined(home, server);
+    server.snapshotStatus = 503; // fail fast: this test only reads the options the replica was built with
+    try {
+      const real = await loadSdk();
+      const passed: (number | undefined)[] = [];
+      class Recording extends real.CatalystReplica {
+        constructor(options: ConstructorParameters<typeof real.CatalystReplica>[0]) {
+          passed.push(options.snapshotIdleTimeoutMs);
+          super(options);
+        }
+      }
+      const { sleep } = fakeSleep();
+      const code = await main(["replica", "start"], ctx, {
+        replica: {
+          waitForStop: () => new Promise<void>(() => {}),
+          sleep,
+          random: () => 0.5,
+          snapshotRetry: { maxFailures: 1 },
+          loadSdk: async () => ({ ...real, CatalystReplica: Recording }),
+        },
+      });
+      expect(code).toBe(1);
+      expect(passed).toEqual([150_000]);
+    } finally {
+      server.snapshotStatus = undefined;
+    }
+  });
+
   test("the production snapshot no-progress bound outlasts the mirror's 120 s snapshot preparation (CTC-6569)", () => {
     // A 30 s bound aborted nearly every first sync of a large workspace; host-sync and web pass 150 s.
     expect(SNAPSHOT_IDLE_TIMEOUT_MS).toBe(150_000);

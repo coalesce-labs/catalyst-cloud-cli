@@ -339,6 +339,8 @@ export interface ReplicaDeps {
   snapshotRetry?: { baseBackoffMs?: number; maxBackoffMs?: number; maxFailures?: number; liveStableMs?: number };
   /** Test-only: the SDK's snapshot no-progress bound; production uses SNAPSHOT_IDLE_TIMEOUT_MS. */
   snapshotIdleTimeoutMs?: number;
+  /** Test-only: the SDK `start` builds its replica from, so a test can read the options it passes. */
+  loadSdk?: () => Promise<Sdk>;
 }
 
 /** How long a snapshot pull may go with no progress before the SDK aborts it (CTC-6569). The mirror
@@ -457,7 +459,7 @@ async function cmdStart(args: ParsedArgs, ctx: Ctx, cfg: CustomerConfig, dbPath:
     ctx.stdout(`replica writer started in the background (pid ${pid}, db ${dbPath}); check with: catalyst replica status`);
     return 0;
   }
-  const sdk = await loadSdk();
+  const sdk = await (deps.loadSdk ?? loadSdk)();
 
   const sleep = deps.sleep ?? defaultSleep;
   const random = deps.random ?? Math.random;
