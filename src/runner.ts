@@ -8,6 +8,7 @@ import { loadConfig, type Ctx } from "./config.js";
 import { CliError, UsageError } from "./errors.js";
 import { onboardStateRoot } from "./onboard.js";
 import { dockerRunnerEngine, RUNNER_PROJECT, RUNNER_SESSION_NETWORK, type RunnerEnrollment, type RunnerExec } from "./onboard-runner.js";
+import { HOST_DISK_LABEL, hostDiskAgentOutput } from "./onboard-runner-disk.js";
 import { EGRESS_ARTIFACTS, NATIVE_EGRESS_DIR } from "./onboard-runner-egress.js";
 import { stdinIsTty } from "./prompt.js";
 import { apiClient } from "./transport.js";
@@ -25,7 +26,7 @@ const COMPOSE_VOLUMES = ["supervisor-state", "host-credential"].map(v => `${RUNN
 const COMPOSE_FILES = ["compose.yaml", "compose.darwin-thoughts.yaml"] as const;
 /** Files setup writes into the runner directory. The work folders are listed separately. */
 const SETUP_FILES = [...COMPOSE_FILES, ".env", "key-request.json"] as const;
-const SETUP_DIRS = ["session-egress", "host-disk"] as const;
+const SETUP_DIRS = ["session-egress", "host-disk", "host-disk-sampler"] as const;
 /** Repository checkouts, the thoughts checkout and their locks: kept unless the owner says so. */
 const WORK_DIRS = ["slots", "thoughts", "locks"] as const;
 const DARWIN_SIBLINGS = ["darwin-thoughts-custody", "darwin-thoughts-requests", "darwin-thoughts-responses"] as const;
@@ -101,6 +102,15 @@ function owned(path: string, uid: number, kind: "file" | "directory"): boolean {
   } catch { return false; }
 }
 const exists = (path: string): boolean => { try { lstatSync(path); return true; } catch { return false; } };
+
+/** Setup's disk sampler publishes into this runner's own host-disk bind; a same-label agent that
+ * writes elsewhere is its operator's, as setup treats it (CTC-5929). */
+function samplerIsSetups(text: string, runnerDir: string | undefined): boolean {
+  const output = hostDiskAgentOutput(text);
+  if (!output || !runnerDir || basename(output) !== "space.json") return false;
+  const real = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+  return real(dirname(output)) === real(join(runnerDir, "host-disk"));
+}
 
 /** The onboarding engine's reads, through this command's own runner. */
 function dockerEnvRun(run: RunnerCommand): RunnerExec {
@@ -489,7 +499,11 @@ async function uninstall(
   // 8. macOS: the storage custody service (and a disk sampler, when one was installed) and its folders.
   for (const agent of darwinAgents) {
     let ours = false;
-    try { ours = owned(agent.plist, uid, "file") && readFileSync(agent.plist, "utf8").includes(`<string>${agent.label}</string>`); } catch { /* unreadable */ }
+    try {
+      const text = readFileSync(agent.plist, "utf8");
+      ours = owned(agent.plist, uid, "file") && text.includes(`<string>${agent.label}</string>`) &&
+        (agent.label !== HOST_DISK_LABEL || samplerIsSetups(text, runnerDir));
+    } catch { /* unreadable */ }
     if (!ours) { record(agent.plist, "kept", "not the file setup installed"); continue; }
     for (const domain of [`gui/${uid}`, `user/${uid}`]) await run("launchctl", ["bootout", `${domain}/${agent.label}`]);
     const loaded = (await run("launchctl", ["print", `user/${uid}/${agent.label}`])).code === 0 ||

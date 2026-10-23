@@ -486,6 +486,9 @@ function normalizeStep(value: unknown, fallbackAt: string): OnboardStep | null {
     "passed",
     "team",
     "teamKey",
+    // CTC-5932: the comma-joined choices a run with no one to ask names in its flag advice.
+    "choices",
+    "choiceTotal",
     "selected",
     "hostName",
     "supervisorImage",
@@ -512,6 +515,14 @@ function normalizeStep(value: unknown, fallbackAt: string): OnboardStep | null {
     "custodyResultInstalled",
     "custodyAuthorityMatched",
     "custodyTelemetry",
+    // CTC-5929: the runner's disk reason and a foreign sampler's paths. Without them the saved
+    // step read back as "no disk sampler" on a Linux host that was below its floor.
+    "floorGiB",
+    "availableGiB",
+    "vm",
+    "diskDetail",
+    "sampleDir",
+    "sampleFile",
   ] as const) {
     const item = evidence?.[key];
     if (

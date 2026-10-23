@@ -5,7 +5,7 @@
 import { spawn } from "node:child_process";
 import type { ChangeFrame, WebSocketFactory } from "@catalyst-cloud/sdk";
 import { flagList, flagString, type ParsedArgs } from "./args.js";
-import { apiBase, requireConfig, watchCursorPathFor, type Ctx, type CustomerConfig } from "./config.js";
+import { apiBase, requireConfig, readManifest, watchCursorPathFor, type Ctx, type CustomerConfig } from "./config.js";
 import { loadContract } from "./contract.js";
 import { CliError, UsageError } from "./errors.js";
 import { apiClient } from "./transport.js";
@@ -167,6 +167,7 @@ export async function runWatch(ctx: Ctx, cfg: CustomerConfig, opts: WatchOptions
     return createLiveEventsClient(sdk, {
     baseUrl: apiBase(cfg),
     accountId: cfg.account,
+    cliVersion: readManifest().version,
     auth: authStrategyFor(ctx, cfg),
     getToken: () => bearerFor(ctx, cfg),
     cursorFile: opts.cursorFile ?? watchCursorPathFor(ctx.home),

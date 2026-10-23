@@ -544,6 +544,19 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       help: "with --remove: answer the question yes (a run with no terminal only reports otherwise)",
     },
   },
+  lease: {
+    agent: { value: true, help: "the seat's name, 1 to 40 of a-z, 0-9 and - (take: required; renew, release: when this machine holds the ticket for several seats)" },
+    ttl: { value: true, help: "take, renew: minutes until the lease lapses without a renewal (the cloud keeps it between 5 and 60; default 30)" },
+    commit: { value: true, help: "renew: the full 40-character sha of a commit you pushed" },
+    artifact: { value: true, help: "renew: a thoughts path or check-run id you wrote" },
+    finding: { value: true, help: "renew: a comment or review id you posted" },
+    pr: { value: true, help: "renew: the number of a pull request you opened" },
+    note: { value: true, help: "renew: a few words about the progress (not part of what counts as new)" },
+    generation: { value: true, help: "renew, release: the generation the take printed (default: the one this machine stored)" },
+  },
+  work: {
+    team: { value: true, help: "available: one team's key (default: every team in the workspace contract)" },
+  },
   repo: {
     reason: { value: true, help: "pause: required; resume: optional; 1 to 500 characters after trimming (owner or admin)" },
     write: {
@@ -646,6 +659,9 @@ export const VERB_USAGE: Record<string, string> = {
   capabilities: "capabilities [--json]",
   project:
     "project <list [--json] | wip-limit <get|set <n>|set default> [--team K] [--json]>",
+  lease:
+    "lease <take <ticket> --agent <seat> [--ttl <minutes>] | renew <ticket> (--commit <sha>|--artifact <path or id>|--finding <id>|--pr <number>) [--note <text>] [--agent <seat>] [--generation <n>] | release <ticket> [--agent <seat>] [--generation <n>] | show <ticket>> [--json]   (a seat's ticket lease: take, renew with new progress, release, read; needs login)",
+  work: "work available [--team K] [--json]   (per team: tickets nobody holds, with the last holder and progress, and open pull requests no live lease covers, drafts included)",
   repo: "repo <status|pause <owner/name> --reason <text>|resume <owner/name> [--reason <text>]|agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]> [--json]   (status: visible workspace repositories; agents-block/agent-setup: local checkout)",
   legacy: "legacy [--remove [--data] [--yes]] [--json]",
   connections:

@@ -13,6 +13,7 @@ import { existsSync, openSync, closeSync } from "node:fs";
 import { ReadStream as TerminalInput } from "node:tty";
 import { Writable } from "node:stream";
 import { parseArgs, positionals, verbHelp, type ParsedArgs } from "./args.js";
+import { reportCliVersion } from "./cli-version.js";
 import {
   CONFIG_MODE,
   DEFAULT_BASE_URL,
@@ -105,6 +106,7 @@ import { cmdTeam, type TeamDeps } from "./team.js";
 import { cmdCapabilities } from "./capabilities.js";
 import { cmdProject } from "./project.js";
 import { cmdRepo } from "./repo.js";
+import { cmdLease, cmdWork } from "./lease.js";
 import { cmdLegacy, type LegacyDeps } from "./legacy.js";
 import { cmdIdentity, type IdentityDeps } from "./identity.js";
 import { cmdMessages, type MessagesDeps } from "./messages.js";
@@ -239,6 +241,8 @@ export function usageText(): string {
     "  catalyst repo pause <owner/name> --reason <text> | repo resume <owner/name> [--reason <text>]   (owner or admin; reason: 1 to 500 trimmed characters)",
     "  catalyst repo status [--json]   (visible workspace repositories and their paused state; needs login)",
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
+    "  catalyst lease <take <ticket> --agent <seat> [--ttl <minutes>]|renew <ticket> --commit|--artifact|--finding|--pr <ref> [--note <text>]|release <ticket>|show <ticket>> [--json]   (a seat's ticket lease; needs login)",
+    "  catalyst work available [--team K] [--json]   (tickets nobody holds and open pull requests no lease covers)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
     "  catalyst identity linear <status|options|set> [<linearUserId>] [--json]",
     "  catalyst messages read --ticket CTC-N [--since SEQUENCE] [--json]   (messages sent to a ticket on your teams)",
@@ -464,6 +468,20 @@ export async function main(
     command: args.command,
     version: manifest.version,
   });
+  ctx = {
+    ...ctx,
+    fetch: reportCliVersion(ctx.fetch, manifest.version, () => {
+      let configured: string | undefined;
+      try {
+        configured = loadConfig(ctx.home)?.baseUrl;
+      } catch {
+        // The command reports its existing config error.
+      }
+      return [args.baseUrl, ctx.env.CATALYST_CLOUD_BASE_URL, configured, DEFAULT_BASE_URL].filter(
+        (origin): origin is string => typeof origin === "string",
+      );
+    }),
+  };
   try {
     if (args.command !== "onboard") {
       migrateLegacyCliPath(ctx);
@@ -764,6 +782,10 @@ export async function main(
         return await cmdProject(args, ctx);
       case "repo":
         return await cmdRepo(args, ctx);
+      case "lease":
+        return await cmdLease(args, ctx);
+      case "work":
+        return await cmdWork(args, ctx);
       case "legacy":
         return await cmdLegacy(args, ctx, { localSyncSelected: savedLocalSync(ctx), ...deps.legacy });
       case "identity":
@@ -853,6 +875,8 @@ const VERB_HELP_KNOWN: Record<string, true> = Object.fromEntries(
     "capabilities",
     "project",
     "repo",
+    "lease",
+    "work",
     "legacy",
     "onboard",
     "update",

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.29
+
+The CLI now tells Catalyst Cloud which release you have installed: each request to Catalyst Cloud carries the installed version, and so does `catalyst watch` when it connects. Catalyst Cloud can then tell an out-of-date CLI from a current one. Nothing about your requests changes otherwise. On a Mac self-hosted machine, setup now installs a small agent that measures the Mac's disk, so the machine can take work instead of showing zero free slots. When a machine still shows zero free slots, setup and `catalyst ready` now say why: its disk has not been measured yet, or its free space is below the floor (25 GiB by default), with the numbers and the fix. An updated disk sampler also takes effect straight away: setup reloads the running disk agent whenever the sampler script changes, not only when its schedule file does.
+
 ## 0.16.28
 
 `catalyst events wait-for` can now wait on a repository (`--repo owner/name`), a branch (`--ref owner/name:branch`), a pull request (`--pr owner/name#n`), a work session (`--session KEY-123/phase#n`), events addressed to you (`--to me`) or a family of event types (`--type pr.*`). An agent can wait hours for a review or a conflict on its own branch: the wait holds one connection, prints each matching event as one JSON line, and after a dropped connection picks up where it left off without missing or repeating an event. Two new exit codes say why a wait ended without a match. 2 means the cloud refused the wait, for example on a ticket outside your teams, or the wait failed. 3 means `--from-cache` found no local event cache. A wait still exits 1 on a timeout and 4 on an outage, as before, and on a timeout it names the `--after` to resume from. New: `catalyst messages read --ticket KEY-123` prints the messages sent to a ticket on your teams, with each sender and time.

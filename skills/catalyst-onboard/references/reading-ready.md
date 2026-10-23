@@ -64,6 +64,7 @@ Each failing line prints its own fix.
 | `cliRelease` | the CLI is not behind the newest release; a note |
 | `skillsRelease` | the skill files are not behind the newest bundle; "could not run" means the registry was unreachable |
 | `sdk` | the SDK loads, so the replica and the watch are available; reads work through the API meanwhile |
+| `runner:disk` | when this machine runs Catalyst's work, the disk Docker uses has a fresh measurement with at least 25 GiB free (`CATALYST_HOST_FREE_FLOOR_GIB` changes the amount), so it can take work. A failing line says how much is free or why there is no measurement, with its fix, usually `catalyst setup --runner`; on a Mac that command also starts the LaunchAgent that measures the disk. A note means `ready` could not verify the installation to read it. Absent when this machine does not run Catalyst's work |
 | `replica` | the optional replica is fresh; a note (`references/local-sync.md`) |
 
 ## Setting up one team at a time
