@@ -299,7 +299,7 @@ describe("runner uninstall", () => {
     // Setup's: it publishes into this runner's own host-disk bind.
     writeFileSync(sampler, samplerPlist(join(dir, "host-disk", "space.json")));
     expect(await main(["runner", "uninstall", "--yes"], ctx, { runner: { run: command(fake), platform: "darwin", isTty: () => false } })).toBe(0);
-    expect(fake.calls).toContainEqual(["launchctl", "bootout", `user/${process.getuid!()}/dev.catalystcloud.host-disk`]);
+    expect(fake.calls).toContainEqual(["launchctl", "bootout", `user/${process.getuid?.() ?? -1}/dev.catalystcloud.host-disk`]);
     expect(existsSync(sampler)).toBe(false);
     expect(existsSync(join(dir, "host-disk-sampler"))).toBe(false);
   });
