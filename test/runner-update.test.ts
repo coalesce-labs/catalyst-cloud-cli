@@ -1,0 +1,512 @@
+import { spawnSync } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeEach, describe, expect, it } from "vitest";
+import {
+  decideRelease,
+  parseDesiredRelease,
+  PREVIOUS_ENV_FILE,
+  readReleaseState,
+  RELEASE_STATE_FILE,
+  rewriteEnvText,
+  runRunnerUpdate,
+  type DesiredReleaseRead,
+  type ReleaseComponent,
+  type RunnerUpdateEngine,
+} from "../src/runner-update";
+import {
+  autoUpdateStatus,
+  disableAutoUpdate,
+  enableAutoUpdate,
+  launchAgentPath,
+  launchAgentPlist,
+  systemdUnitPaths,
+  systemdUnits,
+  type SchedulerRun,
+} from "../src/runner-auto-update";
+import { canonicalDarwinThoughtsJson } from "../vendor/self-host/darwin-thoughts-custody/verifier.mjs";
+
+const hex = (c: string) => c.repeat(64);
+const sha = (c: string) => c.repeat(40);
+const REPO = {
+  runner: "ghcr.io/coalesce-labs/catalyst-runner",
+  supervisor: "ghcr.io/coalesce-labs/catalyst-supervisor",
+  watchdog: "ghcr.io/coalesce-labs/catalyst-deadline-watchdog",
+} as const;
+const ref = (component: ReleaseComponent, c: string) => `${REPO[component]}@sha256:${hex(c)}`;
+
+function release(over: { generation?: number; digits?: [string, string, string]; mutate?: (r: Record<string, unknown>) => void } = {}) {
+  const [r, s, w] = over.digits ?? ["1", "2", "3"];
+  const image = (component: ReleaseComponent, c: string, src: string) => ({
+    reference: ref(component, c),
+    digest: `sha256:${hex(c)}`,
+    tag: `${REPO[component]}:${sha(src)}${component === "runner" ? "-multiarch" : ""}`,
+    sourceSha: sha(src),
+  });
+  const body: Record<string, unknown> = {
+    version: 1,
+    releaseId: `hr-${hex(r).slice(0, 16)}-${hex(s).slice(0, 16)}-${hex(w).slice(0, 16)}`,
+    generation: over.generation ?? 1,
+    approvedAtMs: 1_800_000_000_000,
+    runner: image("runner", r, "a"),
+    supervisor: image("supervisor", s, "b"),
+    watchdog: image("watchdog", w, "b"),
+  };
+  over.mutate?.(body);
+  return body;
+}
+const answered = (body: unknown, status = 200): DesiredReleaseRead =>
+  ({ kind: "answered", status, body: status === 200 ? { ok: true, release: body } : body, hostId: "host_abc" });
+
+describe("parse and decide: only a valid, strictly newer approved release moves a machine", () => {
+  it("POSITIVE CONTROL: a well-formed release parses and a first one is an update", () => {
+    expect(parseDesiredRelease(release())).toMatchObject({ generation: 1, images: { runner: { reference: ref("runner", "1") } } });
+    expect(decideRelease(null, answered(release()))).toMatchObject({ action: "update" });
+  });
+
+  it.each([
+    ["a tag instead of a digest", (b: Record<string, unknown>) => ((b.runner as Record<string, unknown>).reference = `${REPO.runner}:latest`)],
+    ["another repository", (b: Record<string, unknown>) => ((b.supervisor as Record<string, unknown>).reference = `ghcr.io/evil/catalyst-supervisor@sha256:${hex("2")}`)],
+    ["a digest that disagrees with the reference", (b: Record<string, unknown>) => ((b.watchdog as Record<string, unknown>).digest = `sha256:${hex("9")}`)],
+    ["a release id that does not match the digests", (b: Record<string, unknown>) => (b.releaseId = "hr-0000000000000000-0000000000000000-0000000000000000")],
+    ["a tag that does not match its source commit", (b: Record<string, unknown>) => ((b.runner as Record<string, unknown>).tag = `${REPO.runner}:${sha("a")}`)],
+    ["another wire version", (b: Record<string, unknown>) => (b.version = 2)],
+  ])("NEGATIVE: %s is refused and keeps the current images", (_label, mutate) => {
+    const body = release({ mutate });
+    expect(parseDesiredRelease(body)).toBeNull();
+    expect(decideRelease(null, answered(body))).toEqual({ action: "retain", reason: "response_invalid", terminal: false });
+  });
+
+  it("an older generation is not newer; the applied one is verified, not trusted", () => {
+    expect(decideRelease(3, answered(release({ generation: 3 })))).toMatchObject({ action: "verify", release: { generation: 3 } });
+    expect(decideRelease(3, answered(release({ generation: 2 })))).toMatchObject({ action: "retain", reason: "not_newer" });
+    expect(decideRelease(3, answered(release({ generation: 4 })))).toMatchObject({ action: "update" });
+  });
+
+  it("unavailable, unreachable and refused answers retain; only a revoked host is terminal", () => {
+    expect(decideRelease(null, answered({ ok: false, refusal: "release_unavailable" }, 503))).toMatchObject({ reason: "release_unavailable" });
+    expect(decideRelease(null, { kind: "unreachable", detail: "TimeoutError", hostId: "h" })).toMatchObject({ reason: "read_unreachable" });
+    expect(decideRelease(null, answered({ ok: false, refusal: "host_revoked", terminal: true }, 401))).toEqual({ action: "retain", reason: "credential_refused", terminal: true });
+    expect(decideRelease(null, answered({ ok: false, refusal: "credential_retired", terminal: false }, 401))).toMatchObject({ terminal: false });
+    expect(decideRelease(null, { kind: "no_credential" })).toMatchObject({ reason: "no_credential" });
+  });
+});
+
+describe("rewriteEnvText changes only the three image lines", () => {
+  it("keeps comments, order and every other value", () => {
+    const text = "# header\nCATALYST_SLOTS=1\nCATALYST_RUNNER_IMAGE=old\nCATALYST_SUPERVISOR_IMAGE=old2\n";
+    expect(rewriteEnvText(text, { CATALYST_RUNNER_IMAGE: "new", CATALYST_SUPERVISOR_IMAGE: "new2", CATALYST_WATCHDOG_IMAGE: "w" }))
+      .toBe("# header\nCATALYST_SLOTS=1\nCATALYST_RUNNER_IMAGE=new\nCATALYST_SUPERVISOR_IMAGE=new2\nCATALYST_WATCHDOG_IMAGE=w\n");
+  });
+});
+
+const ORIGINAL_ENV = [
+  "# setup wrote this",
+  "CATALYST_HOST_FREE_FLOOR_GIB=25",
+  `CATALYST_SUPERVISOR_IMAGE=${ref("supervisor", "a")}`,
+  `CATALYST_WATCHDOG_IMAGE=${ref("watchdog", "b")}`,
+  `CATALYST_RUNNER_IMAGE=${ref("runner", "c")}`,
+  "",
+].join("\n");
+
+function install(env = ORIGINAL_ENV): string {
+  const dir = mkdtempSync(join(tmpdir(), "runner-update-"));
+  writeFileSync(join(dir, ".env"), env, { mode: 0o600 });
+  writeFileSync(join(dir, "compose.yaml"), "name: catalyst-host\n");
+  return dir;
+}
+
+type Images = Record<ReleaseComponent, string>;
+const imagesIn = (text: string): Images => {
+  const get = (key: string) => new RegExp(`^${key}=(.*)$`, "m").exec(text)?.[1] ?? "";
+  return { runner: get("CATALYST_RUNNER_IMAGE"), supervisor: get("CATALYST_SUPERVISOR_IMAGE"), watchdog: get("CATALYST_WATCHDOG_IMAGE") };
+};
+const TARGET: Images = { runner: ref("runner", "1"), supervisor: ref("supervisor", "2"), watchdog: ref("watchdog", "3") };
+const OLD: Images = { runner: ref("runner", "c"), supervisor: ref("supervisor", "a"), watchdog: ref("watchdog", "b") };
+
+interface FakeOptions {
+  read?: DesiredReleaseRead;
+  /** Attempt counts, one per look (the first look, then the look after the supervisor stops). */
+  busy?: (number | null)[];
+  prepare?: string | null;
+  composeUp?: boolean[];
+  /** Whether a supervisor on this image reports host_ready. Default: always. */
+  ready?: (supervisorImage: string) => boolean;
+  /** The authority custody returns for these images. Default: the installed one, unchanged. */
+  custody?: (images: Images) => string | null;
+  /** What is running before the update. Default: what `.env` names. */
+  live?: Images;
+  stop?: boolean;
+}
+/** A machine: what runs is what `.env` named at the last successful compose up. */
+function fakeEngine(dir: string, options: FakeOptions = {}) {
+  const calls: string[] = [];
+  let live: Images = options.live ?? imagesIn(readFileSync(join(dir, ".env"), "utf8"));
+  let stopped = false;
+  let ups = 0;
+  let looks = 0;
+  const engine: RunnerUpdateEngine = {
+    async desiredRelease() { calls.push("read"); return options.read ?? answered(release()); },
+    async attemptContainers(_d, hostId) { calls.push(`attempts:${hostId}`); return options.busy ? (options.busy[looks++] ?? 0) : 0; },
+    async prepare(images) { calls.push(`prepare:${images.length}`); return options.prepare ?? null; },
+    async custody(_d, images) { calls.push(`custody:${images.supervisor}`); return options.custody ? options.custody(images) : "AUTH"; },
+    async services() {
+      return {
+        supervisor: { image: live.supervisor, running: !stopped, startedAtMs: 1 },
+        watchdog: { image: live.watchdog, running: true, startedAtMs: 1 },
+      };
+    },
+    async stopSupervisor() { calls.push("stop"); if (options.stop === false) return false; stopped = true; return true; },
+    async composeUp() {
+      calls.push("up");
+      if (!(options.composeUp?.[ups++] ?? true)) return false;
+      live = imagesIn(readFileSync(join(dir, ".env"), "utf8"));
+      stopped = false;
+      return true;
+    },
+    async supervisorReadySinceStart() { return options.ready ? options.ready(live.supervisor) : true; },
+    async removeImages(images) { calls.push(`rm:${images.join(",")}`); },
+  };
+  return { engine, calls, live: () => live };
+}
+const fastClock = () => {
+  let t = 1_000_000;
+  return { now: () => t, sleep: async (ms: number) => { t += ms; } };
+};
+
+describe("runRunnerUpdate", () => {
+  let dir: string;
+  beforeEach(() => { dir = install(); });
+
+  it("POSITIVE CONTROL: idle machine, newer release → pulls, stops the supervisor, looks again, rewrites three lines, starts, waits for host_ready, records", async () => {
+    const { engine, calls, live } = fakeEngine(dir);
+    const result = await runRunnerUpdate(engine, { dir, ...fastClock() });
+    expect(result).toMatchObject({ outcome: "updated", generation: 1, exitCode: 0 });
+    expect(calls).toEqual(["read", "attempts:host_abc", "prepare:3", "stop", "attempts:host_abc", "up",
+      `rm:${OLD.runner},${OLD.supervisor},${OLD.watchdog}`]);
+    expect(live()).toEqual(TARGET);
+    const env = readFileSync(join(dir, ".env"), "utf8");
+    expect(imagesIn(env)).toEqual(TARGET);
+    expect(env).toContain("CATALYST_HOST_FREE_FLOOR_GIB=25\n");
+    expect(env.startsWith("# setup wrote this\n")).toBe(true);
+    expect(statSync(join(dir, ".env")).mode & 0o777).toBe(0o600);
+    expect(readFileSync(join(dir, PREVIOUS_ENV_FILE), "utf8")).toBe(ORIGINAL_ENV);
+    expect(readReleaseState(dir)).toMatchObject({ generation: 1, previous: OLD, last: { outcome: "updated" } });
+    expect(existsSync(join(dir, "update.lock"))).toBe(false);
+  });
+
+  it("the next run with the same generation changes nothing", async () => {
+    const first = fakeEngine(dir);
+    await runRunnerUpdate(first.engine, { dir, ...fastClock() });
+    const second = fakeEngine(dir);
+    expect(await runRunnerUpdate(second.engine, { dir, ...fastClock() })).toMatchObject({ outcome: "current", generation: 1 });
+    expect(second.calls).toEqual(["read"]);
+  });
+
+  it("a setup run that puts the old images back after an update is moved back to the applied release", async () => {
+    // Seen on a fresh Linux install, 2026-10-17: setup started the machine on its default pins, the
+    // schedule moved it to the approved release, then running setup again wrote the default pins
+    // back into .env and restarted on them while release-state still said that release.
+    await runRunnerUpdate(fakeEngine(dir).engine, { dir, ...fastClock() });
+    expect(readReleaseState(dir).generation).toBe(1);
+    writeFileSync(join(dir, ".env"), ORIGINAL_ENV, { mode: 0o600 });
+    const after = fakeEngine(dir); // now running what .env names: the old images
+    const result = await runRunnerUpdate(after.engine, { dir, ...fastClock() });
+    expect(result).toMatchObject({ outcome: "updated", detail: "updated:runner,supervisor,watchdog", generation: 1 });
+    expect(after.live()).toEqual(TARGET);
+    expect(imagesIn(readFileSync(join(dir, ".env"), "utf8"))).toEqual(TARGET);
+  });
+
+  it("the applied release with .env right but the old supervisor still running is moved too", async () => {
+    await runRunnerUpdate(fakeEngine(dir).engine, { dir, ...fastClock() });
+    const stale = fakeEngine(dir, { live: { ...TARGET, supervisor: OLD.supervisor } });
+    expect(await runRunnerUpdate(stale.engine, { dir, ...fastClock() })).toMatchObject({ generation: 1 });
+    expect(stale.calls).toContain("up");
+    expect(stale.live()).toEqual(TARGET);
+  });
+
+  it("a phase container on this host at the first look defers, and nothing is stopped or written", async () => {
+    const { engine, calls } = fakeEngine(dir, { busy: [1] });
+    expect(await runRunnerUpdate(engine, { dir, ...fastClock() })).toMatchObject({ outcome: "deferred_busy", exitCode: 0 });
+    expect(calls).not.toContain("stop");
+    expect(readFileSync(join(dir, ".env"), "utf8")).toBe(ORIGINAL_ENV);
+    expect(readReleaseState(dir).generation).toBeNull();
+  });
+
+  it("a phase that started while images were pulled: the supervisor comes back on its old images and the update waits", async () => {
+    const { engine, calls, live } = fakeEngine(dir, { busy: [0, 1] });
+    expect(await runRunnerUpdate(engine, { dir, ...fastClock() })).toMatchObject({ outcome: "deferred_busy", detail: "attempt_containers:1" });
+    expect(calls.slice(-3)).toEqual(["stop", "attempts:host_abc", "up"]);
+    expect(live()).toEqual(OLD);
+    expect(readFileSync(join(dir, ".env"), "utf8")).toBe(ORIGINAL_ENV);
+  });
+
+  it("an image that cannot be pulled natively keeps the current images", async () => {
+    const { engine, calls } = fakeEngine(dir, { prepare: "runner_image_emulated" });
+    expect(await runRunnerUpdate(engine, { dir, ...fastClock() })).toMatchObject({ outcome: "retained", detail: "runner_image_emulated" });
+    expect(calls).not.toContain("stop");
+    expect(readFileSync(join(dir, ".env"), "utf8")).toBe(ORIGINAL_ENV);
+  });
+
+  it("a new supervisor that never reports host_ready is rolled back to the previous images", async () => {
+    const { engine, calls, live } = fakeEngine(dir, { ready: (image) => image === OLD.supervisor });
+    const result = await runRunnerUpdate(engine, { dir, ...fastClock(), readyDeadlineMs: 20_000 });
+    expect(result).toMatchObject({ outcome: "rolled_back", exitCode: 1, generation: null });
+    expect(readFileSync(join(dir, ".env"), "utf8")).toBe(ORIGINAL_ENV);
+    expect(calls.filter((c) => c === "up")).toHaveLength(2);
+    expect(live()).toEqual(OLD);
+    // The images it would go back to are kept.
+    expect(calls.some((c) => c.startsWith("rm:"))).toBe(false);
+    // Not recorded as applied, so the next check tries the same release again.
+    expect(readReleaseState(dir)).toMatchObject({ generation: null, last: { outcome: "rolled_back" } });
+  });
+
+  it("a failed compose up is rolled back too", async () => {
+    const { engine } = fakeEngine(dir, { composeUp: [false, true] });
+    expect(await runRunnerUpdate(engine, { dir, ...fastClock() })).toMatchObject({ outcome: "rolled_back" });
+    expect(readFileSync(join(dir, ".env"), "utf8")).toBe(ORIGINAL_ENV);
+  });
+
+  it("a watchdog-only release is applied: the stopped supervisor restarts and reports ready again", async () => {
+    const onlyWatchdog = install(ORIGINAL_ENV.replace(OLD.supervisor, TARGET.supervisor).replace(OLD.runner, TARGET.runner));
+    const { engine, live, calls } = fakeEngine(onlyWatchdog);
+    expect(await runRunnerUpdate(engine, { dir: onlyWatchdog, ...fastClock() })).toMatchObject({ outcome: "updated", detail: "updated:watchdog" });
+    expect(live()).toEqual(TARGET);
+    // Only the replaced image is removed; the runner and supervisor it still runs are untouched.
+    expect(calls.filter((c) => c.startsWith("rm:"))).toEqual([`rm:${OLD.watchdog}`]);
+  });
+
+  it("a machine already running the release, ready, records the generation without restarting anything", async () => {
+    const same = install(ORIGINAL_ENV.replace(OLD.supervisor, TARGET.supervisor).replace(OLD.watchdog, TARGET.watchdog).replace(OLD.runner, TARGET.runner));
+    const { engine, calls } = fakeEngine(same);
+    expect(await runRunnerUpdate(engine, { dir: same, ...fastClock() })).toMatchObject({ outcome: "recorded", generation: 1 });
+    expect(calls).toEqual(["read"]);
+  });
+
+  describe("an earlier run that stopped after writing .env is reconciled, never trusted", () => {
+    const halfApplied = () => {
+      const d = install(ORIGINAL_ENV.replace(OLD.supervisor, TARGET.supervisor).replace(OLD.watchdog, TARGET.watchdog).replace(OLD.runner, TARGET.runner));
+      writeFileSync(join(d, PREVIOUS_ENV_FILE), ORIGINAL_ENV, { mode: 0o600 });
+      return d;
+    };
+
+    it("old containers still running: it starts the release, waits for ready, then records", async () => {
+      const d = halfApplied();
+      const { engine, calls, live } = fakeEngine(d, { live: OLD });
+      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "updated", detail: "reconciled", generation: 1 });
+      expect(calls).toContain("up");
+      expect(live()).toEqual(TARGET);
+    });
+
+    it("the release never becomes ready: it goes back to the file saved before it", async () => {
+      const d = halfApplied();
+      const { engine, live } = fakeEngine(d, { live: OLD, ready: (image) => image === OLD.supervisor });
+      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock(), readyDeadlineMs: 20_000 })).toMatchObject({ outcome: "rolled_back", generation: null });
+      expect(readFileSync(join(d, ".env"), "utf8")).toBe(ORIGINAL_ENV);
+      expect(live()).toEqual(OLD);
+    });
+  });
+
+  it("--check reads and plans, and writes nothing", async () => {
+    const { engine, calls } = fakeEngine(dir);
+    expect(await runRunnerUpdate(engine, { dir, check: true, ...fastClock() })).toMatchObject({ outcome: "planned", detail: "would_update:runner,supervisor,watchdog" });
+    expect(calls).toEqual(["read"]);
+    expect(existsSync(join(dir, RELEASE_STATE_FILE))).toBe(false);
+    expect(readFileSync(join(dir, ".env"), "utf8")).toBe(ORIGINAL_ENV);
+  });
+
+  it("a revoked host retains and asks a person to look", async () => {
+    const { engine } = fakeEngine(dir, { read: answered({ ok: false, refusal: "host_revoked", terminal: true }, 401) });
+    expect(await runRunnerUpdate(engine, { dir, ...fastClock() })).toMatchObject({ outcome: "retained", detail: "credential_refused", exitCode: 1 });
+  });
+
+  describe("the lock", () => {
+    it("a live owner keeps it, however old", async () => {
+      writeFileSync(join(dir, "update.lock"), `${process.pid} 1\n`);
+      const { engine, calls } = fakeEngine(dir);
+      expect(await runRunnerUpdate(engine, { dir, ...fastClock() })).toMatchObject({ outcome: "retained", detail: "update_running" });
+      expect(calls).toEqual([]);
+    });
+
+    it("a dead owner's lock is taken over", async () => {
+      const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+      writeFileSync(join(dir, "update.lock"), `${dead} 1\n`);
+      const { engine } = fakeEngine(dir);
+      expect(await runRunnerUpdate(engine, { dir, ...fastClock() })).toMatchObject({ outcome: "updated" });
+      expect(existsSync(join(dir, "update.lock"))).toBe(false);
+    });
+  });
+
+  describe("Mac private thoughts storage", () => {
+    function custodyInstall(): { dir: string; envAuthority: string } {
+      // A runner directory where setup puts it, so the authority's native home is a real home.
+      const base = mkdtempSync(join(tmpdir(), "custody-"));
+      const d = join(base, "home", ".local", "runner");
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, "compose.yaml"), "name: catalyst-host\n");
+      const authority = {
+        version: 1 as const, installationId: "a".repeat(64),
+        publicKey: generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "der" }).toString("base64"),
+        nativeUid: 501, nativeGid: 20, nativeHome: join(d, "..", ".."), endpoint: "unix:///fixture/docker.sock", daemonId: "fixture-daemon",
+        thoughtsRoot: join(d, "thoughts"), locksRoot: join(d, "locks"),
+        requestsRoot: join(d, "..", "darwin-thoughts-requests"), responsesRoot: join(d, "..", "darwin-thoughts-responses"),
+      };
+      const envAuthority = canonicalDarwinThoughtsJson(authority);
+      writeFileSync(join(d, ".env"), `${ORIGINAL_ENV}CATALYST_THOUGHTS_CUSTODY_AUTHORITY='${envAuthority}'\nCATALYST_THOUGHTS_CUSTODY_REQUESTS_DIR=${authority.requestsRoot}\nCATALYST_THOUGHTS_CUSTODY_RESPONSES_DIR=${authority.responsesRoot}\n`, { mode: 0o600 });
+      return { dir: d, envAuthority };
+    }
+    const custodyCalls = (calls: string[]) => calls.filter((c) => c.startsWith("custody:"));
+
+    it("POSITIVE CONTROL: installed storage is re-attested on the new supervisor before the supervisor stops, and the authority line is kept", async () => {
+      const { dir: d, envAuthority } = custodyInstall();
+      const { engine, calls } = fakeEngine(d, { custody: () => envAuthority });
+      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "updated" });
+      expect(custodyCalls(calls)).toEqual([`custody:${TARGET.supervisor}`]);
+      expect(calls.indexOf(`custody:${TARGET.supervisor}`)).toBeLessThan(calls.indexOf("stop"));
+      expect(readFileSync(join(d, ".env"), "utf8")).toContain(`CATALYST_THOUGHTS_CUSTODY_AUTHORITY='${envAuthority}'`);
+    });
+
+    it.each([["fails", null], ["returns a different authority", "{}"]])("NEGATIVE: when re-attestation %s, storage is attested back on the old supervisor and nothing else changes", async (_label, answer) => {
+      const { dir: d, envAuthority } = custodyInstall();
+      const before = readFileSync(join(d, ".env"), "utf8");
+      const { engine, calls } = fakeEngine(d, { custody: (images) => (images.supervisor === TARGET.supervisor ? answer : envAuthority) });
+      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "retained", detail: "custody_reattest_failed" });
+      expect(custodyCalls(calls)).toEqual([`custody:${TARGET.supervisor}`, `custody:${OLD.supervisor}`]);
+      expect(calls).not.toContain("stop");
+      expect(readFileSync(join(d, ".env"), "utf8")).toBe(before);
+    });
+
+    it("NEGATIVE: if storage cannot be attested back either, the run fails and asks a person to look", async () => {
+      const { dir: d } = custodyInstall();
+      const { engine } = fakeEngine(d, { custody: () => null });
+      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "failed", detail: "custody_restore_failed", exitCode: 1 });
+    });
+
+    it("a rollback attests storage back on the old supervisor too", async () => {
+      const { dir: d, envAuthority } = custodyInstall();
+      const { engine, calls } = fakeEngine(d, { custody: () => envAuthority, ready: (image) => image === OLD.supervisor });
+      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock(), readyDeadlineMs: 20_000 })).toMatchObject({ outcome: "rolled_back" });
+      expect(custodyCalls(calls)).toEqual([`custody:${TARGET.supervisor}`, `custody:${OLD.supervisor}`]);
+    });
+
+    it("a phase that started during preparation also attests storage back", async () => {
+      const { dir: d, envAuthority } = custodyInstall();
+      const { engine, calls } = fakeEngine(d, { custody: () => envAuthority, busy: [0, 1] });
+      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "deferred_busy" });
+      expect(custodyCalls(calls)).toEqual([`custody:${TARGET.supervisor}`, `custody:${OLD.supervisor}`]);
+    });
+
+    it("without custody there is no re-attestation", async () => {
+      const { engine, calls } = fakeEngine(dir);
+      await runRunnerUpdate(engine, { dir, ...fastClock() });
+      expect(custodyCalls(calls)).toEqual([]);
+    });
+  });
+});
+
+describe("the update schedule", () => {
+  const recorder = () => {
+    const calls: string[] = [];
+    const run: SchedulerRun = (cmd, args) => {
+      calls.push([cmd, ...args].join(" "));
+      if (cmd === "launchctl" && args[0] === "print") return { status: 113, stdout: "", stderr: "" };
+      if (cmd === "loginctl") return { status: 0, stdout: "Linger=no\n", stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    };
+    return { calls, run };
+  };
+
+  it("macOS: a LaunchAgent every 15 minutes that runs only this CLI's update, with docker on PATH", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const { calls, run } = recorder();
+    const status = enableAutoUpdate({ platform: "darwin", home, uid: 501, cli: "/opt/homebrew/bin/catalyst", path: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", run }, "/Users/x/.local/state/catalyst/runner");
+    expect(status).toMatchObject({ state: "on" });
+    const plist = readFileSync(launchAgentPath(home), "utf8");
+    expect(plist).toBe(launchAgentPlist({ cli: "/opt/homebrew/bin/catalyst", path: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", home }, "/Users/x/.local/state/catalyst/runner"));
+    expect(plist).toContain("<string>/opt/homebrew/bin/catalyst</string><string>runner</string><string>update</string><string>--auto</string><string>--dir</string>");
+    expect(plist).toContain("<key>StartCalendarInterval</key><array><dict><key>Minute</key><integer>0</integer></dict><dict><key>Minute</key><integer>15</integer></dict><dict><key>Minute</key><integer>30</integer></dict><dict><key>Minute</key><integer>45</integer></dict></array>");
+    expect(plist).not.toContain("StartInterval</key><integer>");
+    expect(plist).toContain("<key>ProcessType</key><string>Standard</string>");
+    expect(calls).toContain(`launchctl bootstrap gui/501 ${launchAgentPath(home)}`);
+    disableAutoUpdate({ platform: "darwin", home, uid: 501, cli: "x", path: "x", run });
+    expect(existsSync(launchAgentPath(home))).toBe(false);
+    expect(calls).toContain("launchctl bootout gui/501/dev.catalystcloud.runner-update");
+  });
+
+  it("Linux: a systemd user timer, and it says when lingering is off", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const { calls, run } = recorder();
+    const status = enableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "/usr/local/bin/catalyst", path: "/usr/local/bin:/usr/bin:/bin", run }, "/home/x/.local/state/catalyst/runner");
+    expect(status).toMatchObject({ state: "on", detail: "timer_enabled_without_linger", linger: false });
+    // It tried to turn lingering on itself, without sudo and without a password prompt.
+    expect(calls).toContain("loginctl --no-ask-password enable-linger");
+    const units = systemdUnits({ cli: "/usr/local/bin/catalyst", path: "/usr/local/bin:/usr/bin:/bin" }, "/home/x/.local/state/catalyst/runner");
+    expect(readFileSync(systemdUnitPaths(home).service, "utf8")).toBe(units.service);
+    expect(units.service).toContain('ExecStart="/usr/local/bin/catalyst" "runner" "update" "--auto" "--dir" "/home/x/.local/state/catalyst/runner"');
+    expect(units.timer).toContain("OnCalendar=*:0/15");
+    // Never a monotonic trigger: it stops firing when the user manager restarts without a reboot.
+    expect(units.timer).not.toMatch(/OnBootSec|OnUnitActiveSec|OnStartupSec/);
+    expect(calls).toContain("systemctl --user enable --now catalyst-runner-update.timer");
+    disableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "x", path: "x", run });
+    expect(existsSync(systemdUnitPaths(home).timer)).toBe(false);
+  });
+
+  it("Linux: setup turns lingering on itself when the machine allows it (CTC-6264)", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const calls: string[] = [];
+    let linger = false;
+    const run: SchedulerRun = (cmd, args) => {
+      calls.push([cmd, ...args].join(" "));
+      if (cmd === "loginctl" && args.includes("enable-linger")) linger = true;
+      if (cmd === "loginctl" && args[0] === "show-user") return { status: 0, stdout: `Linger=${linger ? "yes" : "no"}\n`, stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    };
+    const status = enableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run }, "/d");
+    expect(status).toMatchObject({ state: "on", detail: "timer_enabled", linger: true, lingerTurnedOn: true });
+    expect(calls.filter((c) => c.includes("enable-linger"))).toEqual(["loginctl --no-ask-password enable-linger"]);
+    expect(calls.indexOf("loginctl --no-ask-password enable-linger")).toBeGreaterThan(calls.indexOf("systemctl --user enable --now catalyst-runner-update.timer"));
+  });
+
+  it("Linux: lingering already on is left alone", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const calls: string[] = [];
+    const run: SchedulerRun = (cmd, args) => {
+      calls.push([cmd, ...args].join(" "));
+      return { status: 0, stdout: cmd === "loginctl" ? "Linger=yes\n" : "", stderr: "" };
+    };
+    const status = enableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run }, "/d");
+    expect(status).toMatchObject({ state: "on", linger: true });
+    expect(status).not.toHaveProperty("lingerTurnedOn");
+    expect(calls.some((c) => c.includes("enable-linger"))).toBe(false);
+  });
+
+  it("Linux off reports lingering and leaves it as it is", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const calls: string[] = [];
+    const run: SchedulerRun = (cmd, args) => {
+      calls.push([cmd, ...args].join(" "));
+      return { status: 0, stdout: cmd === "loginctl" ? "Linger=yes\n" : "", stderr: "" };
+    };
+    expect(disableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run })).toMatchObject({ state: "off", detail: "timer_removed", linger: true });
+    expect(calls.some((c) => c.includes("disable-linger") || c.includes("enable-linger"))).toBe(false);
+  });
+
+  it("Linux status reads lingering and never changes it", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const { calls, run } = recorder();
+    enableAutoUpdate({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run }, "/d");
+    calls.length = 0;
+    expect(autoUpdateStatus({ platform: "linux", home, uid: 1000, cli: "c", path: "/bin", run })).toMatchObject({ state: "on", detail: "timer_enabled_without_linger", linger: false });
+    expect(calls).toContain("loginctl show-user 1000 --property=Linger");
+    expect(calls.some((c) => c.includes("enable-linger"))).toBe(false);
+  });
+
+  it("Linux without a user manager is unsupported, and writes nothing", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const run: SchedulerRun = () => ({ status: 1, stdout: "", stderr: "Failed to connect to bus" });
+    expect(enableAutoUpdate({ platform: "linux", home, cli: "c", path: "/bin", run }, "/d")).toMatchObject({ state: "unsupported" });
+    expect(existsSync(systemdUnitPaths(home).timer)).toBe(false);
+  });
+});

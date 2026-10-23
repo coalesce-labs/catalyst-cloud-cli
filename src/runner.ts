@@ -190,7 +190,10 @@ async function confirmUninstall(summary: string[]): Promise<boolean> {
   } finally { prompt.close(); }
 }
 
-export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerLifecycleDeps = {}): Promise<number> {
+/** The actions `cmdRunnerLifecycle` owns; `runner update` and `auto-update` live in runner-command.ts. */
+export const RUNNER_LIFECYCLE_ACTIONS: readonly string[] = ["status", "stop", "start", "uninstall"];
+
+export async function cmdRunnerLifecycle(args: ParsedArgs, ctx: Ctx, deps: RunnerLifecycleDeps = {}): Promise<number> {
   const parts = positionals(args);
   const action = parts[0] ?? "status";
   if (parts.length > 1 || !["status", "stop", "start", "uninstall"].includes(action))

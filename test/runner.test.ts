@@ -148,6 +148,11 @@ describe("runner stop and start", () => {
   it("rejects uninstall flags on stop", async () => {
     expect(await runner("stop", "--yes")).not.toBe(0);
   });
+  it("a bare runner reports status beside runner update and auto-update", async () => {
+    fake.supervisor = "running";
+    expect(await runner("--json")).toBe(0);
+    expect(JSON.parse(ctx.out[0]!)).toMatchObject({ installed: true, state: "running", dir });
+  });
 });
 
 describe("runner uninstall", () => {

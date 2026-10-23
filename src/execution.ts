@@ -356,9 +356,12 @@ export async function cmdQueue(args: ParsedArgs, ctx: Ctx): Promise<number> {
   return 0;
 }
 
-/** The five status words `/api/v1/coding-accounts` reports, in the words a customer reads. */
+/** The status words `/api/v1/coding-accounts` reports, in the words a customer reads. */
 export const ACCOUNT_STATUS: Record<string, string> = {
-  "expired-or-revoked": "expired or revoked — replace its credential on the AI accounts page (Settings → AI accounts → the account → Replace credential) before it can take work",
+  "expired-or-revoked": "credential expired or missing — replace its credential on the AI accounts page (Settings → AI accounts → the account → Replace credential) before it can take work",
+  // CTC-6204: revoked and ended accounts share one history-only end state (Ryan, 2026-10-19).
+  ended: "removed — kept for history, takes no work",
+  "out-of-rotation": "paused — its owner took it out of rotation",
   walled: "walled — the provider's usage limit is spent for now",
   active: "active — observed working",
   attested: "attested — healthy at last check, no work observed since",
@@ -375,6 +378,7 @@ export interface CodingAccount {
   quarantined?: boolean;
   quarantineReason?: string | null;
   renewalStatus?: string | null;
+  revokedAtMs?: number | null;
   email?: string | null;
   displayName?: string;
   bindingWindow?: string | null;
@@ -391,12 +395,19 @@ export function accountDisplayName(a: CodingAccount): string {
   return a.accountSlot ?? "?";
 }
 
+/** CTC-6204: a revoked account, or one whose paid access ended, can never take work again and takes
+ *  no new credential. It is kept for history only. An older cloud still calls a revoked account
+ *  `expired-or-revoked`, so `revokedAtMs` decides as well as the status word. */
+export function historyOnly(a: CodingAccount): boolean {
+  return typeof a.revokedAtMs === "number" || a.status === "ended";
+}
+
 /** One slot as a line a human reads: who it is, what state it is in, and what it is spending on. */
 export function renderAccount(a: CodingAccount): string {
   const display = accountDisplayName(a);
   const name = display === (a.accountSlot ?? "?") ? display : `${display} (${a.accountSlot ?? "?"})`;
   const harness = a.harness ? `/${a.harness}` : "";
-  const status = a.status ? (ACCOUNT_STATUS[a.status] ?? a.status) : "status unknown";
+  const status = historyOnly(a) ? ACCOUNT_STATUS.ended! : a.status ? (ACCOUNT_STATUS[a.status] ?? a.status) : "status unknown";
   const bits = [`${name}  ${a.provider ?? "?"}${harness}  ${status}`];
   // CTC-4199: a cancelled subscription is kept for reporting and not used; never re-credential it (Ryan, 2026-09-29).
   if (a.renewalStatus === "canceled") bits.push("subscription canceled — kept for reporting, not used");
@@ -434,16 +445,27 @@ export async function cmdAccounts(args: ParsedArgs, ctx: Ctx): Promise<number> {
   });
   if (res.status === 404) throw needsNewerCloud("coding-account status", cfg);
   const accounts = Array.isArray(res.body) ? res.body : (res.body?.accounts ?? []);
+  // CTC-6204: removed accounts are history, so they are left out unless --all asks for them. Listed,
+  // they read as accounts to repair, and agents kept trying to revive them.
+  const shown = flagBool(args, "all") ? accounts : accounts.filter((a) => !historyOnly(a));
+  const hidden = accounts.length - shown.length;
   if (args.json) {
-    const named = accounts.map((a) => ({ ...a, displayName: accountDisplayName(a) }));
-    ctx.stdout(JSON.stringify(Array.isArray(res.body) ? named : { ...res.body, accounts: named }));
+    const named = shown.map((a) => ({ ...a, displayName: accountDisplayName(a), removed: historyOnly(a) }));
+    ctx.stdout(JSON.stringify(Array.isArray(res.body) ? named : { ...res.body, accounts: named, removedHidden: hidden }));
     return 0;
   }
+  const addAt = `${normalizeBaseUrl(cfg.baseUrl)}/settings/coding-accounts`;
+  const hiddenLine = `${hidden} removed account${hidden === 1 ? " is" : "s are"} kept for history and take no work; catalyst accounts --all lists ${hidden === 1 ? "it" : "them"}.`;
   if (accounts.length === 0) {
-    ctx.stdout(`No coding accounts are enrolled in this workspace. A workspace owner or admin adds one at ${normalizeBaseUrl(cfg.baseUrl)}/settings/coding-accounts; there is no command for that yet.`);
+    ctx.stdout(`No coding accounts are enrolled in this workspace. A workspace owner or admin adds one at ${addAt}; there is no command for that yet.`);
     return 0;
   }
-  for (const a of accounts) ctx.stdout(renderAccount(a));
+  if (shown.length === 0) {
+    ctx.stdout(`No AI account in this workspace can take work. A workspace owner or admin adds one at ${addAt}. ${hiddenLine}`);
+    return 0;
+  }
+  for (const a of shown) ctx.stdout(renderAccount(a));
+  if (hidden > 0) ctx.stdout(hiddenLine);
   return 0;
 }
 

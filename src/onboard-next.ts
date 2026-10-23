@@ -201,8 +201,6 @@ const REASONS: Record<string, string> = {
     "Setup could not confirm this project's registered repositories and its default repository for capacity. Run catalyst ready to see the project checks, then run catalyst setup again. Starting a ticket checks its own repository's admission.",
   capacity_identity_unverified:
     "Setup could not confirm your workspace and administrator role for the capacity check. Run catalyst login, then run catalyst setup again.",
-  capacity_admission_unverified:
-    "No runner is allowed to take work for this workspace yet. Enroll a self-hosted runner host, or ask Catalyst to enable cloud runners for it. Then run catalyst onboard.",
   capacity_currently_full:
     "Every runner slot for this repository is in use. Run catalyst onboard again after current work finishes.",
   capacity_unavailable:
@@ -246,7 +244,15 @@ const REASONS: Record<string, string> = {
   runner_enrollment_unavailable:
     "Setup could not read this workspace's runner hosts. Run catalyst onboard again to retry.",
   runner_enrolled_for_other_team:
-    "This runner is enrolled for another Linear team. Keep using that team, or ask your administrator to revoke the old enrollment before setting up this machine for the selected team.",
+    "This runner is enrolled for another Linear team, and Catalyst could not add the selected team to it. Keep using that team, or ask your administrator to revoke the old enrollment before setting up this machine for the selected team.",
+  runner_team_not_added:
+    "This runner does not serve the selected Linear team yet. Run catalyst setup --runner to add the team to it.",
+  runner_team_limit:
+    "This runner already serves 16 Linear teams, the most one runner can serve. Set up another machine for the selected team.",
+  runner_team_add_failed:
+    "Setup could not add the selected Linear team to this runner. Run catalyst setup --runner again to retry.",
+  runner_supervisor_outdated:
+    "This runner's supervisor has not reported that it can serve several teams yet. Run docker compose -p catalyst-host logs supervisor to check it is running, then run catalyst setup --runner again.",
   runner_enrollment_revoked:
     "Catalyst confirms that this machine's saved enrollment was revoked. Keep its credential and organization key. Ask your workspace administrator to review the enrollment before replacing it, then run catalyst setup --runner.",
   runner_credential_unverified:
@@ -626,9 +632,16 @@ export function onboardReasonText(
       ? `This setup step is not available on this server yet. Continue in the web app at ${page}, then run catalyst onboard.`
       : "This setup step is not available on this server yet. Run catalyst onboard after the server update.";
   }
+  // CTC-6180: the command that enrolls this computer, named with its team.
+  // The command is its own line (never wrapped), and runnable as printed: with no known team key,
+  // setup asks for the team.
+  if (reason === "capacity_admission_unverified") {
+    const key = onboardTeamKey(context.journal);
+    return `No runner is allowed to take work for this workspace yet. To use Catalyst's cloud runners, ask Catalyst support to turn on cloud runners for your workspace, then run catalyst onboard. To run work on this computer instead, enroll it as a self-hosted runner${key ? "" : " (setup asks for your Linear team)"} with:\ncatalyst onboard --runner${key ? ` --team ${key}` : ""}`;
+  }
   if(reason === "runner_native_egress_setup_required"){
-    const commands=nativeEgressInstallCommands();
-    return "Native Linux needs a root-managed session egress producer before the runner can take work. Its elevated installation creates the isolated session network and private-range and host-isolation nftables rules. Review and authorize this separately; setup has not run it. It requires systemd, python3, Docker and nftables. " + (commands ? "Install the verified bundled artifacts, then run the same setup command:\n"+commands : "Setup could not verify its bundled artifacts. Reinstall the CLI before authorizing installation.");
+    const command=nativeEgressInstallCommands();
+    return "Native Linux needs a root-managed session egress service before this computer can take work. It creates the isolated session network and the nftables rules that keep sessions off private addresses and this machine. It needs systemd, python3, Docker and nftables, and setup has not run it. " + (command ? "Review it, run this one command, then run the same setup command:\n"+command : "Setup could not verify its bundled files. Reinstall the CLI, then run the same setup command.");
   }
   if (reason === "runner_images_unavailable" || reason === "runner_supervisor_image_unavailable") {
     const image = step.evidence?.image;

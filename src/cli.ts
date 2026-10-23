@@ -1,5 +1,5 @@
 import { cmdHosts, type HostsDeps } from "./hosts.js";
-import { cmdRunner, type RunnerLifecycleDeps } from "./runner.js";
+import { cmdRunner, type RunnerCommandDeps } from "./runner-command.js";
 import { cmdSeat } from "./seat.js";
 // cli.ts — the `catalyst` dispatcher (npm: @catalyst-cloud/cli). Verbs live in
 // their own modules; this file keeps every export the 0.1 tests and the bin import.
@@ -209,7 +209,8 @@ export function usageText(): string {
     "  catalyst seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE]",
     "  catalyst hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name>",
     "  catalyst runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts]   (this machine's self-hosted runner)",
-    "  catalyst mcp add|list|remove (vault references only)",
+    "  catalyst runner update [--check] | runner auto-update [status|on|off]   (move this machine's runner to the approved release)",
+    "  catalyst mcp add|list|remove (vault references only) | mcp status <name>   (a server's state, grants and last 50 tool calls)",
     "  catalyst contract [--refresh] [--path <a.b.c>]",
     "  catalyst query <issues|issue <id>|pulls|pull <id>|projects|cycles|search <terms>|changes --since <cursor|head>>",
     '  catalyst replica <start [--detach]|stop|status [--probe]|sql "<select>"|schema [table]>',
@@ -218,10 +219,10 @@ export function usageText(): string {
     "  catalyst explain <ticket> | history <ticket> | running [--ticket T --phase P] | queue [--team K]",
     "  catalyst watch [--team K] [--ticket T]... [--project P] [--exec CMD]",
     "  catalyst write <comment|state|label|create|reaction|attachment|session> ...",
-    "  catalyst ask <raise|accept|list> ...",
+    "  catalyst ask <raise|accept|answer --proxy|proxy [status|on|off]|disown|list> ...",
     "  catalyst release <ticket> --because <what changed> [--retry-unchanged] [--dry-run] | release --class <c> --team <K> ...",
     "  catalyst environment [read] | environment propose --file <path>|--stdin [--approve] | environment approve   (your account; needs login)",
-    "  catalyst env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write]> [--json]   (this repository, offline — no login, no network)",
+    "  catalyst env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (this repository; no login — shell needs Docker and downloads Catalyst's image once)",
     "  catalyst secret set <NAME> --repo <owner/name> [--command '<cmd>'] | secret import <file> --repo <owner/name> [--names NAME[,NAME...]]",
     "  catalyst var set <NAME> | var import <file> [--repo <owner/name>] [--names NAME[,NAME...]]   (plain environment variables)",
     "  catalyst team <list|check|map|adopt|migrate|checklist> ...",
@@ -229,6 +230,8 @@ export function usageText(): string {
     "  catalyst project list [--json]   (all workspace projects, including those with no stage mapping)",
     "  catalyst stage <start|renew|done|fail> <ticket> <phase>   (a cloud-claimed local phase)",
     "  catalyst project wip-limit <get|set <n>|set default> [--team K]   (a project's new-start WIP limit; members read, owners and admins set)",
+    "  catalyst repo pause <owner/name> --reason <text> | repo resume <owner/name> [--reason <text>]   (owner or admin; reason: 1 to 500 trimmed characters)",
+    "  catalyst repo status [--json]   (visible workspace repositories and their paused state; needs login)",
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
     "  catalyst identity linear <status|options|set> [<linearUserId>] [--json]",
@@ -269,7 +272,7 @@ export interface MainDeps {
   var?: VarDeps;
   connections?: ConnectionsDeps;
   hosts?: HostsDeps;
-  runner?: RunnerLifecycleDeps;
+  runner?: RunnerCommandDeps;
   identity?: IdentityDeps;
   team?: TeamDeps;
   legacy?: LegacyDeps;

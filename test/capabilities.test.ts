@@ -5,6 +5,7 @@
 // `cloud_unread` rather than a guess either way.
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { main } from "../src/cli";
+import type { ContractRoute } from "../src/contract-types";
 import { CAPABILITIES, reportCapabilities } from "../src/capabilities";
 import { FLAG_TABLES, VERB_USAGE } from "../src/args";
 import { startMeFixture, type FixtureServer } from "./fixture";
@@ -63,9 +64,11 @@ describe("the table itself", () => {
   test("the team verbs the setup guide relies on are declared admin, and reads are member", () => {
     const needs = Object.fromEntries(CAPABILITIES.map((c) => [c.verb, c.needs]));
     expect(needs["team check"]).toBe("admin");
+    expect(needs["env import"]).toBe("admin");
     expect(needs["team map"]).toBe("admin");
     expect(needs["team adopt"]).toBe("admin");
     expect(needs["team list"]).toBe("member");
+    expect(needs["mcp status"]).toBe("member");
     expect(needs["ready"]).toBe("member");
     expect(needs["environment approve"]).toBe("admin");
     expect(needs["project wip-limit get"]).toBe("member");
@@ -135,5 +138,60 @@ describe("the verb", () => {
     const offline = makeCtx(home, { fetch: (() => Promise.reject(new Error("no network"))) as unknown as typeof fetch });
     expect(await main(["capabilities", "--json"], offline)).toBe(0);
     expect(JSON.parse(offline.out.join("\n")).capabilities.length).toBe(CAPABILITIES.length);
+  });
+});
+
+test("mcp status is an available member read with no agent route dependencies", () => {
+  expect(CAPABILITIES.find((row) => row.verb === "mcp status")).toMatchObject({
+    verb: "mcp status", needs: "member", routes: [], since: "0.16.24",
+  });
+  expect(reportCapabilities(null).find((row) => row.verb === "mcp status")?.availability).toBe("available");
+});
+
+describe("repository lifecycle discovery", () => {
+  const repoRoutes: ContractRoute[] = [
+    { method: "GET", path: "/api/v1/agent/repos", takesWriteBudgetUnit: false, since: "1.0.0" },
+    { method: "POST", path: "/api/v1/agent/repos/pause", takesWriteBudgetUnit: true, since: "1.0.0" },
+    { method: "POST", path: "/api/v1/agent/repos/resume", takesWriteBudgetUnit: true, since: "1.0.0" },
+  ];
+  test("declares exact descriptions, roles and agent routes", () => {
+    expect(CAPABILITIES.find((row) => row.verb === "repo status")).toMatchObject({
+      does: "list visible repositories with their state, pause details and projects", needs: "member",
+      routes: [{ method: "GET", path: "/api/v1/agent/repos" }],
+    });
+    expect(CAPABILITIES.find((row) => row.verb === "repo pause|resume")).toMatchObject({
+      does: "pause or resume a repository as a workspace owner or admin", needs: "admin",
+      routes: repoRoutes.map(({ method, path }) => ({ method, path })),
+    });
+  });
+  test("both rows name 0.16.26, the first release that carries them, not 0.16.24 or 0.16.25", () => {
+    const report = reportCapabilities(repoRoutes);
+    for (const verb of ["repo status", "repo pause|resume"]) {
+      expect(CAPABILITIES.find((row) => row.verb === verb)?.since).toBe("0.16.26");
+      expect(report.find((row) => row.verb === verb)?.since).toBe("0.16.26");
+    }
+  });
+  test("all exact routes make both rows available", () => {
+    const report = reportCapabilities(repoRoutes);
+    for (const verb of ["repo status", "repo pause|resume"]) {
+      expect(report.find((row) => row.verb === verb)).toMatchObject({ availability: "available", missing: [] });
+    }
+  });
+  test.each(repoRoutes)("missing $method $path names that exact dependency", (absent) => {
+    const report = reportCapabilities(repoRoutes.filter((route) => route.path !== absent.path));
+    expect(report.find((row) => row.verb === "repo pause|resume")).toMatchObject({
+      availability: "needs_newer_cloud", missing: [{ method: absent.method, path: absent.path }],
+    });
+    expect(report.find((row) => row.verb === "repo status")?.availability).toBe(absent.method === "GET" ? "needs_newer_cloud" : "available");
+  });
+  test("no cached contract reports cloud_unread and makes no network requests", async () => {
+    let requests = 0;
+    const offline = makeCtx(home, { fetch: async () => { requests++; throw new Error("unexpected network call"); } });
+    expect(await main(["capabilities", "--json"], offline)).toBe(0);
+    const report: Report = JSON.parse(offline.out.join("\n"));
+    for (const verb of ["repo status", "repo pause|resume"]) {
+      expect(report.capabilities.find((row) => row.verb === verb)).toMatchObject({ availability: "cloud_unread", missing: [] });
+    }
+    expect(requests).toBe(0);
   });
 });

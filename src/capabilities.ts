@@ -41,8 +41,9 @@ const agent = (method: "GET" | "POST", name: string) => ({ method, path: `/api/v
 export const CAPABILITIES: readonly Capability[] = [
   {verb:"hosts",does:"list this account's machines, current use and live capacity",needs:"member",routes:[],since:"0.16.0"},
   {verb:"hosts remove|rename",does:"remove or rename a self-hosted machine in this account",needs:"admin",routes:[],since:"0.16.0"},
-  {verb:"runner status|stop|start",does:"stop this machine's self-hosted runner taking work, or start it again with the same registration",needs:"member",routes:[],since:"0.16.16"},
-  {verb:"runner uninstall",does:"remove this machine's self-hosted runner and revoke its registration and runner key",needs:"admin",routes:[],since:"0.16.16"},
+  {verb:"runner update|auto-update",does:"move this machine's self-hosted runner to the release Catalyst approved, and check for one every 15 minutes",needs:"member",routes:[],since:"0.16.16"},
+  {verb:"runner status|stop|start",does:"stop this machine's self-hosted runner taking work, or start it again with the same registration",needs:"member",routes:[],since:"0.16.26"},
+  {verb:"runner uninstall",does:"remove this machine's self-hosted runner and revoke its registration and runner key",needs:"admin",routes:[],since:"0.16.26"},
   // CTC-4680: plain `catalyst setup` runs the onboard flow, so install.sh may hand off to it. install.sh
   // reads this flag rather than `setup --help`, which already exits 0 on 0.15.x.
   { verb: "setup", does: "set up Catalyst step by step, or show install.sh's plan, progress and sign-in in this terminal", needs: "member", routes: [], since: "0.15.0", engineProtocol: 1, bootstrapHandoff: true, bootstrapHandoffVersion: 2 },
@@ -63,20 +64,28 @@ export const CAPABILITIES: readonly Capability[] = [
   { verb: "team checklist", does: "print what adopting the workflow would do to a team", needs: "admin", routes: [agent("GET", "team-workflow")], since: "0.9.5" },
   { verb: "project wip-limit get", does: "read a project's new-start WIP limit, where it comes from, and its work in progress now", needs: "member", routes: [agent("GET", "team-wip-limit")], since: "0.13.1" },
   { verb: "project wip-limit set", does: "set a project's new-start WIP limit (0 to 9999, or back to the workspace default)", needs: "admin", routes: [agent("POST", "team-wip-limit")], since: "0.13.1" },
+  { verb: "repo status", does: "list visible repositories with their state, pause details and projects", needs: "member", routes: [agent("GET", "repos")], since: "0.16.26" },
+  { verb: "repo pause|resume", does: "pause or resume a repository as a workspace owner or admin", needs: "admin", routes: [agent("GET", "repos"), agent("POST", "repos/pause"), agent("POST", "repos/resume")], since: "0.16.26" },
   { verb: "repo agents-block", does: "add or refresh the one Catalyst block in a checkout's AGENTS.md, in the working tree, for the person to commit and open as a pull request", needs: "member", routes: [], since: "0.13.1" },
   { verb: "repo agent-setup", does: "read a checkout's agent setup (AGENTS.md, CLAUDE.md, .agents and .claude skills and rules) and, on request, make it portable in the working tree", needs: "member", routes: [], since: "0.13.1" },
+  { verb: "env shell", does: "open this repository's environment on this computer: Catalyst's image, the declared toolchain and variables (needs Docker; no login for Catalyst's image)", needs: "member", routes: [], since: "0.16.20" },
   { verb: "legacy", does: "find leftovers of the old local Catalyst runtime on this machine and, on a yes, remove them through their own tools", needs: "member", routes: [], since: "0.13.1" },
   { verb: "environment read", does: "read the workspace-wide environment declaration", needs: "member", routes: [agent("GET", "account-environment")], since: "0.8.0" },
   { verb: "environment propose", does: "propose the workspace-wide environment declaration (names only)", needs: "admin", routes: [agent("POST", "account-environment/propose")], since: "0.8.0" },
   { verb: "environment approve", does: "approve the workspace-wide environment declaration", needs: "admin", routes: [agent("POST", "account-environment/approve")], since: "0.8.0" },
   { verb: "secret set|import", does: "enter a repository secret's value from this terminal, never echoed", needs: "admin", routes: [], since: "0.8.0" },
   { verb: "var set|import", does: "enter plain environment variable values from this terminal, never echoed", needs: "admin", routes: [], since: "0.13.2" },
+  { verb: "env import", does: "store this computer's values for the names .catalyst/catalyst.toml declares, never printed", needs: "admin", routes: [], since: "0.16.20" },
   { verb: "accounts", does: "read the workspace's coding accounts and which can take work", needs: "member", routes: [], since: "0.5.0" },
   { verb: "explain|running|queue|history", does: "read why a ticket runs or waits, what runs now, and what is queued", needs: "member", routes: [], since: "0.1.0" },
   { verb: "write comment|state|label|create|reaction|attachment|session", does: "act on a ticket as the person, through the agent proxy", needs: "member", routes: [agent("POST", "issue-comment"), agent("POST", "issue-state"), agent("POST", "issue-label"), agent("POST", "issue-create")], since: "0.1.0" },
   { verb: "ask raise|accept|list", does: "raise a decision to a human, or answer one", needs: "member", routes: [agent("POST", "ask"), agent("POST", "ask-accept")], since: "0.1.0" },
+  { verb: "ask answer --proxy", does: "record an answer the ask's owner gave in chat, quoted exactly, when the owner has turned answers by proxy on", needs: "member", routes: [agent("POST", "ask-answer-proxy")], since: "0.16.23" },
+  { verb: "ask proxy status|on|off", does: "read or set whether agents may record an answer you give them in chat (your own login only)", needs: "member", routes: [], since: "0.16.23" },
+  { verb: "ask disown", does: "take back an answer recorded by proxy on your ask, reopening it (your own login only)", needs: "member", routes: [], since: "0.16.23" },
   { verb: "release", does: "release a parked ticket or a whole failure class back to work", needs: "admin", routes: [agent("POST", "ticket-release"), agent("POST", "ticket-release-class")], since: "0.6.0" },
   { verb: "mcp add|list|remove", does: "register an MCP server for the workspace by vault-secret name", needs: "admin", routes: [agent("POST", "mcp")], since: "0.9.0" },
+  { verb: "mcp status", does: "read an MCP server's state, auth kind, grants for this key, tool count and its last 50 tool calls with each failure's reason", needs: "member", routes: [], since: "0.16.24" },
 ];
 
 export type CapabilityAvailability = "available" | "needs_newer_cloud" | "cloud_unread";

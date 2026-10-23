@@ -337,7 +337,17 @@ export interface ReplicaDeps {
   random?: () => number;
   /** Test-only tuning of the supervisor; production uses the module constants below. */
   snapshotRetry?: { baseBackoffMs?: number; maxBackoffMs?: number; maxFailures?: number; liveStableMs?: number };
+  /** Test-only: the SDK's snapshot no-progress bound; production uses SNAPSHOT_IDLE_TIMEOUT_MS. */
+  snapshotIdleTimeoutMs?: number;
+  /** Test-only: the SDK `start` builds its replica from, so a test can read the options it passes. */
+  loadSdk?: () => Promise<Sdk>;
 }
+
+/** How long a snapshot pull may go with no progress before the SDK aborts it (CTC-6569). The mirror
+ *  can spend up to 120 s preparing a large workspace's snapshot before its first byte, and the SDK's
+ *  old 30 s default aborted nearly every such pull, so the replica never synced. host-sync and the web
+ *  app pass the same 150 s. Still an idle bound: it re-arms on every chunk. */
+export const SNAPSHOT_IDLE_TIMEOUT_MS = 150_000;
 
 export const SNAPSHOT_BASE_BACKOFF_MS = 30_000;
 export const SNAPSHOT_MAX_BACKOFF_MS = 900_000; // 15 minutes
@@ -449,7 +459,7 @@ async function cmdStart(args: ParsedArgs, ctx: Ctx, cfg: CustomerConfig, dbPath:
     ctx.stdout(`replica writer started in the background (pid ${pid}, db ${dbPath}); check with: catalyst replica status`);
     return 0;
   }
-  const sdk = await loadSdk();
+  const sdk = await (deps.loadSdk ?? loadSdk)();
 
   const sleep = deps.sleep ?? defaultSleep;
   const random = deps.random ?? Math.random;
@@ -503,6 +513,7 @@ async function cmdStart(args: ParsedArgs, ctx: Ctx, cfg: CustomerConfig, dbPath:
       engine,
       fetchImpl: ctx.fetch,
       wsFactory: deps.wsFactory,
+      snapshotIdleTimeoutMs: deps.snapshotIdleTimeoutMs ?? SNAPSHOT_IDLE_TIMEOUT_MS,
       log: (level, msg, extra) => ctx.stderr(`[replica ${level}] ${msg}${extra ? ` ${safeJson(extra)}` : ""}`),
       onStatus: (s) => {
         ctx.stderr(`[replica] status=${s}`);

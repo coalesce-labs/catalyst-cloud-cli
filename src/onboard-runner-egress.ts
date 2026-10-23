@@ -44,10 +44,18 @@ export async function nativeEgressReady(now:number,signal?:AbortSignal,io:Egress
  }catch{return false;}
 }
 
-/** Exact bundled bytes are checked before showing the separate, elevated install commands. */
+export const EGRESS_INSTALLER={name:'install-session-egress.sh',digest:'b187180a9e5965ebe5e356a5c133ff2ec715fb294197cd636f8ff1301dc49ff0'} as const;
+const quote=(s:string)=>"'"+s.replaceAll("'","'\\''")+"'";
+/** CTC-6180: root copies the installer into its own temp file, checks the pinned digest there and
+ * runs only those bytes, so an edit to the user-writable CLI install cannot run as root. */
+export function egressInstallCommand(vendor:string,digest:string=EGRESS_INSTALLER.digest,sudo='sudo '):string{
+ const script=`t=$(mktemp) && cp -- ${quote(join(vendor,EGRESS_INSTALLER.name))} "$t" && echo ${quote(digest+'  ')}"$t" | sha256sum -c --quiet - && sh "$t" ${quote(vendor)}; s=$?; rm -f "$t"; exit $s`;
+ return `${sudo}sh -c ${quote(script)}`;
+}
+
+/** Exact bundled bytes are checked before showing the one elevated install command (CTC-6180). */
 export function nativeEgressInstallCommands():string|null{
- const root=join(packageRoot(),'vendor/self-host/linux-session-egress');
- try{for(const artifact of EGRESS_ARTIFACTS)if(hash(readFileSync(join(root,artifact.name)))!==artifact.digest)return null;}catch{return null;}
- const quote=(s:string)=>"'"+s.replaceAll("'","'\\''")+"'";
- return EGRESS_ARTIFACTS.map(a=>`sudo install ${a.name==='session-egress.py'?'-D ':''}-o root -g root -m ${a.mode.toString(8)} ${quote(join(root,a.name))} ${quote(a.path)}`).join('\n')+'\nsudo systemctl daemon-reload\nsudo systemctl enable --now catalyst-session-egress.service catalyst-session-egress-attest.timer\nsudo /usr/bin/python3 /usr/lib/catalyst/session-egress.py attest';
+ const vendor=join(packageRoot(),'vendor'),root=join(vendor,'self-host/linux-session-egress');
+ try{if(hash(readFileSync(join(vendor,EGRESS_INSTALLER.name)))!==EGRESS_INSTALLER.digest)return null;for(const artifact of EGRESS_ARTIFACTS)if(hash(readFileSync(join(root,artifact.name)))!==artifact.digest)return null;}catch{return null;}
+ return egressInstallCommand(vendor);
 }
