@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.26
+
+A large workspace's local replica now finishes its first download instead of stopping after 30 seconds: it waits as long as data keeps arriving, and gives up only after 150 seconds with no progress. New commands: `catalyst repo status` lists your repositories and whether each is paused, and `catalyst repo pause|resume` pauses or resumes one (owners and admins). `catalyst runner status|stop|start|uninstall` stops a self-hosted machine taking work, starts it again with the same registration, or removes it and revokes its registration. Setup with local sync off now lists an old local replica's files with their sizes and removes them only after you say yes. Setup with local sync on keeps using the replica you already have. On a Mac where Docker Desktop does not share your home folder, setup now says which setting to change (Settings, then Resources, then File sharing).
+
 ## 0.16.25
 
 A self-hosted machine that runs several teams' work from one `compose.json` can now take each approved release by itself. Run `catalyst runner update --fleet --dir <the folder that holds compose.json>`, by hand or on a schedule. It switches only the supervisor to the approved images and leaves work that is already running alone. If the machine's teams are not ready again within four minutes, it puts the previous images back. `--check` shows what would change without changing anything.
