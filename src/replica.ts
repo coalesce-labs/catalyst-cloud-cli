@@ -154,6 +154,19 @@ export function pendingRestartPathFor(home: string): string {
   return join(configDirFor(home), "replica-restart.json");
 }
 
+/** The restart a release check began for `dbPath` and has not confirmed, with the CLI version it
+ *  expects the new writer to run when the record names one. */
+export function pendingRestart(home: string, dbPath: string): { dbPath: string; target: string | null } | null {
+  try {
+    const raw: unknown = JSON.parse(readFileSync(pendingRestartPathFor(home), "utf8"));
+    if (typeof raw !== "object" || raw === null || (raw as { dbPath?: unknown }).dbPath !== dbPath) return null;
+    const target = (raw as { target?: unknown }).target;
+    return { dbPath, target: typeof target === "string" ? target : null };
+  } catch {
+    return null;
+  }
+}
+
 export function pidAlive(pid: number | null): boolean {
   if (pid === null || !Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -458,7 +471,16 @@ async function cmdStatus(args: ParsedArgs, ctx: Ctx): Promise<number> {
       status.lag = status.cursor === null ? head.body.cursor : head.body.cursor - status.cursor;
     }
   }
-  ctx.stdout(args.json ? JSON.stringify(status) : statusLine(status));
+  const restart = status.dbPath !== null && !writerIsRunning(status) ? pendingRestart(ctx.home, status.dbPath) : null;
+  if (args.json) ctx.stdout(JSON.stringify(restart ? { ...status, pendingRestart: restart } : status));
+  else {
+    ctx.stdout(statusLine(status));
+    // CTC-6743: a writer a release check stopped and restarted is down for that reason, not its owner's.
+    if (restart)
+      ctx.stdout(
+        `  a release check restarted it${restart.target ? ` on CLI ${restart.target}` : ""} and the new writer is not running; its synced data is kept at ${status.dbPath}, and the next release check starts it again`,
+      );
+  }
   return status.exitCode;
 }
 
@@ -496,7 +518,9 @@ async function cmdStart(args: ParsedArgs, ctx: Ctx, cfg: CustomerConfig, dbPath:
   const takeOwnershipOfRecord = (): void => {
     if (recordOwned) return;
     recordOwned = true;
-    clearWriterState(dbPath);
+    // CTC-6743: a fresh, healthy record rather than none, so a release check can read the CLI
+    // version this writer runs without waiting for a failed pull to write one.
+    writeWriterState(dbPath, { pid: process.pid, consecutiveFailures: 0, lastError: null, lastFailureAt: null, stopped: null }, ctx.now().getTime());
   };
   const resetFailures = (): void => {
     if (failures === 0) return;
@@ -528,6 +552,10 @@ async function cmdStart(args: ParsedArgs, ctx: Ctx, cfg: CustomerConfig, dbPath:
       log: (level, msg, extra) => ctx.stderr(`[replica ${level}] ${msg}${extra ? ` ${safeJson(extra)}` : ""}`),
       onStatus: (s) => {
         ctx.stderr(`[replica] status=${s}`);
+        // CTC-6743: a status means start() already holds the writer lock, so this run owns the
+        // record. Taking it here, not after a long first seed, means a release check never reads a
+        // seeding writer as one with no version and restarts it every interval.
+        if (s === "resyncing" || s === "connecting") takeOwnershipOfRecord();
         // A "live" that does NOT follow a re-seed is just the socket coming up — the warm failing
         // loop passes through it every cycle, so it must not reset the count (CTC-2499).
         if (s === "resyncing") {

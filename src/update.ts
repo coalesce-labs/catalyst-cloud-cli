@@ -276,10 +276,11 @@ function componentRows(inventory: Inventory, policy: UpdatePolicy, release: Appr
     if (found.state === "not_installed") return finish(replica, { installed: null, approved: cliTarget, status: "not_installed", reason: "not_installed", action: null });
     if (found.state === "unknown") return finish(replica, { installed: null, approved: cliTarget, status: "unknown", reason: found.reason, action: null });
     if (found.state === "stopped") return finish(replica, { installed: null, approved: cliTarget, status: "stopped", reason: "stopped", action: null });
-    if (found.version === null) return finish(replica, { installed: null, approved: cliTarget, status: "unknown", reason: "running_version_unrecorded", action: null });
     if (cliTarget === null) return finish(replica, { installed: found.version, approved: null, status: "approval_unavailable", reason: unavailable, action: null });
     if (crossTrain) return finish(replica, { installed: found.version, approved: cliTarget, status: "cross_train", reason: "cross_train", action: null });
-    const order = compareVersions(found.version, cliTarget);
+    // CTC-6743: a running writer that recorded no version started on a CLI from before writers
+    // recorded one, so it is older than any approved CLI and restarts like any other old writer.
+    const order = found.version === null ? -1 : compareVersions(found.version, cliTarget);
     const base = { installed: found.version, approved: cliTarget, action: null };
     if (order === 0) return finish(replica, { ...base, status: "current", reason: "current" });
     if (order > 0) return finish(replica, { ...base, status: "installed_newer", reason: "installed_newer" });

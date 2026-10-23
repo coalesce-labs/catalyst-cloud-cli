@@ -146,6 +146,16 @@ describe("one applying release check moves the CLI, the Cloud pack and then the 
     expect(lines.find((l) => l.startsWith("Local replica"))).toContain("updated");
   });
 
+  it("a running writer that recorded no version is older than any approved CLI, so it is restarted with the move", async () => {
+    const { home, ctx, options, replicaCalls } = hostCase();
+    signIn(home);
+    await seedReplica(home, { heartbeatAgeMs: 0 });
+    seedWriterState(home, {});
+    const report = await runUpdate(ctx, options("apply"));
+    expect(report.components.find((c) => c.id === "replica")).toMatchObject({ status: "updated", installed: NEXT, reason: "restarted" });
+    expect(replicaCalls).toEqual([NEXT]);
+  });
+
   it("a failed CLI move fails the run and leaves the replica on its code, waiting", async () => {
     const { home, ctx, options, replicaCalls } = hostCase();
     signIn(home);
