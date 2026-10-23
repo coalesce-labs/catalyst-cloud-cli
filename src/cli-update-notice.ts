@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { configDirFor, publishedCachePathFor, type Ctx } from "./config.js";
-import { latestPublishedVersion } from "./published.js";
+import { newestCliVersion } from "./published.js";
 import { semverOlder } from "./semver.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -81,15 +81,18 @@ export async function maybePrintPublishedUpdateNotice(
       rmSync(temporary, { force: true });
     }
     // Record the attempt before the bounded lookup, including failures, so offline commands do
-    // not repeatedly contact npm. Reuse ready's anonymous request and version cache.
-    const reply = await latestPublishedVersion(ctx);
+    // not repeatedly contact npm. Reuse ready's anonymous request and version cache. Once this
+    // install has read an approved release, that is the version named (CTC-6708).
+    const reply = await newestCliVersion(ctx);
     if (
       reply.latest &&
       RELEASE.test(reply.latest) &&
       semverOlder(options.version, reply.latest)
     ) {
       ctx.stderr(
-        `Catalyst ${reply.latest} is out. Update with: npm install -g @catalyst-cloud/cli@latest`,
+        reply.source === "approved"
+          ? `Catalyst ${reply.latest} is approved for this workspace. Update with: catalyst update`
+          : `Catalyst ${reply.latest} is out. Update with: npm install -g @catalyst-cloud/cli@latest`,
       );
     }
   } catch {
