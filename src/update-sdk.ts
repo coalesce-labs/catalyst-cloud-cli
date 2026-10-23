@@ -15,7 +15,7 @@
 // the SDK and its replica modules may sit on different patches of one train.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { configDirFor } from "./config.js";
 import { compareVersions, exactVersion, type ApprovedRelease, type ReleaseMember } from "./approved-release.js";
@@ -200,21 +200,31 @@ export interface SdkApplyResult {
   project: SdkProject;
 }
 
-/** The package files a manager rewrites: the manifest and every lockfile present. */
-function packageFiles(dir: string): string[] {
-  return ["package.json", ...Object.values(LOCKFILES).flat()].filter((f) => existsSync(join(dir, f)));
-}
+/** The package files a manager writes: the manifest and every lockfile name it may create. */
+const PACKAGE_FILES = ["package.json", ...Object.values(LOCKFILES).flat()];
+
+/** Longer than the package manager's own timeout, so a live run's lock is never taken over. */
+const SDK_LOCK_STALE_MS = 15 * 60_000;
 
 function takeProjectLock(home: string, dir: string): string | null {
   const locks = join(configDirFor(home), "sdk-update-locks");
   mkdirSync(locks, { recursive: true, mode: 0o700 });
   const path = join(locks, `${createHash("sha256").update(dir).digest("hex").slice(0, 32)}.lock`);
-  try {
-    closeSync(openSync(path, "wx", 0o600));
-    return path;
-  } catch {
-    return null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      closeSync(openSync(path, "wx", 0o600));
+      return path;
+    } catch {
+      // A run killed mid-install leaves its lock behind; past the stale age it is taken over.
+      try {
+        if (Date.now() - statSync(path).mtimeMs <= SDK_LOCK_STALE_MS) return null;
+        unlinkSync(path);
+      } catch {
+        // gone already: try again
+      }
+    }
   }
+  return null;
 }
 
 /** Move one project's declared SDK packages to their approved versions with its own manager. */
@@ -227,13 +237,16 @@ export function applySdkUpdate(home: string, dir: string, release: ApprovedRelea
   const lock = takeProjectLock(home, dir);
   if (lock === null) return { outcome: "refused", detail: "update_running", moved: [], project };
   try {
-    const kept = new Map(packageFiles(dir).map((f) => [f, readFileSync(join(dir, f))]));
+    // Each package file's bytes before the run, or null for one that did not exist yet.
+    const kept = new Map(PACKAGE_FILES.map((f) => [f, existsSync(join(dir, f)) ? readFileSync(join(dir, f)) : null]));
     const failed = (detail: string): SdkApplyResult => {
-      // Put back only files that still differ from what this run kept; nothing else is touched.
+      // Put back what this run changed: earlier bytes for a file it rewrote, removal for one it created.
       for (const [file, bytes] of kept) {
         const path = join(dir, file);
         const now = existsSync(path) ? readFileSync(path) : null;
-        if (now === null || !now.equals(bytes)) writeFileSync(path, bytes);
+        if (bytes === null) {
+          if (now !== null) rmSync(path, { force: true });
+        } else if (now === null || !now.equals(bytes)) writeFileSync(path, bytes);
       }
       return { outcome: "failed", detail, moved: [], project: inspectSdkProject(dir, release) };
     };

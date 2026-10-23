@@ -1,7 +1,8 @@
 // update-command.test.ts — `catalyst update` and `catalyst update policy` through the real
 // dispatcher (CTC-6708), plus `catalyst runner update --check` listing every component, with the
 // image engine injected so output and exit codes are checked without Docker.
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { main } from "../src/cli";
 import { readUpdatePolicy, updatePolicyPathFor } from "../src/update-policy";
@@ -127,3 +128,30 @@ describe("catalyst update sdk --project", () => {
     expect(ctx.out[0]).toMatch(/^Automatic SDK updates are on for .+\. Release checks may update its package files\.$/);
   });
 });
+
+describe("runner update honours the owner's image holds (review fixes)", () => {
+  it("the scheduled --auto run keeps the images while one is held, and never reads the release", async () => {
+    const home = tempHome();
+    expect(await main(["update", "policy", "supervisor", "off"], makeCtx(home))).toBe(0);
+    const engine = countingEngine(answered(hostRelease({ components: approved() })));
+    const ctx = makeCtx(home, { now: () => new Date("2026-10-23T15:00:00.000Z") });
+    expect(await main(["runner", "update", "--auto", "--dir", runnerInstall()], ctx, { runner: { engine } })).toBe(0);
+    expect(ctx.out).toEqual(["2026-10-23T15:00:00.000Z retained owner_setting generation=88"]);
+    expect(engine.calls).toEqual({});
+  });
+
+  it("unreadable settings keep the images and exit 1; runner update --check still prints its image result", async () => {
+    const home = tempHome();
+    mkdirSync(join(home, ".config", "catalyst-cloud"), { recursive: true });
+    writeFileSync(join(home, ".config", "catalyst-cloud", "updates.json"), "{");
+    const engine = countingEngine(answered(hostRelease({ components: approved() })));
+    const apply = makeCtx(home);
+    expect(await main(["runner", "update", "--dir", runnerInstall()], apply, { runner: { engine } })).toBe(1);
+    expect(apply.out[1]).toContain("update_policy_unreadable");
+    const check = makeCtx(home);
+    expect(await main(["runner", "update", "--check", "--dir", runnerInstall()], check, { runner: { engine } })).toBe(0);
+    expect(check.out[0]).toBe("Checked the approved release; nothing was changed.");
+    expect(check.err.join("\n")).toContain("update settings at");
+  });
+});
+

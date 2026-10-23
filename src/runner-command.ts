@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
 import { flagBool, flagString, positionals, type ParsedArgs } from "./args.js";
 import type { Ctx } from "./config.js";
-import { UsageError } from "./errors.js";
+import { CliError, UsageError } from "./errors.js";
 import {
   autoUpdateStatus,
   disableAutoUpdate,
@@ -21,7 +21,7 @@ import {
 } from "./runner-update.js";
 import { dockerFleetUpdateEngine, runFleetUpdate, type FleetUpdateEngine } from "./runner-update-fleet.js";
 import { runUpdate, sharedReleaseRead, updateReportJson, updateReportLines } from "./update.js";
-import { setComponentPolicy } from "./update-policy.js";
+import { effectivePolicy, readUpdatePolicy, setComponentPolicy } from "./update-policy.js";
 import { cmdRunnerLifecycle, RUNNER_LIFECYCLE_ACTIONS, type RunnerLifecycleDeps } from "./runner.js";
 
 // `catalyst runner update [--check] [--auto] [--dir <dir>] [--fleet]` and
@@ -70,6 +70,17 @@ function statusLine(status: AutoUpdateStatus): string {
   return `Automatic runner updates are not available on this machine (${status.detail}). Run catalyst runner update yourself.`;
 }
 
+/** Why this machine's images must not move now: an owner's hold, or settings that cannot be read
+ *  (which never count as "everything on"). Null when every image may move. */
+function imageHold(ctx: Ctx): "owner_setting" | "update_policy_unreadable" | null {
+  try {
+    const policy = readUpdatePolicy(ctx.home);
+    return RELEASE_COMPONENTS.some((id) => !effectivePolicy(policy, id).enabled) ? "owner_setting" : null;
+  } catch {
+    return "update_policy_unreadable";
+  }
+}
+
 /** Setup's call: turn the schedule on for `dir` and say what happened in one line. */
 export function enableRunnerAutoUpdate(ctx: Ctx, dir: string): string {
   return statusLine(enableAutoUpdate(schedulerDeps(ctx, {}), dir));
@@ -96,13 +107,32 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     if (fleet && dirFlag === undefined) throw new UsageError("--fleet needs --dir, the directory that holds compose.json");
     // One desired-release read serves the image check and the component report (CTC-6708).
     const engine = sharedReleaseRead(deps.engine ?? dockerRunnerUpdateEngine({ env: ctx.env }));
+    // An owner's image hold stops this command too, including the 15-minute schedule (CTC-6708).
+    const hold = check ? null : imageHold(ctx);
+    if (hold !== null) {
+      const retained = { outcome: "retained" as const, detail: hold, generation: readReleaseState(dir()).generation, exitCode: hold === "owner_setting" ? 0 : 1 };
+      if (args.json) ctx.stdout(JSON.stringify(retained));
+      else if (auto) ctx.stdout(`${ctx.now().toISOString()} ${retained.outcome} ${retained.detail} generation=${retained.generation ?? "none"}`);
+      else for (const line of updateResultLines(retained)) ctx.stdout(line);
+      return retained.exitCode;
+    }
     const result = fleet
       ? await runFleetUpdate(deps.fleetEngine ?? dockerFleetUpdateEngine({ env: ctx.env }), { dir: dir(), check })
       : await runRunnerUpdate(engine, { dir: dir(), check });
     // `runner update --check` also lists every installed component against the approved release, as
     // `catalyst update --check` does. The image fields stay where scripts already read them.
     if (check && !fleet && !auto) {
-      const report = await runUpdate(ctx, { mode: "check", imagesDir: dir(), engine: () => engine, imageResult: result });
+      let report;
+      try {
+        report = await runUpdate(ctx, { mode: "check", imagesDir: dir(), engine: () => engine, imageResult: result });
+      } catch (err) {
+        // Unreadable update settings cost the component report only; the image result still prints.
+        if (!(err instanceof CliError)) throw err;
+        ctx.stderr(`catalyst: ${err.message}`);
+        if (args.json) ctx.stdout(JSON.stringify(result));
+        else for (const line of updateResultLines(result)) ctx.stdout(line);
+        return result.exitCode;
+      }
       if (args.json) {
         const { schemaVersion, release, components, projects } = updateReportJson(report);
         ctx.stdout(JSON.stringify({ ...result, schemaVersion, release, components, projects }));

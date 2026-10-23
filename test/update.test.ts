@@ -245,3 +245,24 @@ describe("a project's SDK changes only with its owner's say-so", () => {
     expect(report.projects[0]).toMatchObject({ status: "update_available", applied: null });
   });
 });
+
+describe("a runner that cannot read its release (review fix)", () => {
+  it("falls back to the signed-in member route instead of saying to sign in", async () => {
+    const home = tempHome();
+    signIn(home);
+    const fetchImpl = memberFetch(200, { ok: true, release: approved() });
+    const engine = countingEngine({ kind: "no_credential" });
+    const report = await runUpdate(makeCtx(home, { fetch: fetchImpl }), { mode: "check", imagesDir: runnerInstall(), engine: () => engine });
+    expect(fetchImpl.calls).toHaveLength(1);
+    expect(report.release).toMatchObject({ id: "example-89", source: "network" });
+    expect(report.components.find((c) => c.id === "cli")).toMatchObject({ approved: NEXT, status: "update_available" });
+    expect(report.components[0]).toMatchObject({ status: "approval_unavailable" });
+  });
+
+  it("signed out too, it names the runner's read, not sign-in", async () => {
+    const engine = countingEngine({ kind: "no_credential" });
+    const report = await runUpdate(makeCtx(tempHome()), { mode: "check", imagesDir: runnerInstall(), engine: () => engine });
+    expect(updateReportLines(report)[0]).toBe("Approved release unavailable: this machine's runner could not read it; check that Docker is running.");
+  });
+});
+

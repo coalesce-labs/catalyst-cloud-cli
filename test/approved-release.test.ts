@@ -70,7 +70,7 @@ describe("hostApproval: the component record on the host's desired-release answe
   it("refusals and failures are reasons", () => {
     expect(hostApproval(answered({ ok: false }, 401))).toEqual({ kind: "unavailable", reason: "credential_refused" });
     expect(hostApproval({ kind: "unreachable", detail: "x", hostId: "h" })).toEqual({ kind: "unavailable", reason: "unreachable" });
-    expect(hostApproval({ kind: "no_credential" })).toEqual({ kind: "unavailable", reason: "signed_out" });
+    expect(hostApproval({ kind: "no_credential" })).toEqual({ kind: "unavailable", reason: "host_unreadable" });
     expect(hostApproval(answered(hostRelease({ components: { schemaVersion: 1 } })))).toEqual({ kind: "unavailable", reason: "response_invalid" });
   });
 });

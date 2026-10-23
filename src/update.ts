@@ -205,7 +205,12 @@ function componentRows(inventory: Inventory, policy: UpdatePolicy, release: Appr
     const p = effectivePolicy(policy, id);
     return { id, policy: p.enabled ? ("on" as const) : ("off" as const), policySource: p.source, enabled: p.enabled };
   };
-  const finish = ({ enabled: _enabled, ...r }: ReturnType<typeof row>, rest: Omit<ComponentReport, "id" | "policy" | "policySource">): ComponentReport => ({ ...r, ...rest });
+  const finish = (r: ReturnType<typeof row>, rest: Omit<ComponentReport, "id" | "policy" | "policySource">): ComponentReport => ({
+    id: r.id,
+    policy: r.policy,
+    policySource: r.policySource,
+    ...rest,
+  });
 
   const cliTarget = release?.members.cli ?? null;
   const cli = row("cli");
@@ -338,6 +343,12 @@ export async function runUpdate(ctx: Ctx, options: UpdateOptions): Promise<Updat
     const read = await engine.read(options.imagesDir);
     images = imageApproval(read);
     approval = hostApproval(read);
+    // The runner's own read failed (Docker stopped, say): a signed-in CLI can still ask the member
+    // route. Its answer names the components; the images keep the host's verdict.
+    if (approval.kind === "unavailable" && (approval.reason === "host_unreadable" || approval.reason === "unreachable")) {
+      const member = await readMemberApproval(ctx);
+      if (member.kind === "approved" || member.reason !== "signed_out") approval = member;
+    }
   } else {
     approval = await readMemberApproval(ctx);
   }
@@ -418,6 +429,7 @@ const STATUS_TEXT: Record<ComponentStatus, (c: ComponentReport) => string> = {
 
 const UNAVAILABLE_TEXT: Record<ApprovalUnavailable, string> = {
   signed_out: "sign in with catalyst login.",
+  host_unreadable: "this machine's runner could not read it; check that Docker is running.",
   credential_refused: "sign in with catalyst login.",
   unreachable: "the service could not be reached.",
   not_provided: "this workspace does not yet provide component versions.",

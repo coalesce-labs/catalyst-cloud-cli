@@ -1,7 +1,8 @@
 // update-sdk.test.ts — a project's SDK against the approved release (CTC-6708): declared, locked
 // and installed versions read apart, each module at its own approved version, the dependency group
 // kept, ambiguity reported instead of guessed, and not one project byte changed.
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -122,3 +123,35 @@ describe("applySdkUpdate: the owner's explicit update of one project", () => {
     expect(calls).toEqual([]);
   });
 });
+
+describe("applySdkUpdate after an interrupted or failed run (review fixes)", () => {
+  const lockFor = (home: string, dir: string) =>
+    join(home, ".config", "catalyst-cloud", "sdk-update-locks", `${createHash("sha256").update(dir).digest("hex").slice(0, 32)}.lock`);
+
+  it("a live run's lock refuses a second run; a lock left by a killed run is taken over once stale", () => {
+    const home = tempHome();
+    const dir = sdkProject(OLD);
+    const lock = lockFor(home, dir);
+    mkdirSync(join(lock, ".."), { recursive: true });
+    writeFileSync(lock, "");
+    expect(applySdkUpdate(home, dir, release(), fakeNpm([]))).toMatchObject({ outcome: "refused", detail: "update_running" });
+    const old = new Date(Date.now() - 16 * 60_000);
+    utimesSync(lock, old, old);
+    expect(applySdkUpdate(home, dir, release(), fakeNpm([]))).toMatchObject({ outcome: "updated" });
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("a lockfile the failed install created is removed with the rest put back", () => {
+    const dir = sdkProject(OLD, { lockfiles: [] });
+    const manifest = readFileSync(join(dir, "package.json"), "utf8");
+    const creates: SdkExec = (_argv, cwd) => {
+      writeFileSync(join(cwd, "package-lock.json"), "{}");
+      writeFileSync(join(cwd, "package.json"), "{}");
+      return { status: 1, stderr: "npm ERR!" };
+    };
+    expect(applySdkUpdate(tempHome(), dir, release(), creates)).toMatchObject({ outcome: "failed" });
+    expect(existsSync(join(dir, "package-lock.json"))).toBe(false);
+    expect(readFileSync(join(dir, "package.json"), "utf8")).toBe(manifest);
+  });
+});
+

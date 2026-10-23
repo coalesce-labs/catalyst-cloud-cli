@@ -140,6 +140,8 @@ export function parseApprovedRelease(input: unknown): ApprovedParse {
 /** Why no approved record is usable for components. */
 export type ApprovalUnavailable =
   | "signed_out"
+  /** The runner could not run its own read (Docker stopped, a broken installation). */
+  | "host_unreadable"
   | "credential_refused"
   | "unreachable"
   | "not_provided"
@@ -177,7 +179,7 @@ export async function readMemberApproval(ctx: Ctx): Promise<ApprovedRead> {
  *  update used. A legacy answer with images only reads `not_provided`; a record whose generation is
  *  not the image generation reads `envelope_mismatch`, so the two halves never mix snapshots. */
 export function hostApproval(read: DesiredReleaseRead): ApprovedRead {
-  if (read.kind === "no_credential") return { kind: "unavailable", reason: "signed_out" };
+  if (read.kind === "no_credential") return { kind: "unavailable", reason: "host_unreadable" };
   if (read.kind === "unreachable") return { kind: "unavailable", reason: "unreachable" };
   if (read.status === 401 || read.status === 403) return { kind: "unavailable", reason: "credential_refused" };
   // 404 and 503 are the cloud saying it has no approved release to name; anything else failed.
