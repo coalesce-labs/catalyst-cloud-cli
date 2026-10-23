@@ -139,6 +139,8 @@ interface FakeOptions {
   /** What is running before the update. Default: what `.env` names. */
   live?: Images;
   stop?: boolean;
+  /** Images Docker refuses to remove, for example because a running phase still uses them. */
+  inUse?: (image: string) => boolean;
 }
 /** A machine: what runs is what `.env` named at the last successful compose up. */
 function fakeEngine(dir: string, options: FakeOptions = {}) {
@@ -167,7 +169,7 @@ function fakeEngine(dir: string, options: FakeOptions = {}) {
       return true;
     },
     async supervisorReadySinceStart() { return options.ready ? options.ready(live.supervisor) : true; },
-    async removeImages(images) { calls.push(`rm:${images.join(",")}`); },
+    async removeImages(images) { calls.push(`rm:${images.join(",")}`); return images.filter((image) => options.inUse?.(image) ?? false); },
   };
   return { engine, calls, live: () => live };
 }
@@ -444,6 +446,33 @@ describe("an update in place, decided by the supervisor's journal format", () =>
     expect(calls).toEqual(["read", "prepare:3", "stop", "up", `rm:${TARGET.runner},${TARGET.supervisor},${TARGET.watchdog}`]);
     expect(live()).toEqual(NEXT);
     expect(readReleaseState(d).journal).toEqual({ format: 2, supervisor: NEXT.supervisor });
+  });
+
+  it("the runner image under phases left running is kept and removed by a later run once they finish", async () => {
+    const d = await applied(2);
+    const busy = fakeEngine(d, { read: next(2), inUse: (image) => image === TARGET.runner });
+    expect(await runRunnerUpdate(busy.engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "updated", generation: 2 });
+    expect(readReleaseState(d).pendingRemoval).toEqual([TARGET.runner]);
+    // Still running at the next check: kept again.
+    const stillBusy = fakeEngine(d, { read: next(2), inUse: (image) => image === TARGET.runner });
+    expect(await runRunnerUpdate(stillBusy.engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "current" });
+    expect(stillBusy.calls).toEqual([`rm:${TARGET.runner}`, "read"]);
+    expect(readReleaseState(d).pendingRemoval).toEqual([TARGET.runner]);
+    // The phases finished: the next check frees it.
+    const idle = fakeEngine(d, { read: next(2) });
+    expect(await runRunnerUpdate(idle.engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "current" });
+    expect(idle.calls).toEqual([`rm:${TARGET.runner}`, "read"]);
+    expect(readReleaseState(d).pendingRemoval).toEqual([]);
+  });
+
+  it("a pending image that .env names again is never removed and stays pending", async () => {
+    const d = await applied(2);
+    await runRunnerUpdate(fakeEngine(d, { read: next(2), inUse: (image) => image === TARGET.runner }).engine, { dir: d, ...fastClock() });
+    writeFileSync(join(d, ".env"), rewriteEnvText(readFileSync(join(d, ".env"), "utf8"), { CATALYST_RUNNER_IMAGE: TARGET.runner }), { mode: 0o600 });
+    const after = fakeEngine(d, { read: { kind: "unreachable", detail: "TimeoutError", hostId: "host_abc" } });
+    expect(await runRunnerUpdate(after.engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "retained" });
+    expect(after.calls).toEqual(["read"]);
+    expect(readReleaseState(d).pendingRemoval).toEqual([TARGET.runner]);
   });
 
   it.each([

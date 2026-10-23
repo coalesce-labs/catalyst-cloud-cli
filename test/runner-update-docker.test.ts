@@ -144,8 +144,17 @@ describe("services, stop, readiness and cleanup", () => {
 
   it("removeImages removes each replaced image by its digest reference", async () => {
     const { exec, calls } = scripted(() => ({ code: 0, stdout: "" }));
-    await dockerRunnerUpdateEngine({ exec, env: {} }).removeImages([REF, `${REF}x`]);
+    expect(await dockerRunnerUpdateEngine({ exec, env: {} }).removeImages([REF, `${REF}x`])).toEqual([]);
     expect(calls).toEqual([["image", "rm", REF], ["image", "rm", `${REF}x`]]);
+  });
+
+  it("removeImages returns an image Docker refused while it is still present, and not one already gone", async () => {
+    const used = `${REF}used`;
+    const { exec } = scripted((args) => {
+      if (args[1] === "rm") return { code: 1, stdout: "" };
+      return args.includes(used) ? { code: 0, stdout: "sha256:abc\n" } : { code: 1, stdout: "" };
+    });
+    expect(await dockerRunnerUpdateEngine({ exec, env: {} }).removeImages([used, `${REF}gone`])).toEqual([used]);
   });
 
   it("a thrown docker command is a failure, never an exception", async () => {

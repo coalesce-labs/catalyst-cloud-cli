@@ -46,6 +46,7 @@ import {
 export const RELEASE_STATE_FILE = "release-state.json";
 export const PREVIOUS_ENV_FILE = ".env.release-previous";
 const LOCK_FILE = "update.lock";
+const PENDING_REMOVAL_KEPT = 20;
 const READY_DEADLINE_MS = 5 * 60_000;
 const READY_POLL_MS = 5_000;
 const ATTEMPT_HOST_LABEL = "dev.catalystcloud.attempt.host-id";
@@ -161,11 +162,13 @@ export interface ReleaseState {
   previous: Record<ReleaseComponent, string> | null;
   /** The journal format of the supervisor image this machine last applied, when its release named one. */
   journal: { format: number; supervisor: string } | null;
+  /** Replaced images that could not be removed yet; every later run tries again. */
+  pendingRemoval: string[];
   last: { atMs: number; outcome: UpdateOutcome; detail: string; generation: number | null } | null;
 }
 
 export function readReleaseState(dir: string): ReleaseState {
-  const empty: ReleaseState = { version: 1, generation: null, releaseId: null, appliedAtMs: null, previous: null, journal: null, last: null };
+  const empty: ReleaseState = { version: 1, generation: null, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], last: null };
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(dir, RELEASE_STATE_FILE), "utf8"));
     if (!isRecord(parsed) || parsed.version !== 1) return empty;
@@ -178,6 +181,9 @@ export function readReleaseState(dir: string): ReleaseState {
       journal: isRecord(parsed.journal) && posInt(parsed.journal.format) && typeof parsed.journal.supervisor === "string"
         ? { format: parsed.journal.format, supervisor: parsed.journal.supervisor }
         : null,
+      pendingRemoval: Array.isArray(parsed.pendingRemoval)
+        ? parsed.pendingRemoval.filter((ref): ref is string => typeof ref === "string").slice(0, PENDING_REMOVAL_KEPT)
+        : [],
       last: isRecord(parsed.last) ? (parsed.last as ReleaseState["last"]) : null,
     };
   } catch {
@@ -256,8 +262,9 @@ export interface RunnerUpdateEngine {
   composeUp(dir: string, signal?: AbortSignal): Promise<boolean>;
   /** True once the supervisor container has logged `host_ready` since it last started. */
   supervisorReadySinceStart(dir: string, signal?: AbortSignal): Promise<boolean>;
-  /** Remove these local images, best effort. The engine refuses one a container still uses. */
-  removeImages(images: string[], signal?: AbortSignal): Promise<void>;
+  /** Remove these local images. Returns the ones still present: the engine refuses an image a
+   *  container still uses, such as a runner image under phases an in-place update left running. */
+  removeImages(images: string[], signal?: AbortSignal): Promise<string[]>;
 }
 
 export interface RunnerUpdateOptions {
@@ -281,6 +288,7 @@ export async function runRunnerUpdate(engine: RunnerUpdateEngine, options: Runne
   if (!options.check && lock === null)
     return { outcome: "retained", detail: "update_running", generation: readReleaseState(dir).generation, exitCode: 0 };
   try {
+    if (!options.check) await retryPendingRemoval(engine, dir, options.signal);
     const result = await update(engine, options, now);
     if (!options.check) {
       const state = readReleaseState(dir);
@@ -290,6 +298,18 @@ export async function runRunnerUpdate(engine: RunnerUpdateEngine, options: Runne
   } finally {
     if (lock !== null) releaseLock(dir, lock);
   }
+}
+
+/** Try again to remove images an earlier update replaced but could not remove, never one `.env`
+ *  names now (a setup run or a person may have put it back). */
+async function retryPendingRemoval(engine: RunnerUpdateEngine, dir: string, signal?: AbortSignal): Promise<void> {
+  const state = readReleaseState(dir);
+  if (state.pendingRemoval.length === 0) return;
+  const inUse = new Set(Object.values(imagesOf(readEnvFile(join(dir, ".env")) ?? {})));
+  const removable = state.pendingRemoval.filter((ref) => !inUse.has(ref));
+  if (removable.length === 0) return;
+  const kept = await engine.removeImages(removable, signal);
+  writeReleaseState(dir, { ...state, pendingRemoval: [...new Set([...state.pendingRemoval.filter((ref) => inUse.has(ref)), ...kept])] });
 }
 
 type Images = Record<ReleaseComponent, string>;
@@ -331,9 +351,10 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
       return done("current", "not_newer");
   }
   const tagged = { releaseId: release.releaseId };
-  const record = (outcome: UpdateOutcome, detail: string, previous: Images | null): UpdateResult => {
+  const record = (outcome: UpdateOutcome, detail: string, previous: Images | null, unremoved: string[] = []): UpdateResult => {
     const journal = release.journalFormat === null ? null : { format: release.journalFormat, supervisor: target.supervisor };
-    writeReleaseState(dir, { ...state, generation: release.generation, releaseId: release.releaseId, appliedAtMs: now(), previous, journal });
+    const pendingRemoval = [...new Set([...state.pendingRemoval, ...unremoved])].slice(-PENDING_REMOVAL_KEPT);
+    writeReleaseState(dir, { ...state, generation: release.generation, releaseId: release.releaseId, appliedAtMs: now(), previous, journal, pendingRemoval });
     return { outcome, detail, generation: release.generation, exitCode: 0, ...tagged };
   };
 
@@ -407,9 +428,12 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     // Only once the new release is running and ready: the replaced images free their disk (a runner
     // image is several GB, against a free-space floor that decides whether the machine takes work).
     // A rollback or failure never reaches here, so the previous images stay for it.
-    if (changed.length > 0) await engine.removeImages(changed.map((c) => current[c]).filter((ref) => ref !== ""), signal);
+    // An image still in use, such as the runner image under phases left running, is kept for a later run.
+    const unremoved = changed.length > 0
+      ? await engine.removeImages(changed.map((c) => current[c]).filter((ref) => ref !== ""), signal)
+      : [];
     const applied = changed.length > 0 ? `updated:${changed.join(",")}` : "reconciled";
-    return record("updated", inPlace ? `${applied}:in_place` : applied, changed.length > 0 ? current : state.previous);
+    return record("updated", inPlace ? `${applied}:in_place` : applied, changed.length > 0 ? current : state.previous, unremoved);
   }
 
   if (rollbackText === null || rollbackImages === null)
@@ -591,7 +615,13 @@ export function dockerRunnerUpdateEngine(
       return (await setup.composeUp(dir, signal)).ok;
     },
     async removeImages(images, signal) {
-      for (const ref of images) await docker(["image", "rm", ref], { signal, timeoutMs: 120_000 });
+      const kept: string[] = [];
+      for (const ref of images) {
+        if ((await docker(["image", "rm", ref], { signal, timeoutMs: 120_000 })).code === 0) continue;
+        // A refusal for an image that is already gone is a removal; any other refusal keeps it.
+        if ((await docker(["image", "inspect", "--format", "{{.Id}}", ref], { signal })).code === 0) kept.push(ref);
+      }
+      return kept;
     },
     async supervisorReadySinceStart(dir, signal) {
       const compose = runnerComposeArgs(dir);
