@@ -251,18 +251,22 @@ const readOr = (path: string): Buffer | null => {
   try { return readFileSync(path); } catch { return null; }
 };
 
+/** The file a host-disk agent's plist publishes to (its `--output`), unescaped; null when it names none. */
+export function hostDiskAgentOutput(text: string): string | null {
+  const raw = /<string>--output<\/string>\s*<string>([^<]*)<\/string>/.exec(text)?.[1];
+  return raw === undefined ? null : raw.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+}
+
 /** A plist with this label that publishes somewhere else belongs to its operator. */
 function foreign(existing: Buffer, output: string): boolean {
-  const target = /<string>--output<\/string>\s*<string>([^<]*)<\/string>/.exec(existing.toString("utf8"))?.[1];
-  return target !== xml(output);
+  return hostDiskAgentOutput(existing.toString("utf8")) !== output;
 }
 
 /** Where a same-label agent this setup does not own publishes, as the two settings that would
  * point the runner at it: the bind directory and the in-container file name. */
 export function foreignHostDiskSample(home: string): { sampleDir: string; sampleFile: string } | Record<string, never> {
   const text = readOr(join(home, "Library", "LaunchAgents", `${HOST_DISK_LABEL}.plist`))?.toString("utf8");
-  const output = text && /<string>--output<\/string>\s*<string>([^<]*)<\/string>/.exec(text)?.[1]
-    ?.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  const output = text && hostDiskAgentOutput(text);
   if (!output || !isAbsolute(output) || !/^[^\x00-\x1f'"]+$/.test(output)) return {};
   return { sampleDir: dirname(output), sampleFile: `${HOST_DISK_MOUNT}/${output.split("/").at(-1)}` };
 }

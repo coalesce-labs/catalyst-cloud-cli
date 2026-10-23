@@ -88,7 +88,8 @@ beforeEach(() => {
   });
   ctx.env.CATALYST_INSTALL_STATE_DIR = join(ctx.home, "state");
   dir = join(ctx.home, "state", "runner");
-  for (const sub of ["slots/acme", "thoughts", "locks", "session-egress", "host-disk"]) mkdirSync(join(dir, sub), { recursive: true, mode: 0o700 });
+  for (const sub of ["slots/acme", "thoughts", "locks", "session-egress", "host-disk", "host-disk-sampler"]) mkdirSync(join(dir, sub), { recursive: true, mode: 0o700 });
+  writeFileSync(join(dir, "host-disk-sampler", "host-disk-sample.py"), "# sampler\n", { mode: 0o644 });
   writeFileSync(join(dir, "compose.yaml"), "services: {}\n", { mode: 0o644 });
   writeFileSync(join(dir, ".env"), "CATALYST_HOST_NAME=studio\n", { mode: 0o600 });
   writeFileSync(join(dir, "key-request.json"), JSON.stringify({ version: 1, requestId: REQUEST, account: "acme", teamId: "team-uuid", hostName: "studio" }), { mode: 0o600 });
@@ -179,7 +180,7 @@ describe("runner uninstall", () => {
       "PUT /api/v1/agent/runner-admission",
     ]);
     expect(cloud[3]!.body).toEqual({ admissionEnabled: false });
-    for (const gone of ["compose.yaml", ".env", "key-request.json", "session-egress", "host-disk", "uninstall.json"])
+    for (const gone of ["compose.yaml", ".env", "key-request.json", "session-egress", "host-disk", "host-disk-sampler", "uninstall.json"])
       expect(existsSync(join(dir, gone)), gone).toBe(false);
     for (const kept of ["slots/acme", "thoughts", "locks"]) expect(existsSync(join(dir, kept)), kept).toBe(true);
     const out = ctx.out.join("\n");
@@ -284,6 +285,33 @@ describe("runner uninstall", () => {
     expect(existsSync(sampler)).toBe(true);
     for (const name of ["darwin-thoughts-custody", "darwin-thoughts-requests", "darwin-thoughts-responses"])
       expect(existsSync(join(dir, "..", name))).toBe(false);
+    expect(ctx.out.join("\n")).toContain(`${sampler}: not the file setup installed`);
+  });
+
+  /** A disk sampler plist with the label setup uses, publishing to `output`. */
+  const samplerPlist = (output: string) => `<plist><dict><key>Label</key><string>dev.catalystcloud.host-disk</string>` +
+    `<key>ProgramArguments</key><array><string>--output</string><string>${output}</string></array></dict></plist>`;
+
+  it("removes the disk sampler setup installed, and keeps a same-label agent that publishes elsewhere", async () => {
+    const agents = join(ctx.home, "Library", "LaunchAgents");
+    mkdirSync(agents, { recursive: true });
+    const sampler = join(agents, "dev.catalystcloud.host-disk.plist");
+    // Setup's: it publishes into this runner's own host-disk bind.
+    writeFileSync(sampler, samplerPlist(join(dir, "host-disk", "space.json")));
+    expect(await main(["runner", "uninstall", "--yes"], ctx, { runner: { run: command(fake), platform: "darwin", isTty: () => false } })).toBe(0);
+    expect(fake.calls).toContainEqual(["launchctl", "bootout", `user/${process.getuid!()}/dev.catalystcloud.host-disk`]);
+    expect(existsSync(sampler)).toBe(false);
+    expect(existsSync(join(dir, "host-disk-sampler"))).toBe(false);
+  });
+
+  it("keeps a same-label disk agent an operator installed to publish somewhere else", async () => {
+    const agents = join(ctx.home, "Library", "LaunchAgents");
+    mkdirSync(agents, { recursive: true });
+    const sampler = join(agents, "dev.catalystcloud.host-disk.plist");
+    writeFileSync(sampler, samplerPlist("/Users/a/.local/share/catalyst/host-disk/space.json"));
+    expect(await main(["runner", "uninstall", "--yes"], ctx, { runner: { run: command(fake), platform: "darwin", isTty: () => false } })).toBe(0);
+    expect(fake.calls.some(c => c.join(" ").includes("bootout") && c.join(" ").includes("dev.catalystcloud.host-disk"))).toBe(false);
+    expect(existsSync(sampler)).toBe(true);
     expect(ctx.out.join("\n")).toContain(`${sampler}: not the file setup installed`);
   });
 

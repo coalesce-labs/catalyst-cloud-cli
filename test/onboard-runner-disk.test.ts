@@ -10,6 +10,7 @@ import {
   HOST_DISK_SAMPLE_FILE,
   engineDiskPath,
   foreignHostDiskSample,
+  hostDiskAgentOutput,
   hostDiskSamplerStatus,
   installHostDiskSampler,
   runnerDiskCopy,
@@ -372,5 +373,13 @@ describe("the sampler measures the ACTIVE engine's disk", () => {
       "<array><string>--output</string><string>/Users/a/.local/share/catalyst/host-disk/space.json</string></array>");
     expect(foreignHostDiskSample(home)).toEqual({
       sampleDir: "/Users/a/.local/share/catalyst/host-disk", sampleFile: "/var/lib/catalyst/host-disk/space.json" });
+  });
+
+  test("an agent's plist names the file it publishes to, unescaped, or none", () => {
+    expect(hostDiskAgentOutput("<array><string>--output</string>\n  <string>/Users/a &amp; b/&lt;x&gt;/space.json</string></array>"))
+      .toBe("/Users/a & b/<x>/space.json");
+    expect(hostDiskAgentOutput("<array><string>--output</string><string>/a/&amp;lt;/space.json</string></array>"))
+      .toBe("/a/&lt;/space.json");
+    expect(hostDiskAgentOutput(`<plist><dict><key>Label</key><string>${HOST_DISK_LABEL}</string></dict></plist>`)).toBeNull();
   });
 });
