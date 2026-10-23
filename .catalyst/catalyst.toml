@@ -4,9 +4,17 @@
 [project]
 linear_team = "CTC"
 
+[merge]
+# codex-attestation, matching catalyst-cloud: green required checks, every review thread resolved, and
+# one review. The review is the Codex bot, an App "Independent Agent Review" at the head, an
+# "Independent Agent Fix Check" naming the reviewed base, or a human approval at the head. Not strict:
+# strict refuses every PR while no reviewer row is configured for this repository (CTC-6009).
+policy = "codex-attestation"
+
 # The same install and checks the ci.yml pull request gate runs. The evals job is left out: it needs an Anthropic key and a Claude Code install.
+# bun is the runner image's own 1.4.2: mise cannot install bun, so any other version fails toolchain_missing (CTC-6377). ci.yml keeps its own pins.
 [environment]
-toolchains = [{ name = "node", version = "22" }, { name = "bun", version = "1.3.14" }]
+toolchains = [{ name = "node", version = "22" }, { name = "bun", version = "1.4.2" }]
 
 [[environment.setup]]
 name = "install-dependencies"

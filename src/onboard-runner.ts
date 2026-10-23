@@ -23,7 +23,7 @@ import {
   dockerRootAvailableBytes, foreignHostDiskSample, hostDiskSamplerStatus, installHostDiskSampler, runnerDiskVerdict, HOST_DISK_SAMPLE_FILE,
   type HostDiskSamplerResult, type HostDiskSamplerStatus, type RunnerDiskVerdict,
 } from "./onboard-runner-disk.js";
-import { darwinThoughtsInstallException, darwinThoughtsInstallRefusal, installDarwinThoughtsCustody, type DarwinThoughtsInstallResult } from "./onboard-runner-custody.js";
+import { darwinThoughtsInstallAdvice, darwinThoughtsInstallException, darwinThoughtsInstallRefusal, installDarwinThoughtsCustody, type DarwinThoughtsInstallResult } from "./onboard-runner-custody.js";
 import { emitCustodyFailure, type CustodyFailureCase, type CustodyFailureDetails } from "./onboard-runner-telemetry.js";
 import { canonicalDarwinThoughtsJson, parseDarwinThoughtsAuthority } from "../vendor/self-host/darwin-thoughts-custody/verifier.mjs";
 import {
@@ -47,21 +47,24 @@ import {
 /** The Compose project name the vendored file declares. */
 export const RUNNER_PROJECT = "catalyst-host";
 export const RUNNER_SESSION_NETWORK = "catalyst-session-v1";
-/** Supervisor from ee729b12 (Host images 38138827750); runner from
- * 91a82214 (Runner image 38133282600). The watchdog retains its reviewed pin.
+/** Catalyst's approved host release, generation 48 (hr-598fd0ef2675bfd8-69310962e37ad7f2-2d264b793edb843e):
+ * the runner built from catalyst-cloud caf921a4, the supervisor and watchdog from a4165555, the
+ * first supervisor that serves several teams (CTC-4455). A machine set up from these
+ * pins then follows newer approved releases itself (`catalyst runner update`, CTC-4646).
  * Explicit environment values override these pins; a saved runner image is preserved. */
 export const RUNNER_HOST_IMAGES = {
   supervisor:
-    "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:3331ebc4204ae3975a4efb2c870c941f9c0f5ab435735e91dc9977941c91e9a8",
+    "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:69310962e37ad7f21ccab5c131b0734f106a6b0cc9fb163cb5d8917c9d7a2fc1",
   watchdog:
-    "ghcr.io/coalesce-labs/catalyst-deadline-watchdog@sha256:a5999dbf229ac432b83c2ed3fe43fa251366baceb73af2f57590890a6a758f0d",
+    "ghcr.io/coalesce-labs/catalyst-deadline-watchdog@sha256:2d264b793edb843e47b4c5a86fa6133dd2bd0b5ecdc0b7e997368893de074b28",
   runner:
-    "ghcr.io/coalesce-labs/catalyst-runner@sha256:9db2bf2c5580e2a1459fd076fa32c9af34456cc639ec3ab92b57b6ad98da67fb",
+    "ghcr.io/coalesce-labs/catalyst-runner@sha256:598fd0ef2675bfd8e0665f70ef4ed8bf30706fba25fa2c39fc0df0801512a423",
 } as const;
-const IMAGE_REF = /^[a-z0-9][a-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}$/;
+export const IMAGE_REF = /^[a-z0-9][a-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}$/;
 const HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
 const JOIN_TOKEN = /^[A-Za-z0-9._~+/=-]{16,1024}$/;
-const ENROLLMENTS = "/api/v1/hosts/enrollments";
+const HOSTS = "/api/v1/hosts";
+const ENROLLMENTS = `${HOSTS}/enrollments`;
 const JOIN_TOKENS = "/api/v1/hosts/join-tokens";
 const CAPACITY = "/api/v1/me/runner-capacity";
 const RUNNER_UID = "10001:10001";
@@ -73,7 +76,7 @@ const CUSTODY_KEYS = [
 ] as const;
 
 /** A persisted authority selects bindings, never substitutes for a fresh native proof. */
-function persistedCustody(dir: string, values: Record<string, string> | null): "absent" | "invalid" | "installed" {
+export function persistedCustody(dir: string, values: Record<string, string> | null): "absent" | "invalid" | "installed" {
   const present = CUSTODY_KEYS.map(key => values?.[key] ?? "");
   if (present.every(value => !value)) return "absent";
   if (present.some(value => !value)) return "invalid";
@@ -202,7 +205,8 @@ export type RunnerExec = (
   options: RunnerExecOptions,
 ) => Promise<{ code: number; stdout: string; stderr?: string }>;
 
-const spawnDocker: RunnerExec = (args, options) =>
+/** The docker CLI as a child process. Exported for `catalyst runner update`. */
+export const spawnDocker: RunnerExec = (args, options) =>
   new Promise((resolve, reject) => {
     const child = spawn("docker", args, {
       env: options.env,
@@ -237,6 +241,23 @@ function composeErrorText(raw: string | undefined): string | undefined {
   return text !== "" ? text : undefined;
 }
 
+/** The Compose arguments for the installation in `dir`, with the Darwin custody file when its
+ * persisted authority is installed. Null when that authority is only partly present. */
+export function runnerComposeArgs(dir: string): string[] | null {
+  const custody = persistedCustody(dir, readEnvFile(join(dir, ".env")));
+  if (custody === "invalid") return null;
+  return [
+    "compose",
+    "--project-name",
+    RUNNER_PROJECT,
+    "--file",
+    join(dir, "compose.yaml"),
+    ...(custody === "installed" ? ["--file", join(dir, "compose.darwin-thoughts.yaml")] : []),
+    "--env-file",
+    join(dir, ".env"),
+  ];
+}
+
 /** The real engine, through the docker CLI. Compose reads `.env` only: the caller's CATALYST_ and
  * DOCKER_SOCKET_ variables are removed, because Compose prefers an exported value over the file. */
 export function dockerRunnerEngine(
@@ -258,20 +279,7 @@ export function dockerRunnerEngine(
       return { code: 1, stdout: "" };
     }
   };
-  const compose = (dir: string): string[] | null => {
-    const custody = persistedCustody(dir, readEnvFile(join(dir, ".env")));
-    if (custody === "invalid") return null;
-    return [
-      "compose",
-      "--project-name",
-      RUNNER_PROJECT,
-      "--file",
-      join(dir, "compose.yaml"),
-      ...(custody === "installed" ? ["--file", join(dir, "compose.darwin-thoughts.yaml")] : []),
-      "--env-file",
-      join(dir, ".env"),
-    ];
-  };
+  const compose = runnerComposeArgs;
   const supervisorShell = (dir: string, script: string): string[] | null => {
     const files = compose(dir);
     if (!files) return null;
@@ -662,12 +670,15 @@ interface ListedHost {
   hostId: string;
   hostName: string;
   team: string;
+  /** Every team the host serves, home team first (CTC-4455). An older cloud lists only `team`. */
+  teams: string[];
   revoked: boolean;
   capacity: number | null;
   /** The runtime is live, so a zero capacity is the supervisor's own count. */
   live: boolean;
   failing: string[];
 }
+const serves = (host: ListedHost, teamKey: string) => host.teams.includes(teamKey);
 const object = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -689,6 +700,8 @@ function parseHosts(body: unknown): ListedHost[] | null {
       typeof host.hostId !== "string" ||
       typeof host.hostName !== "string" ||
       typeof host.team !== "string" ||
+      (host.teams !== undefined &&
+        (!Array.isArray(host.teams) || !host.teams.every((team) => typeof team === "string"))) ||
       !(host.revokedAtMs === null || typeof host.revokedAtMs === "number") ||
       (host.capability !== null &&
         (!capability ||
@@ -703,6 +716,9 @@ function parseHosts(body: unknown): ListedHost[] | null {
       hostId: host.hostId,
       hostName: host.hostName,
       team: host.team,
+      teams: Array.isArray(host.teams) && host.teams.includes(host.team)
+        ? (host.teams as string[])
+        : [host.team],
       revoked: host.revokedAtMs !== null,
       capacity: capability ? capability.runtimeLive
           ? (capability.placeableCapacity as number)
@@ -722,6 +738,11 @@ export function readEnvFile(path: string): Record<string, string> | null {
   } catch {
     return null;
   }
+  return parseEnvText(text);
+}
+
+/** `KEY=value` lines of `.env` text, as readEnvFile reads them. */
+export function parseEnvText(text: string): Record<string, string> {
   const values: Record<string, string> = {};
   for (const line of text.split("\n")) {
     const match = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line);
@@ -767,6 +788,9 @@ export interface OnboardRunnerInput {
   chooseName?: (defaultName: string) => Promise<string | null>;
   message?: (text: string) => void;
   sleep?: (ms: number) => Promise<void>;
+  /** CTC-4646: turns on the runner's update schedule after it starts; returns the line to show.
+   *  Never fails setup: an update schedule is a convenience, and `catalyst runner update` works without it. */
+  autoUpdate?: (dir: string) => string;
   /** How long a check waits for the host to enroll and advertise. */
   waitMs?: number;
   pollMs?: number;
@@ -783,6 +807,8 @@ interface Prepared {
   info: RunnerEngineInfo;
   images: { supervisor: string; watchdog: string; runner: string };
   installedSupervisorImage?: string;
+  /** The installed enrollment's host when it was made for another team (CTC-4455). */
+  otherTeamHost?: string;
 }
 
 /** Setup's image-preparation boundary, also runnable before an installation is changed.
@@ -908,8 +934,9 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
     }
     const teamKey = teamId ? await liveTeamKey(ctx, teamId, signal ?? new AbortController().signal) : null;
     if (!teamId || !teamKey) return waiting("runner_context_unverified", selected);
-    if (credential && !isUnenrolled(credential) && credential.team !== teamKey)
-      return waiting("runner_enrolled_for_other_team", selected);
+    // An installation enrolled for another team serves this one too once setup adds it (CTC-4455).
+    const otherTeamHost =
+      credential && !isUnenrolled(credential) && credential.team !== teamKey ? credential.hostId : undefined;
     const runnerSupport=await verifyRunnerRoutes(ctx,journal,[{method:"GET",path:"/api/v1/agent/runner-admission"}],signal);
     if("reason" in runnerSupport && runnerSupport.reason!=="cloud_capability_unavailable") return waiting(runnerSupport.reason,selected);
     const cloud=!("reason" in runnerSupport);
@@ -924,7 +951,8 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
     if(!info.vm && !(await engine.nativeEgressStatus?.(ctx.now().getTime(),signal)))return waiting("runner_native_egress_setup_required",selected);
     return { account, baseUrl: normalizeBaseUrl(cfg.baseUrl), teamKey, teamId, cloud, dir, info, images,
       ...(installation && installation !== "missing" ? { installedName: installation.hostName,
-        installedSupervisorImage: installation.supervisorImage } : {}) };
+        installedSupervisorImage: installation.supervisorImage } : {}),
+      ...(otherTeamHost ? { otherTeamHost } : {}) };
   }
 
   async function desiredEnv(
@@ -1046,6 +1074,62 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
     }
   }
 
+  /**
+   * CTC-4455: adds the selected team to this machine's enrollment. The cloud refuses until the
+   * machine's supervisor advertises that it serves a set of teams. Before setup starts the new
+   * supervisor that refusal is `deferred`; after, it is retried for as long as setup waits for the
+   * supervisor. An older cloud without the route answers 404, and setup refuses as it used to.
+   */
+  async function addTeam(
+    ctx: Ctx,
+    p: Prepared,
+    hostId: string,
+    retry: boolean,
+    signal?: AbortSignal,
+  ): Promise<true | "deferred" | OnboardStepResult> {
+    const evidence = { ...selected, hostId };
+    const cfg = loadConfig(ctx.home);
+    const expiry = cfg?.auth ? Date.parse(cfg.auth.expiresAt) - ctx.now().getTime() : 0;
+    const bearer =
+      cfg?.key ||
+      (cfg?.auth && Number.isFinite(expiry) && expiry > 30_000 ? cfg.auth.accessToken : undefined);
+    if (!bearer) return waiting("runner_login_refresh_required", evidence);
+    for (let attempt = 1; ; attempt++) {
+      let status: number;
+      let body: Record<string, unknown> | null;
+      try {
+        const response = await ctx.fetch(
+          `${p.baseUrl}${HOSTS}/${encodeURIComponent(hostId)}/teams?account=${encodeURIComponent(p.account)}`,
+          {
+            method: "POST",
+            redirect: "error",
+            signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
+            headers: {
+              authorization: `Bearer ${bearer}`,
+              "content-type": "application/json",
+              accept: "application/json",
+            },
+            body: JSON.stringify({ version: 1, team: p.teamKey }),
+          },
+        );
+        status = response.status;
+        body = object(await response.json().catch(() => null));
+      } catch {
+        return waiting(signal?.aborted ? "interrupted" : "runner_team_add_failed", evidence);
+      }
+      if (status === 200 && body?.ok === true && Array.isArray(body.teams) && body.teams.includes(p.teamKey))
+        return true;
+      if (status === 404 && body?.error !== "unknown_host") return waiting("runner_enrolled_for_other_team", evidence);
+      if (status === 401 || status === 403) return waiting("runner_identity_unverified", evidence);
+      if (body?.error === "team_limit") return waiting("runner_team_limit", evidence);
+      if (body?.error !== "supervisor_outdated") return waiting("runner_team_add_failed", evidence);
+      if (!retry) return "deferred";
+      if (attempt >= Math.max(1, Math.ceil(waitMs / pollMs)) || signal?.aborted)
+        return waiting("runner_supervisor_outdated", evidence);
+      await sleep(pollMs);
+    }
+  }
+
   function orgKeyFromFile(ctx: Ctx): string | null | undefined {
     const path = ctx.env.CATALYST_RUNNER_ORG_KEY_FILE;
     if (!path) return undefined;
@@ -1084,7 +1168,7 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
       const live = (hosts: ListedHost[] | null) =>
         hosts?.find(
           (host) =>
-            host.hostId === enrolled?.hostId && host.team === p.teamKey && !host.revoked,
+            host.hostId === enrolled?.hostId && serves(host, p.teamKey) && !host.revoked,
         );
       let hosts = await listHosts(ctx, p, signal);
       if (!hosts) return waiting("runner_enrollment_unavailable", selected);
@@ -1093,7 +1177,7 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
         (!existingCredential || isUnenrolled(existingCredential)) &&
         hosts.some(
           (host) =>
-            host.hostName === name && !host.revoked && host.team !== p.teamKey,
+            host.hostName === name && !host.revoked && !serves(host, p.teamKey),
         )
       )
         return waiting("runner_enrolled_for_other_team", {
@@ -1107,10 +1191,13 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
           (host) =>
             host.hostId === existingCredential.hostId &&
             !host.revoked &&
-            host.team !== p.teamKey,
+            !serves(host, p.teamKey),
         )
       )
-        return waiting("runner_enrolled_for_other_team", { ...selected, hostName: name });
+        // CTC-4455: setup's act adds the selected team to a runner enrolled for another one.
+        return mayAct && !afterAct
+          ? { state: "pending" }
+          : waiting(mayAct ? "runner_team_not_added" : "runner_needs_runner_flag", { ...selected, hostName: name });
       const running = await engine.composeRunning(p.dir, signal);
       let composeMatches = false;
       try {
@@ -1140,12 +1227,10 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
         if (!hosts) return waiting("runner_enrollment_unavailable", hostEvidence);
         if (enrolled && (enrolled.tenant !== p.account || enrolled.enrollmentKind !== "self_hosted"))
           return waiting("runner_identity_unverified", hostEvidence);
-        if (enrolled && enrolled.team !== p.teamKey)
-          return waiting("runner_enrolled_for_other_team", hostEvidence);
         if (enrolled) {
           const exact = hosts.find((host) => host.hostId === enrolled!.hostId);
           if (exact?.revoked) return waiting("runner_enrollment_revoked", { ...hostEvidence, hostId: enrolled.hostId });
-          if (!exact || exact.team !== p.teamKey) return waiting("runner_enrollment_unverified", hostEvidence);
+          if (!exact || !serves(exact, p.teamKey)) return waiting("runner_enrollment_unverified", hostEvidence);
         }
         const host = live(hosts);
         if (host && host.capacity !== null) break;
@@ -1195,6 +1280,19 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
       const p = await prepare(ctx, journal, signal);
       if (!("dir" in p)) return p;
       if(!mayAct)return waiting("runner_needs_runner_flag",selected);
+      // Settle a team the installed runner does not serve before anything on this machine changes.
+      let addTeamTo: string | null = null;
+      if (p.otherTeamHost) {
+        const hosts = await listHosts(ctx, p, signal);
+        if (!hosts) return waiting("runner_enrollment_unavailable", selected);
+        const exact = hosts.find((host) => host.hostId === p.otherTeamHost && !host.revoked);
+        if (!exact) return waiting("runner_enrolled_for_other_team", selected);
+        if (!serves(exact, p.teamKey)) {
+          const added = await addTeam(ctx, p, exact.hostId, false, signal);
+          if (added === "deferred") addTeamTo = exact.hostId;
+          else if (added !== true) return added;
+        }
+      }
       let replacingContainers = false;
       try {
         mkdirSync(p.dir, { recursive: true, mode: 0o700 });
@@ -1287,8 +1385,10 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
           const custodyReason = darwinThoughtsInstallRefusal(error);
           const failureCase = custodyReturned ? "result_unverified" : "call_threw";
           const details = { ...darwinThoughtsInstallException(error), ...(custodyReason ? { custodyReason } : {}) };
+          const advice = darwinThoughtsInstallAdvice(error);
           return refuseCustody(ctx, journal, failureCase,
-            `Setup could not verify local storage: ${custodyReturned ? "recording the result failed" : "the native check threw"} (${details.custodyErrorClass}: ${details.custodyErrorMessage}).`,
+            `Setup could not verify local storage: ${custodyReturned ? "recording the result failed" : "the native check threw"} (${details.custodyErrorClass}: ${details.custodyErrorMessage}).` +
+              (advice ? " " + advice : ""),
             details, signal);
         }
       }
@@ -1313,18 +1413,21 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
       const hosts = await listHosts(ctx, p, signal);
       if (!hosts) return waiting("runner_enrollment_unavailable", selected);
       if (!enrolled &&
-        hosts.some((host) => host.hostName === name && !host.revoked && host.team !== p.teamKey,
+        hosts.some((host) => host.hostName === name && !host.revoked && !serves(host, p.teamKey),
         ))
         return waiting("runner_enrolled_for_other_team", { ...selected, hostName: name });
       if (enrolled && (enrolled.tenant !== p.account || enrolled.enrollmentKind !== "self_hosted"))
         return waiting("runner_identity_unverified", { ...selected, hostName: name });
-      if (enrolled && enrolled.team !== p.teamKey)
-        return waiting("runner_enrolled_for_other_team", { ...selected, hostName: name });
       if (hasCredential && !isUnenrolled(credential)) {
         if (!enrolled) return waiting("runner_credential_unverified", { ...selected, hostName: name });
         const exact = hosts.find((host) => host.hostId === enrolled.hostId);
         if (exact?.revoked) return waiting("runner_enrollment_revoked", { ...selected, hostName: name, hostId: enrolled.hostId });
-        if (!exact || exact.team !== p.teamKey) return waiting("runner_enrollment_unverified", { ...selected, hostName: name });
+        if (!exact) return waiting("runner_enrollment_unverified", { ...selected, hostName: name });
+        if (!serves(exact, p.teamKey) && addTeamTo === null) {
+          const added = await addTeam(ctx, p, exact.hostId, false, signal);
+          if (added === "deferred") addTeamTo = exact.hostId;
+          else if (added !== true) return added;
+        }
       }
       // A lost volume also lost the secret that redeemed the old token. Mint a new token and match
       // the new host id from the supervisor's credential, never an old advertisement with this name.
@@ -1378,7 +1481,20 @@ export function onboardRunnerAdapter(input: OnboardRunnerInput = {},
       if (!up.ok)
         return { state: "failed", reason: "runner_compose_failed", evidence: { ...selected,
           project: RUNNER_PROJECT, ...(up.error ? { composeError: up.error } : {}) } };
+      // The supervisor just started can serve a set of teams; the cloud accepts the team once it says so.
+      if (addTeamTo) {
+        const added = await addTeam(ctx, p, addTeamTo, true, signal);
+        if (added === "deferred") return waiting("runner_supervisor_outdated", selected);
+        if (added !== true) return added;
+      }
       acted = true;
+      if (input.autoUpdate) {
+        try {
+          input.message?.(input.autoUpdate(p.dir));
+        } catch {
+          input.message?.("Automatic runner updates could not be turned on. Run catalyst runner auto-update on to try again.");
+        }
+      }
       return { state: "done" };
     },
   };

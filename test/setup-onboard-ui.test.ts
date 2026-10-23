@@ -59,6 +59,15 @@ function fixture(
   return { ui, signals, text: () => text, selectCalls: () => selectCalls };
 }
 
+test("the install-engine continuation shows local sync inventory even while legacy repeats are hidden", () => {
+  const f = fixture(true);
+  f.ui.stepStart("legacy");
+  f.ui.showLocalSyncInventory!(["/tmp/replica.db (17 bytes)", "/tmp/cursor.json (5 bytes)"]);
+  expect(f.text()).toContain("/tmp/replica.db (17 bytes)");
+  expect(f.text()).toContain("/tmp/cursor.json (5 bytes)");
+  f.ui.dispose();
+});
+
 test("unattended project review uses move-on without opening a choice", async () => {
   const projects = [{ id: "project-one", name: "Existing project", key: "ENG", status: "ready" }];
   const unattended = fixture(false);

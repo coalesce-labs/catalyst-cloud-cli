@@ -3,6 +3,7 @@ import type { PortalServer, PortalServerAuth, PortalServerRegisterInput } from "
 import { flagList, flagString, positionals, type ParsedArgs } from "./args.js";
 import { requireConfig, type Ctx } from "./config.js";
 import { CliError, UsageError } from "./errors.js";
+import { cmdMcpStatus } from "./mcp-status.js";
 import { bearerFor } from "./oauth.js";
 import { loadTenantSdk } from "./sdk.js";
 
@@ -65,13 +66,14 @@ function describeServer(server: PortalServer): string {
 
 export async function cmdMcp(args: ParsedArgs, ctx: Ctx): Promise<number> {
   const [verb, ...rest] = positionals(args);
-  if (verb !== "add" && verb !== "list" && verb !== "remove") throw new UsageError("mcp needs add, list or remove");
+  if (verb !== "add" && verb !== "list" && verb !== "remove" && verb !== "status") throw new UsageError("mcp needs add, list, remove or status");
   if (rest.length !== (verb === "list" ? 0 : 1)) throw new UsageError(`mcp ${verb}${verb === "list" ? "" : " <name>"}`);
   const name = rest[0] ?? "";
   if (verb !== "list" && !/^[a-z][a-z0-9_-]{0,63}$/.test(name)) throw new UsageError("server name must start with a lowercase letter and contain only lowercase letters, digits, _ or - (up to 64 characters)");
   if (verb !== "add" && ["url", "auth", "bearer", "header"].some((key) => key in args.flags)) {
     throw new UsageError("URL and auth options are only accepted by mcp add");
   }
+  if (verb === "status") return await cmdMcpStatus(args, ctx, name);
   const input = verb === "add" ? registration(args, name) : null;
   const cfg = requireConfig(ctx);
   const key = await bearerFor(ctx, cfg);

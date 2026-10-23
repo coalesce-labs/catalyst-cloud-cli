@@ -6,7 +6,8 @@
 //
 // The list is fixed on purpose. A prefix match would one day catch a current job (the housekeeping
 // job, the sandbox credit guard, jobs a person made); this matches names the old runtime installed,
-// read at the source commit below, and nothing else. Shared data folders are always kept. The historical --data flag cannot remove them.
+// read at the source commit below, and nothing else. Shared data folders are always kept;
+// --data separately selects the enumerated replica and event-cache files.
 import {
   existsSync,
   lstatSync,
@@ -20,11 +21,13 @@ import { flagBool, positionals, type ParsedArgs } from "./args.js";
 import type { Ctx } from "./config.js";
 import { UsageError } from "./errors.js";
 import { promptSecret, stdinIsTty } from "./prompt.js";
+import { findLocalSyncData, localSyncInventory, removeLocalSyncData, type LocalSyncFile } from "./local-sync-data.js";
 
 /** The archived repository's commit the list below was read at. */
 export const LEGACY_SOURCE_COMMIT = "73bc0645252ce8be38f8c87be6b67b950b3f0b56";
 /** The old runtime's marketplace source, as Claude Code records it in known_marketplaces.json. */
 export const OLD_MARKETPLACE_REPO = "coalesce-labs/catalyst";
+const OLD_REPLICA_LABEL = "ai.coalesce.catalyst-replica-sync";
 /** launchd labels the old runtime installed under ~/Library/LaunchAgents (macOS). `com.catalyst.role.<name>`
  *  is the old role supervisor's per-role instance, matched by that exact prefix. Never `dev.catalystcloud.*`
  *  (the current housekeeping job and runner jobs) and never `dev.catalyst.*` (the sandbox credit guard). */
@@ -44,7 +47,7 @@ export const OLD_LAUNCHD_LABELS: readonly string[] = [
   "ai.coalesce.catalyst-usage-page",
   "ai.coalesce.catalyst-claude-update",
   "ai.coalesce.catalyst-updater",
-  "ai.coalesce.catalyst-replica-sync",
+  OLD_REPLICA_LABEL,
   "ai.coalesce.catalyst-channel-watcher",
   "ai.coalesce.catalyst-event-mirror",
   "ai.coalesce.catalyst-monitor",
@@ -82,12 +85,22 @@ export interface LegacyItem {
   path: string;
   /** A shared data folder: always kept. */
   data?: boolean;
+  localSync?: boolean;
+  size?: number;
 }
 export type LegacyRun = (
   cmd: string,
   args: string[],
 ) => { status: number; stdout: string; stderr: string };
 export interface LegacyDeps {
+  /** Setup with local sync reuses the existing replica. */
+  preserveReplica?: boolean;
+  /** The saved setup choice has local sync on, so its files are current data, not leftovers. */
+  localSyncSelected?: boolean;
+  /** Process boundary: stop a detached writer and wait for it to exit. */
+  stopWriter?: (pid: number) => Promise<void>;
+  /** Setup pins the precise file inventory approved by the person. */
+  localSyncFiles?: readonly LocalSyncFile[];
   run?: LegacyRun;
   platform?: NodeJS.Platform;
   uid?: number;
@@ -170,6 +183,9 @@ function findJobs(home: string, platform: NodeJS.Platform): LegacyItem[] {
         kind: "job" as const,
         name: label,
         path: join(dir, `${label}.plist`),
+        ...(label === OLD_REPLICA_LABEL || label === "ai.coalesce.catalyst-event-mirror"
+          ? { localSync: true, size: lstatSync(join(dir, `${label}.plist`)).size }
+          : {}),
       }));
   }
   if (platform === "linux") {
@@ -207,12 +223,16 @@ function findFiles(home: string): LegacyItem[] {
 export function findLegacy(
   home: string,
   platform: NodeJS.Platform,
+  options: Pick<LegacyDeps, "preserveReplica"> = {},
 ): LegacyItem[] {
   return [
     ...findPlugins(home),
     ...findJobs(home, platform),
     ...findFiles(home),
-  ];
+  ].filter(
+    (item) =>
+      !(options.preserveReplica && "localSync" in item && item.localSync),
+  );
 }
 
 const defaultRun: LegacyRun = (cmd, args) => {
@@ -305,13 +325,15 @@ export async function cmdLegacy(
   const uid =
     deps.uid ?? (typeof process.getuid === "function" ? process.getuid() : 0);
   const run = deps.run ?? defaultRun;
-  const found = findLegacy(ctx.home, platform);
-  const legacy = found.filter((item) => !item.data);
+  const local = deps.preserveReplica ? [] : deps.localSyncFiles ?? await findLocalSyncData(ctx);
+  const found: LegacyItem[] = [...findLegacy(ctx.home, platform, deps), ...local];
+  const legacy = found.filter((item) => !item.data && (item.kind === "job" || !item.localSync || withData));
   const shared = found.filter((item) => item.data);
   const emit = (body: Record<string, unknown>, lines: string[]) => {
     if (args.json) ctx.stdout(JSON.stringify(body));
     else for (const l of lines) ctx.stdout(l);
   };
+  const inventory = localSyncInventory(local);
   if (legacy.length === 0) {
     emit(
       {
@@ -319,12 +341,20 @@ export async function cmdLegacy(
         found: [],
         removed: [],
         remaining: [],
-        kept: shared,
+        kept: [...shared, ...local],
+        ...(local.length ? { localSyncFiles: local } : {}),
+        ...(local.length && !deps.localSyncSelected ? { requiredFlag: "--remove --data" } : {}),
       },
       [
         "no leftovers of the old local Catalyst runtime on this machine",
         ...(shared.length
           ? ["shared current Catalyst data folders are present and kept"]
+          : []),
+        ...inventory,
+        ...(local.length
+          ? [deps.localSyncSelected
+              ? "Local sync is on, so these files are current data and kept."
+              : "Local sync data kept. If you no longer use local sync, run catalyst legacy --remove --data to review and remove it."]
           : []),
       ],
     );
@@ -333,8 +363,9 @@ export async function cmdLegacy(
   const listLines = [
     `Leftovers of the old local Catalyst runtime on this machine (${legacy.length}):`,
     ...legacy.map(
-      (f) => `  ${f.kind}: ${f.name}${f.kind === "job" ? ` — ${f.path}` : ""}`,
+      (f) => `  ${f.kind}: ${f.name}${f.kind === "job" ? ` — ${f.path} (${lstatSync(f.path).size} bytes)` : ""}`,
     ),
+    ...inventory,
     ...(shared.length
       ? [
           "Shared current data folders (kept):",
@@ -376,7 +407,9 @@ export async function cmdLegacy(
         [
           ...listLines,
           RECOMMEND,
-          "nothing removed: no terminal to ask on; run catalyst legacy --remove --yes to remove these without a question (all data folders are kept)",
+          withData
+            ? "nothing removed: no terminal to ask on; run catalyst legacy --remove --data --yes to remove the listed local sync files (login, contract, settings and shared data folders are kept)"
+            : "nothing removed: no terminal to ask on; run catalyst legacy --remove --yes to remove these without a question (all data folders are kept)",
         ],
       );
       return 1;
@@ -385,7 +418,7 @@ export async function cmdLegacy(
     ctx.stdout(RECOMMEND);
     const answer = (
       await (deps.prompt ?? ((q: string) => promptSecret(q)))(
-        `Remove ${legacy.length} item${legacy.length === 1 ? "" : "s"}, keeping all data folders? [y/N] `,
+        `Remove ${legacy.length} item${legacy.length === 1 ? "" : "s"}${withData && local.length ? ", including the listed local sync files" : ", keeping all data folders"}? [y/N] `,
       )
     )
       .trim()
@@ -410,6 +443,10 @@ export async function cmdLegacy(
   const kept: LegacyItem[] = [];
   const lines: string[] = [];
   for (const item of found) {
+    if (item.localSync && item.kind === "data") {
+      if (!withData) kept.push(item);
+      continue;
+    }
     if (item.data) {
       kept.push(item);
       lines.push(
@@ -426,8 +463,24 @@ export async function cmdLegacy(
       lines.push(`still present: ${item.kind} ${item.name} (${why})`);
     }
   }
+  if (withData && local.length) {
+    try {
+      if (failed.some(({ item }) => item.name === OLD_REPLICA_LABEL || item.name === "ai.coalesce.catalyst-event-mirror"))
+        throw new Error("local sync service did not stop; local data kept");
+      await removeLocalSyncData(local, deps.stopWriter);
+      removed.push(...local);
+      lines.push(...local.map((item) => `removed: local sync data ${item.path}`));
+    } catch (error) {
+      kept.push(...local);
+      failed.push({ item: local[0], why: error instanceof Error ? error.message : String(error) });
+      lines.push("local sync cleanup failed; remaining local data kept");
+    }
+  }
   // re-check from the same list, so the report says what the machine holds now, not what was attempted
-  const remaining = findLegacy(ctx.home, platform).filter((f) => !f.data);
+  const remaining = [
+    ...findLegacy(ctx.home, platform, deps).filter((f) => !f.data),
+    ...(withData ? await findLocalSyncData(ctx) : []),
+  ];
   const keptNote = kept.length > 0 ? "; all shared data folders were kept" : "";
   lines.push(
     remaining.length === 0
@@ -445,5 +498,5 @@ export async function cmdLegacy(
     },
     lines,
   );
-  return remaining.length === 0 ? 0 : 1;
+  return remaining.length === 0 && failed.length === 0 ? 0 : 1;
 }

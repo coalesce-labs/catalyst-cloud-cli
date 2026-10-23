@@ -47,6 +47,7 @@ describe("native Darwin custody installer", () => {
     let runnerCustodyVersion: string | undefined = "v1";
     let wrongSignature = false;
     let nonceCount = 0;
+    let verifierBytes = "// vendored verifier";
     const harness = createDarwinThoughtsInstallerTestHarness({
       principal: () => principal, now: () => NOW,
       stat: (path: string, stat: fs.BigIntStats): fs.BigIntStats =>
@@ -55,7 +56,7 @@ describe("native Darwin custody installer", () => {
       executables: () => executables,
       artifacts: () => ({
         producer: Buffer.from("// generated producer"), watchdog: Buffer.from("// generated watchdog"),
-        deadline: Buffer.from("// generated deadline"),
+        deadline: Buffer.from("// generated deadline"), verifier: Buffer.from(verifierBytes),
         serviceTemplate: "<plist>@@NODE_EXECUTABLE@@ @@WATCHDOG_FILE@@ @@PRODUCER_FILE@@ @@CONFIG_FILE@@</plist>",
       }),
       engineIdentity: async (input: Record<string, unknown>) => {
@@ -65,7 +66,7 @@ describe("native Darwin custody installer", () => {
       },
       service: async (input: Record<string, unknown>) => { calls.push({ kind: "service", ...input }); },
       receiveBootstrap: async input => {
-        calls.push({ kind: "bootstrap", supervisorImage: input.supervisorImage });
+        calls.push({ kind: "bootstrap", supervisorImage: input.supervisorImage, verifierPath: input.verifierPath });
         const config = JSON.parse(fs.readFileSync(input.configPath, "utf8"));
         const authority = input.authority;
         const checkout = join(authority.thoughtsRoot, "custody-bootstrap", "catalyst", "custody-probe");
@@ -96,7 +97,8 @@ describe("native Darwin custody installer", () => {
       setEndpoint: (value: string) => { endpoint = value; },
       setCached: (value: boolean) => { cached = value; },
       setRunnerCustodyVersion: (value: string | undefined) => { runnerCustodyVersion = value; },
-      setWrongSignature: () => { wrongSignature = true; } };
+      setWrongSignature: () => { wrongSignature = true; },
+      setVerifier: (value: string) => { verifierBytes = value; } };
   }
   it("exports a closed production installer", () => { expect(installDarwinThoughtsCustody).toBeTypeOf("function"); });
   it("accepts ordinary native0755 intermediates without broadening private signer/channel leaves", async () => {
@@ -164,9 +166,32 @@ describe("native Darwin custody installer", () => {
       expect(fs.lstatSync(executable).mode & 0o7777).toBe(0o700);
     }
     expect(fs.lstatSync(f.state).mode & 0o7777).toBe(0o700);
-    for (const file of ["producer.json", "private-key.der", "producer.mjs", "watchdog.mjs", "watchdog-deadline.mjs"])
+    for (const file of ["producer.json", "private-key.der", "producer.mjs", "watchdog.mjs", "watchdog-deadline.mjs", "verifier.mjs"])
       expect(fs.lstatSync(join(f.state, file)).mode & 0o7777).toBe(0o600);
     expect(f.calls.map(call => call.kind)).toEqual(["engine", "service", "bootstrap"]);
+  });
+  it("stages the verifier in private state and mounts it from there, not from the install folder", async () => {
+    const f = fixture(); await f.harness.install(f.input);
+    const staged = join(f.state, "verifier.mjs");
+    expect(fs.readFileSync(staged, "utf8")).toBe("// vendored verifier");
+    expect(f.calls.find(call => call.kind === "bootstrap")).toMatchObject({ verifierPath: staged });
+  });
+  it("adds the verifier to an install made before it was staged, and replaces one from another CLI", async () => {
+    const f = fixture(); await f.harness.install(f.input);
+    const staged = join(f.state, "verifier.mjs");
+    fs.rmSync(staged);
+    await f.harness.install(f.input);
+    expect(fs.readFileSync(staged, "utf8")).toBe("// vendored verifier");
+    f.setVerifier("// next CLI's verifier");
+    await f.harness.install(f.input);
+    expect(fs.readFileSync(staged, "utf8")).toBe("// next CLI's verifier");
+    expect(fs.lstatSync(staged).mode & 0o7777).toBe(0o600);
+  });
+  it("refuses a staged verifier another user can write instead of replacing it", async () => {
+    const f = fixture(); await f.harness.install(f.input);
+    fs.chmodSync(join(f.state, "verifier.mjs"), 0o666); f.calls.length = 0;
+    await expect(f.harness.install(f.input)).rejects.toThrow(/file_custody_unsafe/);
+    expect(f.calls.filter(call => call.kind === "bootstrap")).toEqual([]);
   });
   it("reuses the same config/key and receives another fresh nonce on recovery", async () => {
     const f = fixture(); const first = await f.harness.install(f.input);

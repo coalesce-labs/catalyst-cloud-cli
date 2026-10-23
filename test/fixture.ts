@@ -4,7 +4,7 @@
 // can assert a header was sent; `budgetExhausted` turns the agent POSTs into 429s naming the budget.
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { TenantContract } from "../src/contract-types";
-import { buildFixtureContract, FIXTURE_ACCOUNT } from "./fixture-contract";
+import { buildFixtureContract, FIXTURE_ACCOUNT, FIXTURE_ROUTE_PREFIX } from "./fixture-contract";
 
 export const FIXTURE_ME_BODY = {
   account: FIXTURE_ACCOUNT,
@@ -47,10 +47,15 @@ export interface FixtureServer {
    *  this HTTP status instead of the NDJSON body, so a test can drive a replica writer's snapshot pull
    *  into a real, repeated failure. */
   snapshotStatus?: number;
+  /** CTC-6569 — when set, the full-seed branch of `/api/v1/snapshot` waits this many ms before it
+   *  answers, the way the mirror prepares a large workspace's snapshot before its first byte. */
+  snapshotDelayMs?: number;
   budgetExhausted: boolean;
   /** CTC-1953/CTC-1954 ship ahead of some tenants' mirror; `false` makes those two routes 404 the
    *  way an older cloud does, so the bundle's "needs a newer cloud" path meets a real 404. */
   routesDeployed: boolean;
+  /** CTC-6204 — when set, GET /api/v1/coding-accounts answers these rows instead of CODING_ACCOUNTS. */
+  codingAccounts?: unknown[];
   /** CTC-4744 — when set, GET /api/v1/agent/tenant/readiness?team=<id> answers 200 and calls this,
    *  the way the cloud's read-through recomputes an expired verdict. Unset, the route is a 404. */
   readinessRead?: (teamId: string) => void;
@@ -93,6 +98,8 @@ export interface FixtureServer {
   release?: { status: number; body: unknown };
   /** The contract's `ticket-release-class` route answers this when set. */
   releaseClass?: { status: number; body: unknown };
+  /** CTC-3550 — `POST <prefix>/registry/pull-credential` answers this (status + body) when set; 404 otherwise. */
+  pullCredential?: { status: number; body: unknown };
   /** CTC-2545 — the account-scope environment declaration, as a REAL little state machine rather than
    *  a canned body: propose bumps a revision and a hash, approve is a compare-and-set against them.
    *  A canned pair would let a verb that approved the wrong revision pass, which is the one thing
@@ -1066,6 +1073,7 @@ export async function startMeFixture(
           accountId: FIXTURE_ACCOUNT,
           cursor: state.headCursor,
         });
+      if (state.snapshotDelayMs !== undefined) await new Promise((r) => setTimeout(r, state.snapshotDelayMs));
       if (state.snapshotStatus !== undefined)
         return send(state.snapshotStatus, { error: "snapshot unavailable" });
       if (url.searchParams.get("account") !== FIXTURE_ACCOUNT)
@@ -1291,7 +1299,7 @@ export async function startMeFixture(
     // cloud" path is tested against a real 404 rather than a mocked branch.
     if (path === "/api/v1/coding-accounts") {
       return state.routesDeployed
-        ? send(200, { accounts: CODING_ACCOUNTS })
+        ? send(200, { accounts: state.codingAccounts ?? CODING_ACCOUNTS })
         : send(404, { error: "not found" });
     }
     const executionMatch = /^\/api\/v1\/issues\/([^/]+)\/execution$/.exec(path);
@@ -1434,6 +1442,18 @@ export async function startMeFixture(
         (put(n, v.trim()).created ? created : rotated).push(n);
       }
       return send(200, { created, rotated, errors, declared: declared() });
+    }
+
+    // CTC-3550 — the image download credential, ahead of the generic agent-POST branch so the write
+    // budget and the canned `{id, ok}` reply never answer it. Tests opt in by adding the route.
+    if (
+      req.method === "POST" &&
+      path === `${FIXTURE_ROUTE_PREFIX}/registry/pull-credential`
+    ) {
+      state.writes.push({ method: "POST", path, headers: req.headers, body });
+      return state.pullCredential
+        ? send(state.pullCredential.status, state.pullCredential.body)
+        : send(404, { error: "not found" });
     }
 
     if (req.method === "POST" && postRoutes().has(path)) {

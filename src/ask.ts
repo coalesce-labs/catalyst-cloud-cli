@@ -1,29 +1,39 @@
-// ask.ts — `ask raise|accept|list`: raise a decision through the contract's ask route (the cloud
-// renders the body from its own template, so this passes fields, never headings), record an answer
-// through ask-accept, and list open asks ranked by the work each one holds.
+// ask.ts — `ask raise|accept|answer|proxy|disown|list`: raise a decision through the contract's ask
+// route (the cloud renders the body from its own template, so this passes fields, never headings),
+// record an answer through ask-accept, record an owner's chat answer by proxy (CTC-6279) and let the
+// owner switch that on, off or take one back, and list open asks ranked by the work each one holds.
 import { flagBool, flagList, flagString, positionals, type ParsedArgs } from "./args.js";
 import { requireConfig, type Ctx, type CustomerConfig } from "./config.js";
 import { loadContract, teamByKey } from "./contract.js";
 import type { TenantContract } from "./contract-types.js";
-import { UsageError } from "./errors.js";
+import { CliError, UsageError } from "./errors.js";
 import { apiClient, type ApiClient } from "./transport.js";
 import { fetchAllPages } from "./pagination.js";
 import { fetchWorkflowStates, postAgent, resolveIssue } from "./write.js";
 
 export async function cmdAsk(args: ParsedArgs, ctx: Ctx): Promise<number> {
   const [sub, ...rest] = positionals(args);
-  if (!sub) throw new UsageError("ask needs a subcommand: raise | accept | list");
+  if (!sub) throw new UsageError("ask needs a subcommand: raise | accept | answer | proxy | disown | list");
   if (sub === "raise" && !flagBool(args, "nothing-to-block") && flagList(args, "blocks").length === 0) {
     throw new UsageError("ask raise needs --blocks <ticket>... (what this decision holds) or --nothing-to-block");
   }
+  // Everything these three would refuse is refused before the config is read or anything is sent.
+  const proxyBody = sub === "answer" ? proxyAnswerBody(args, rest, ctx.now().getTime()) : undefined;
+  const proxyAction = sub === "proxy" ? proxySettingAction(rest) : undefined;
+  if (sub === "disown" && (!rest[0] || rest.length > 1)) throw new UsageError("ask disown needs exactly one <ask>");
   const cfg = requireConfig(ctx);
-  const { doc } = await loadContract(ctx, cfg);
   const api = apiClient(cfg, ctx);
+  // The two personal settings routes are not contract routes: they act as the logged-in person.
+  if (proxyAction) return proxySetting(args, ctx, api, proxyAction);
+  if (sub === "disown") return disown(args, ctx, api, rest[0]!);
+  const { doc } = await loadContract(ctx, cfg);
   switch (sub) {
     case "raise":
       return raise(args, ctx, doc, api);
     case "accept":
       return accept(args, ctx, doc, api, rest);
+    case "answer":
+      return answerByProxy(args, ctx, doc, api, proxyBody!);
     case "list":
       return list(args, ctx, doc, api, cfg);
     default:
@@ -122,6 +132,222 @@ async function accept(args: ParsedArgs, ctx: Ctx, doc: TenantContract, api: ApiC
   });
   ctx.stdout(args.json ? JSON.stringify(result) : `ask ${ask.identifier}: answer ${answer} recorded by ${role}`);
   return 0;
+}
+
+/** The cloud's bounds on an answer by proxy, checked here first so a refusal never costs a write. */
+const QUOTE_MAX = 4000;
+const SAID_IN_MAX = 200;
+const ROLE_MAX = 64;
+const FUTURE_SKEW_MS = 5 * 60_000;
+const SINGLE_LINE = /^[^\r\n]+$/;
+
+export interface ProxyAnswerBody {
+  askIssueId: string;
+  ownerQuote: string;
+  optionIndex?: number;
+  saidIn: string;
+  saidAtMs: number;
+  acceptedByRole?: string;
+}
+
+/** CTC-6279 — `ask answer <ask> --proxy ...` → the ask-answer-proxy body. `--proxy` is required so the
+ *  command can never be mistaken for the owner answering: an answer the owner posted on the ask is
+ *  recorded with `ask accept`. The option letter maps A=0; no `--option` is a free-text answer, recorded
+ *  as written. The quote is sent exactly as given, never trimmed. */
+export function proxyAnswerBody(args: ParsedArgs, rest: string[], nowMs: number): ProxyAnswerBody {
+  const usage = 'ask answer <ask> --proxy --quote "<owner\'s exact words>" [--option <letter>] --said-in <session or channel id> [--said-at <ISO-8601 time>] [--role <role>]';
+  if (!flagBool(args, "proxy")) {
+    throw new UsageError(`ask answer records only an answer the ask's owner gave you in chat, and needs --proxy: ${usage}. For an answer the owner posted on the ask themselves, use: catalyst ask accept <ask> --answer <commentId> --role <role>`);
+  }
+  const ask = rest[0];
+  if (!ask || rest.length > 1) throw new UsageError(`ask answer needs exactly one <ask>: ${usage}`);
+  const quote = flagString(args, "quote");
+  if (quote === undefined || quote.trim() === "") throw new UsageError("ask answer --proxy needs --quote with the owner's exact words");
+  if (quote.length > QUOTE_MAX) throw new UsageError(`--quote is ${quote.length} characters; the most an answer can carry is ${QUOTE_MAX}`);
+  const saidIn = flagString(args, "said-in");
+  if (saidIn === undefined || saidIn.trim() === "") throw new UsageError("ask answer --proxy needs --said-in <session or channel id>: where the owner said it");
+  if (!SINGLE_LINE.test(saidIn) || saidIn.length > SAID_IN_MAX) throw new UsageError(`--said-in must be one line of at most ${SAID_IN_MAX} characters`);
+  const role = flagString(args, "role");
+  if (role !== undefined && (!SINGLE_LINE.test(role) || role.length > ROLE_MAX)) throw new UsageError(`--role must be one line of at most ${ROLE_MAX} characters`);
+  const saidAtRaw = flagString(args, "said-at");
+  let saidAtMs = nowMs;
+  if (saidAtRaw !== undefined) {
+    saidAtMs = Date.parse(saidAtRaw);
+    if (!Number.isFinite(saidAtMs)) throw new UsageError(`--said-at must be an ISO-8601 time, such as 2026-10-20T14:05:00Z (got "${saidAtRaw}")`);
+    if (saidAtMs > nowMs + FUTURE_SKEW_MS) throw new UsageError(`--said-at ${saidAtRaw} is in the future; give the time the owner said it`);
+  }
+  const options = flagList(args, "option");
+  if (options.length > 1) throw new UsageError("ask answer takes one --option: the letter the owner chose");
+  let optionIndex: number | undefined;
+  if (options.length === 1) {
+    const letter = options[0]!.trim().toUpperCase();
+    if (!/^[A-Z]$/.test(letter)) throw new UsageError(`--option must be one letter from A to Z (got "${options[0]}"); leave it out for a free-text answer`);
+    optionIndex = letter.charCodeAt(0) - 65;
+  }
+  return {
+    // The cloud matches an identifier exactly, so `ctc-12` is sent as `CTC-12`.
+    askIssueId: /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(ask) ? ask.toUpperCase() : ask,
+    ownerQuote: quote,
+    ...(optionIndex !== undefined ? { optionIndex } : {}),
+    saidIn,
+    saidAtMs,
+    ...(role !== undefined ? { acceptedByRole: role } : {}),
+  };
+}
+
+const letterOf = (index: number): string => String.fromCharCode(65 + index);
+
+/** One plain sentence per refusal reason the ask-answer-proxy route answers. */
+function proxyRefusal(ask: string, reason: string, body: ProxyAnswerBody, optionCount: unknown): string {
+  switch (reason) {
+    case "not-an-ask":
+      return `${ask} is not an ask, so there is no answer to record.`;
+    case "issue-not-mirrored":
+      return `Catalyst cannot see ${ask} yet. Check the identifier, or try again in a minute.`;
+    case "already-resolved":
+      return `${ask} already has an answer. Nothing was recorded.`;
+    case "proxy-answer-already-recorded":
+      return `An answer by proxy is already recorded on ${ask}, so nothing new was recorded. If an earlier run of this command failed partway, run it again from the same login with the same --quote, --option, --said-in, --said-at and --role to finish recording that answer.`;
+    case "readiness-needs-tap":
+      return `${ask} must be answered by its owner in the app. An answer by proxy cannot settle it.`;
+    case "ask-has-no-team":
+      return `${ask} is not in a project Catalyst works, so it cannot be answered by proxy.`;
+    case "ask-has-no-owner":
+      return `${ask} has no owner, so nobody's chat answer can be recorded on it.`;
+    case "proxy-caller-not-owner":
+      return `${ask} belongs to someone else. Only an agent logged in as the ask's owner can record their answer. If it is your ask, check that your Linear identity is matched: catalyst identity linear status`;
+    case "proxy-answering-off":
+      return `${ask}'s owner has not turned on answers by proxy, so nothing was recorded. Only the owner can turn it on, by running: catalyst ask proxy on`;
+    case "option-out-of-range": {
+      const chosen = body.optionIndex !== undefined ? letterOf(body.optionIndex) : "that option";
+      if (optionCount === 0) return `${ask} has no lettered options. Leave out --option to record the answer as written.`;
+      if (typeof optionCount === "number" && optionCount > 0) return `${ask} has options A to ${letterOf(optionCount - 1)}; ${chosen} is not one of them.`;
+      return `${ask} has no option ${chosen}.`;
+    }
+    case "already-in-flight":
+      return `Another answer to ${ask} is being recorded right now. Check it again in a moment.`;
+    default:
+      return `${ask}: the answer was refused (${reason || "no reason given"}).`;
+  }
+}
+
+async function answerByProxy(args: ParsedArgs, ctx: Ctx, doc: TenantContract, api: ApiClient, body: ProxyAnswerBody): Promise<number> {
+  const result = await postAgent<Record<string, unknown>>(api, doc, "ask-answer-proxy", body, { accept: [409, 502] });
+  const outcome = result.outcome;
+  // A record-failed answer may be partly written, and the cloud finishes it only for the same said-at,
+  // so the retry names the time this run sent rather than letting --said-at default to a new now.
+  const saidAt = new Date(body.saidAtMs).toISOString();
+  if (args.json) ctx.stdout(JSON.stringify(outcome === "record-failed" ? { ...result, retrySaidAt: saidAt } : result));
+  const ask = typeof result.askIdentifier === "string" ? result.askIdentifier : body.askIssueId;
+  if (outcome === "recorded") {
+    if (!args.json) {
+      const how = body.optionIndex !== undefined ? `${letterOf(body.optionIndex)} by proxy` : "by proxy, in the owner's words";
+      ctx.stdout(`${ask} answered ${how}: "${body.ownerQuote}"`);
+      const failed = Array.isArray(result.failedBlockedComments) ? result.failedBlockedComments.length : typeof result.failedBlockedComments === "number" ? result.failedBlockedComments : 0;
+      if (failed > 0) ctx.stdout(`${failed} held ticket${failed === 1 ? "" : "s"} did not get the note naming this answer; the answer itself is recorded.`);
+      ctx.stdout(`The owner can take it back with: catalyst ask disown ${ask}`);
+    }
+    return 0;
+  }
+  if (outcome === "refused") {
+    if (!args.json) ctx.stdout(proxyRefusal(ask, typeof result.reason === "string" ? result.reason : "", body, result.optionCount));
+    return 1;
+  }
+  if (outcome === "record-failed") {
+    if (!args.json) ctx.stdout(`The answer to ${ask} did not finish recording${typeof result.reason === "string" && result.reason ? ` (${result.reason})` : ""}; part of it may already be on the ask. Run the same command again with --said-at ${saidAt} to finish it.`);
+    return 2;
+  }
+  throw new CliError(`ask-answer-proxy answered an outcome this CLI does not know: ${JSON.stringify(outcome)}`, "shape");
+}
+
+const PROXY_SETTING_PATH = "/api/v1/me/ask-proxy-answering";
+const ASK_DISOWN_PATH = "/api/v1/me/ask-disown";
+type ProxyAction = "status" | "on" | "off";
+
+function proxySettingAction(rest: string[]): ProxyAction {
+  const action = rest[0] ?? "status";
+  if (rest.length > 1 || !["status", "on", "off"].includes(action)) throw new UsageError("ask proxy takes: status | on | off");
+  return action as ProxyAction;
+}
+
+/** The two refusals both personal routes share, in plain words: an account key (403) throws, an
+ *  unmatched Linear identity (409) prints and exits 1. Returns undefined when the status was neither;
+ *  --json has already printed the body, so it prints nothing more. */
+function personalRefusal(args: ParsedArgs, ctx: Ctx, status: number, body: unknown, what: string): number | undefined {
+  const error = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
+  if (status === 403 && error === "personal_credential_required") {
+    throw new CliError(`${what} needs your own login, not the workspace's shared key. Run catalyst login as yourself, then try again.`, "member-required", 2, 403);
+  }
+  if (status === 409 && error === "no_linear_identity") {
+    if (!args.json) ctx.stdout("Your Linear identity is not matched yet, so Catalyst cannot tell which asks are yours. Match it with: catalyst identity linear options, then catalyst identity linear set <linearUserId>");
+    return 1;
+  }
+  if (status === 403 || (status === 409 && error !== undefined)) {
+    throw new CliError(`${what} was refused (${status}${typeof error === "string" ? `: ${error}` : ""})`, status === 403 ? "forbidden" : "http", 2, status);
+  }
+  return undefined;
+}
+
+function proxySettingLine(enabled: boolean, changed: boolean): string {
+  return enabled
+    ? `${changed ? "Turned on: " : "On: "}agents may record an answer you give them in chat on your asks. Turn it off with: catalyst ask proxy off`
+    : `${changed ? "Turned off: " : "Off: "}agents may not record an answer you give them in chat; answer on the ask itself. Turn it on with: catalyst ask proxy on`;
+}
+
+async function proxySetting(args: ParsedArgs, ctx: Ctx, api: ApiClient, action: ProxyAction): Promise<number> {
+  const res =
+    action === "status"
+      ? await api.getJson<{ enabled?: unknown }>(PROXY_SETTING_PATH, { accept: [403, 409], parseAccepted: true })
+      : await api.putJson<{ enabled?: unknown }>(PROXY_SETTING_PATH, { enabled: action === "on" }, { accept: [403, 409] });
+  if (args.json && res.status !== 403) ctx.stdout(JSON.stringify(res.body ?? {}));
+  const refused = personalRefusal(args, ctx, res.status, res.body, "ask proxy");
+  if (refused !== undefined) return refused;
+  if (typeof res.body?.enabled !== "boolean") throw new CliError(`${PROXY_SETTING_PATH} answered without an enabled flag`, "shape");
+  if (!args.json) ctx.stdout(proxySettingLine(res.body.enabled, action !== "status"));
+  return 0;
+}
+
+/** One plain sentence per refusal reason the ask-disown route answers. */
+function disownRefusal(ask: string, reason: string): string {
+  switch (reason) {
+    case "not-owner":
+      return `${ask} is not your ask, so you cannot take back its answer.`;
+    case "not-proxy-answered":
+      return `${ask} was not answered by proxy, so there is nothing to take back.`;
+    case "already-disowned":
+      return `You already took back the answer on ${ask}.`;
+    case "already-in-flight":
+      return `A change to ${ask} is being recorded right now. Check it again in a moment.`;
+    default:
+      return `${ask}: taking back the answer was refused (${reason || "no reason given"}).`;
+  }
+}
+
+async function disown(args: ParsedArgs, ctx: Ctx, api: ApiClient, askTicket: string): Promise<number> {
+  const ask = await resolveIssue(api, askTicket);
+  const res = await api.postJson<Record<string, unknown>>(ASK_DISOWN_PATH, { issueId: ask.id }, { accept: [403, 409, 502] });
+  const body = res.body ?? {};
+  if (args.json && res.status !== 403) ctx.stdout(JSON.stringify(body));
+  const refused = personalRefusal(args, ctx, res.status, body, "ask disown");
+  if (refused !== undefined) return refused;
+  const name = typeof body.askIdentifier === "string" ? body.askIdentifier : ask.identifier;
+  switch (body.outcome) {
+    case "disowned": {
+      if (args.json) return 0;
+      ctx.stdout(`${name} is open again: the answer recorded by proxy is taken back.`);
+      const tickets = Array.isArray(body.tickets) ? (body.tickets as { ticket?: unknown; phase?: unknown; status?: unknown }[]) : [];
+      for (const t of tickets) ctx.stdout(`  ${String(t.ticket ?? "?")}: ${String(t.phase ?? "?")} ${String(t.status ?? "")}`.trimEnd());
+      return 0;
+    }
+    case "refused":
+      if (!args.json) ctx.stdout(disownRefusal(name, typeof body.reason === "string" ? body.reason : ""));
+      return 1;
+    case "disown-failed":
+      if (!args.json) ctx.stdout(`The answer on ${name} was not taken back${typeof body.reason === "string" && body.reason ? ` (${body.reason})` : ""}. Nothing changed; run the same command again.`);
+      return 2;
+    default:
+      throw new CliError(`${ASK_DISOWN_PATH} answered an outcome this CLI does not know: ${JSON.stringify(body.outcome)}`, "shape");
+  }
 }
 
 export interface RankedAsk {

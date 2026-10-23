@@ -155,7 +155,8 @@ export class ApiClient {
       await this.refuseIfNotOk(res, `DELETE ${path}`);
     return {
       status: res.status,
-      body: await this.parseBody<unknown>(res, `DELETE ${path}`),
+      // A revoke may answer 204 with no body.
+      body: res.status === 204 ? null : await this.parseBody<unknown>(res, `DELETE ${path}`),
       headers: res.headers,
     };
   }

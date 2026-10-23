@@ -60,6 +60,7 @@ export function buildFixtureContract(): TenantContract {
       route("POST", "issue-label", true),
       route("POST", "issue-comment", true),
       route("POST", "ask-accept", true),
+      route("POST", "ask-answer-proxy", true),
       route("POST", "ask", true),
       route("POST", "attachment", true),
       route("GET", "attachments", false),

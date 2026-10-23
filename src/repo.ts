@@ -16,6 +16,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { flagBool, positionals, type ParsedArgs } from "./args.js";
 import type { Ctx } from "./config.js";
 import { UsageError } from "./errors.js";
+import { cmdRepoStatus } from "./repo-status.js";
 
 export const BLOCK_START = "<!-- catalyst:start -->";
 export const BLOCK_END = "<!-- catalyst:end -->";
@@ -256,7 +257,9 @@ function checkoutRoot(args: ParsedArgs, sub: string): string {
 
 export async function cmdRepo(args: ParsedArgs, ctx: Ctx): Promise<number> {
   const [sub] = positionals(args);
-  if (sub !== "agents-block" && sub !== "agent-setup") throw new UsageError("repo needs agents-block <path> [--write] or agent-setup <path> [--apply] [--with-check]");
+  if (sub === "status" || sub === "pause" || sub === "resume") return cmdRepoStatus(args, ctx);
+  if (sub !== "agents-block" && sub !== "agent-setup") throw new UsageError("repo needs status, pause <owner/name> --reason <text>, resume <owner/name> [--reason <text>], agents-block <path> [--write] or agent-setup <path> [--apply] [--with-check]");
+  if (args.flags.reason !== undefined) throw new UsageError("--reason belongs to repo pause or resume");
   const root = checkoutRoot(args, sub);
   const emit = (body: Record<string, unknown>, lines: string[]) => { if (args.json) ctx.stdout(JSON.stringify(body)); else for (const l of lines) ctx.stdout(l); };
   if (sub === "agents-block") {

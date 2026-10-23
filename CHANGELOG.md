@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.16.27
+
+A large workspace's local replica now finishes its first download instead of stopping after 30 seconds: it waits as long as data keeps arriving, and gives up only after 150 seconds with no progress. New commands: `catalyst repo status` lists your repositories and whether each is paused, and `catalyst repo pause|resume` pauses or resumes one (owners and admins). `catalyst runner status|stop|start|uninstall` stops a self-hosted machine taking work, starts it again with the same registration, or removes it and revokes its registration. Setup with local sync off now lists an old local replica's files with their sizes and removes them only after you say yes. Setup with local sync on keeps using the replica you already have. On a Mac where Docker Desktop does not share your home folder, setup now says which setting to change (Settings, then Resources, then File sharing).
+
+## 0.16.26
+
+Not published. Its changes ship in 0.16.27.
+
+## 0.16.25
+
+A self-hosted machine that runs several teams' work from one `compose.json` can now take each approved release by itself. Run `catalyst runner update --fleet --dir <the folder that holds compose.json>`, by hand or on a schedule. It switches only the supervisor to the approved images and leaves work that is already running alone. If the machine's teams are not ready again within four minutes, it puts the previous images back. `--check` shows what would change without changing anything.
+
+## 0.16.24
+
+One self-hosted machine can now work for several Linear teams. On a machine already set up for one team, run `catalyst setup --runner` with another team selected, and setup adds that team instead of stopping. Each team's own setting still decides whether its work may run there, and the machine asks each of its teams for work in turn. A new machine starts on Catalyst's current approved release, which can serve several teams from its first setup; a machine you already set up gets that release on its next 15-minute update check.
+
+New: `catalyst mcp status <server>` shows one MCP server's state, how it authenticates, how many of its tools are granted to this machine's login, and how many tools it offers. It then lists the server's last 50 tool calls: when each ran, the ticket and phase it ran for, the tool, how long it took and the outcome. A call that failed names its reason in plain words. The command exits 0 whenever it could read the server, even when some of the calls failed. `--json` prints the server's status and calls exactly as Catalyst Cloud returns them.
+
+## 0.16.23
+
+You can now answer an ask by telling your agent in chat, and have the agent record it for you. `catalyst ask answer <ask> --proxy --quote "<your exact words>" --said-in <session>` records your words on the ask as an answer by proxy, with `--option <letter>` when you picked one. It is kept apart from answers you give on the ask yourself, and the work the ask held moves on. It works only on your own asks, and only after you turn it on with `catalyst ask proxy on` (`catalyst ask proxy` shows whether it is on; `off` turns it off). If an agent recorded something you did not mean, `catalyst ask disown <ask>` takes it back and reopens the ask. Update the Catalyst plugin's skills with the CLI so your agent knows when it may do this.
+
+## 0.16.22
+
+A self-hosted Linux machine set up over SSH now keeps updating after you log out, with no `sudo` step. Setup turns on lingering for your user by itself, and says so along with how to undo it (`loginctl disable-linger $USER`). Only when the machine does not allow that does setup name the one `sudo loginctl enable-linger $USER` command, and it says updates stop at logout until you run it. `catalyst runner auto-update status` now says whether updates keep running after you log out. For a machine you already set up, install this version and run `catalyst runner auto-update on`.
+
+## 0.16.21
+
+`catalyst accounts` now leaves out removed AI accounts: ones an admin revoked, or whose paid access ended. They take no work and take no new credential, so they no longer appear as accounts to repair. The list says how many it left out, and `catalyst accounts --all` shows them, marked "removed — kept for history". Setup now names a revoked account as ended instead of asking you to turn it on. Update the Catalyst plugin's skills along with the CLI: setup's account check uses `--all`, which older CLIs do not know.
+
+## 0.16.20
+
+Setup on Linux now prints every command whole, on its own line, so you can copy it from any terminal width. When this computer still needs the session egress service, setup prints one `sudo` command that checks the installer's fingerprint and installs and starts the service. Run it, then run the same setup command again. When nothing may take work for your workspace yet, setup now names the command that enrolls this computer as a self-hosted machine: `catalyst onboard --runner --team <your team>`.
+
+New: `catalyst env shell` opens your repository's declared environment on your own computer in Docker, with the declared toolchain versions on `PATH`.
+
+## 0.16.19
+
+A self-hosted Mac whose `catalyst` command was installed with Homebrew's Node now keeps its images current and finishes setup's private thoughts storage step. Before, Docker Desktop could not read a file the check needs from the Homebrew folder, so every update and that setup step stopped. Install this version; the next 15-minute check updates the machine.
+
+## 0.16.18
+
+A self-hosted machine now returns to the approved release by itself after setup runs again on it. Before, re-running setup could put older images back while the machine still counted itself current, so it stopped updating. On Linux, the 15-minute update schedule now keeps running after you enable lingering for your user. Install this version, then run `catalyst runner auto-update on` to rewrite the schedule.
+
+## 0.16.17
+
+A self-hosted machine now keeps its own images current. Every 15 minutes it checks for the release Catalyst approved, waits until no work is running on it, switches to the new images, and goes back to the previous ones if the machine is not ready within five minutes. `catalyst runner update --check` shows what would change, and `catalyst runner auto-update status|on|off` controls the schedule. Setup turns it on and now starts new machines on the current approved images. To turn it on for a machine you already set up, run `catalyst runner auto-update on`.
+
+## 0.16.16
+
+Publishing a browser verification recording now saves its proof card with the required attachment details. Update the CLI before using `browser-verify --publish`.
+
 ## 0.16.15
 
 Command-line workflows can report stage progress with `catalyst stage start`, `renew`, `done`, and `fail`, and choose an eligible AI account and model for a local session with `catalyst seat checkout`. Retries reuse the same stage attempt. `catalyst write create --label` and `write label --add`/`--remove` now accept a label by name, and a refused write exits non-zero with a JSON error on stdout under `--json`.

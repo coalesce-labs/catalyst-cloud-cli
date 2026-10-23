@@ -1,6 +1,7 @@
-// prompt.ts — the one interactive read in the CLI: asking for the personal key on a terminal without
-// echoing it. The streams are parameters so the tests can drive it without a real TTY.
+// prompt.ts — the CLI's interactive reads: asking for the personal key on a terminal without
+// echoing it, and one [y/N] question. The streams are parameters so the tests can drive it without a real TTY.
 import { createInterface } from "node:readline";
+import { createInterface as createPromiseInterface } from "node:readline/promises";
 
 export interface PromptIo {
   input: NodeJS.ReadableStream;
@@ -10,6 +11,17 @@ export interface PromptIo {
 /** True when there is a terminal to prompt on. Both ends matter: the question needs somewhere to go. */
 export function stdinIsTty(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
+
+/** Ask a `[y/N]` question on stderr and read the answer. False without a terminal, and for anything but y/yes. */
+export async function confirmYesNo(question: string): Promise<boolean> {
+  if (!stdinIsTty()) return false;
+  const prompt = createPromiseInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return /^(y|yes)$/i.test((await prompt.question(question)).trim());
+  } finally {
+    prompt.close();
+  }
 }
 
 /**

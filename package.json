@@ -1,6 +1,6 @@
 {
   "name": "@catalyst-cloud/cli",
-  "version": "0.16.15",
+  "version": "0.16.27",
   "description": "Set up Catalyst Cloud, check your tickets and manage your account from the command line.",
   "license": "MIT",
   "type": "module",
@@ -53,16 +53,16 @@
     "prepublishOnly": "node scripts/release-train-check.mjs --publish cli"
   },
   "dependencies": {
-    "@catalyst-cloud/sdk": "0.16.6",
+    "@catalyst-cloud/sdk": "0.16.11",
     "@clack/prompts": "1.8.1",
     "fast-string-width": "3.0.2",
     "fast-wrap-ansi": "0.2.2",
     "smol-toml": "^1.7.1",
     "yaml": "^2.9.0",
-    "@catalyst-cloud/sdk-replica-node": "0.16.6"
+    "@catalyst-cloud/sdk-replica-node": "0.16.11"
   },
   "devDependencies": {
-    "@catalyst-cloud/schema": "0.16.5",
+    "@catalyst-cloud/schema": "0.16.9",
     "@types/node": "^26.3.0",
     "@vitest/coverage-v8": "^4.1.11",
     "typescript": "^7.0.2",
