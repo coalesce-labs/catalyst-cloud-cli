@@ -97,6 +97,10 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       value: false,
       help: "include the optional local sync setup in this plan",
     },
+    "remove-local-data": {
+      value: false,
+      help: "with local sync off, stop existing local writers and delete the listed replica and event-cache files; keep login, contract and settings",
+    },
     runner: {
       value: false,
       optionalValue: true,
@@ -517,7 +521,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
     data: {
       value: false,
-      help: "historical flag; shared data folders are always kept",
+      help: "include the listed replica DB, sidecars and local event cache; shared data folders, login, contract and settings are kept",
     },
     yes: {
       value: false,
@@ -585,7 +589,7 @@ export const VERB_USAGE: Record<string, string> = {
   login:
     "login [--base-url <url>] [--start-replica]   (keyless; or --key <personal-key> / CATALYST_CLOUD_TOKEN)",
   onboard:
-    "onboard [--team <ID|key>] [--repo <owner/name>]... [--coding-account <slot>] [--resume-from <step>] [--only <step>] [--local-sync] [--runner|--no-runner] [--no-color] [--yes] [--dry-run] [--json] | onboard --headless [--key-file <path>] [--team ...] [--repo ...]... [--coding-account ...] [--runner yes|no] [--json]",
+    "onboard [--team <ID|key>] [--repo <owner/name>]... [--coding-account <slot>] [--resume-from <step>] [--only <step>] [--local-sync] [--remove-local-data] [--runner|--no-runner] [--no-color] [--yes] [--dry-run] [--json] | onboard --headless [--key-file <path>] [--team ...] [--repo ...]... [--coding-account ...] [--runner yes|no] [--remove-local-data] [--json]",
   install: "install [--skills-dir <dir>] [--force]",
   status: "status",
   notice: "notice",
