@@ -4,7 +4,7 @@
 // reason instead of throwing: a customer who cannot reach npm must still get a verdict (CTC-2160).
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { readApprovalCache } from "./approved-release.js";
+import { readApprovalCache, supportedReleaseLine } from "./approved-release.js";
 import { LEGACY_PACKAGE_NAME, publishedCachePathFor, type Ctx } from "./config.js";
 
 /** CTC-3479 — asks about the forwarder package whichever package is installed. The release publishes
@@ -97,12 +97,13 @@ export async function latestPublishedVersion(ctx: Ctx, opts: { offline?: boolean
 /**
  * CTC-6708 — the CLI's "newest" answer is the approved release once this install has read one: every
  * applying release check records it, the 15-minute schedule included. Reading it is local, so this
- * adds no network call. Only an install that has never read an approved release falls back to the
- * npm lookup above, and its answer stays labelled the latest published version, never approved.
+ * adds no network call. An install that has never read an approved release, or read one on another
+ * train, falls back to the npm lookup above, and its answer stays labelled the latest published version.
  */
 export async function newestCliVersion(ctx: Ctx, opts: { offline?: boolean } = {}): Promise<PublishedLookup> {
   const approved = readApprovalCache(ctx.home)?.release;
   const cli = approved?.members.cli;
-  if (approved && cli) return { latest: cli, reason: null, source: "approved", ...(approved.skills.cloud ? { skills: approved.skills.cloud.version } : {}) };
+  // CTC-6741: a release on another train is never applied, so it is never the answer either.
+  if (approved && cli && approved.releaseLine === supportedReleaseLine()) return { latest: cli, reason: null, source: "approved", ...(approved.skills.cloud ? { skills: approved.skills.cloud.version } : {}) };
   return latestPublishedVersion(ctx, opts);
 }
