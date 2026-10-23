@@ -19,6 +19,8 @@ export interface LiveEventsOptions {
   /** Worker origin INCLUDING the `/api/v1` prefix. */
   baseUrl: string;
   accountId: string;
+  /** Installed parent CLI release, distinct from the SDK or guest process version. */
+  cliVersion?: string;
   /** How the socket authorizes: a static token (key rail) or a fresh-per-connect bearer (OAuth). */
   auth: AuthStrategy;
   /** The current bearer for the head-only `/snapshot` fetch — resolved FRESH each call so an OAuth
@@ -171,6 +173,7 @@ export function createLiveEventsClient(sdk: LiveSdk, opts: LiveEventsOptions): L
     baseUrl: opts.baseUrl,
     accountId: opts.accountId,
     auth: opts.auth,
+    connectParams: () => opts.cliVersion ? { cli_version: opts.cliVersion } : undefined,
     reseed: reseedHead,
     getCursor: () => state?.cursor ?? null,
     onChange: (frame) => {
