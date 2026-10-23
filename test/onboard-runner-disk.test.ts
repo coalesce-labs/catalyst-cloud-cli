@@ -89,7 +89,7 @@ describe("the Mac's host-disk LaunchAgent", () => {
    * like the real script. A started agent publishes at once and then every `--interval` seconds,
    * as the looping script does. `launchd: "pended"` is mini-2 over SSH (CTC-5929): it loads the
    * agent but starts it only on kickstart. `"never"` starts nothing. */
-  function machine(options: { clt?: boolean; brew?: boolean; bootstrap?: boolean; launchd?: "runs" | "pended" | "never" } = {}) {
+  function machine(options: { clt?: boolean; brew?: boolean; intelBrew?: boolean; bootstrap?: boolean; launchd?: "runs" | "pended" | "never" } = {}) {
     const home = temp();
     const dir = join(home, "state", "runner");
     mkdirSync(join(dir, "host-disk"), { recursive: true });
@@ -137,10 +137,13 @@ describe("the Mac's host-disk LaunchAgent", () => {
       }
       return { status: 1, stdout: "", stderr: "" };
     };
-    const exists = (path: string) =>
-      path === "/usr/bin/python3" ? options.clt !== false
-        : path === "/opt/homebrew/bin/python3" ? options.brew === true
-          : existsSync(path);
+    // Every interpreter python() probes is the fake's to answer, never the host's (CTC-5929).
+    const pythons: Record<string, boolean> = {
+      "/usr/bin/python3": options.clt !== false,
+      "/opt/homebrew/bin/python3": options.brew === true,
+      "/usr/local/bin/python3": options.intelBrew === true,
+    };
+    const exists = (path: string) => pythons[path] ?? existsSync(path);
     // Docker Desktop is the active engine, with its default disk image folder.
     const desktop = join(home, "Library/Containers/com.docker.docker/Data/vms/0/data");
     mkdirSync(desktop, { recursive: true });
@@ -212,6 +215,12 @@ describe("the Mac's host-disk LaunchAgent", () => {
     expect(installHostDiskSampler(m.dir, m.deps)).toBe("ready");
     expect(m.calls.some(call => call.startsWith("/usr/bin/python3"))).toBe(false);
     expect(readFileSync(m.plist, "utf8")).toContain("<string>/opt/homebrew/bin/python3</string>");
+  });
+
+  test("an Intel Mac's Homebrew python3 is used when the Command Line Tools are absent", () => {
+    const m = machine({ clt: false, intelBrew: true });
+    expect(installHostDiskSampler(m.dir, m.deps)).toBe("ready");
+    expect(readFileSync(m.plist, "utf8")).toContain("<string>/usr/local/bin/python3</string>");
   });
 
   test("no usable python3 is named, with nothing written", () => {
