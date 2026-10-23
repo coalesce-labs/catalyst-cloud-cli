@@ -215,7 +215,7 @@ catalyst repo resume acme/app
 
 Any workspace member can read status. Pausing or resuming requires a workspace owner or admin. Pause requires a reason; resume accepts an optional reason. A supplied reason must contain 1 to 500 characters after trimming. These commands work outside a local checkout.
 
-Paused rows show who paused the repository, when and why, when those details are available. An empty list means no repositories are visible to your login. After a write, the command reads and prints the repository's current state. If that read fails, it reports that the write succeeded and status could not be read; check `catalyst repo status` before repeating a write.
+Paused rows show who paused the repository (their email, or the key or operator that paused it), when and why, when those details are available. An empty list means no repositories are visible to your login. After a write, the command reads and prints the repository's current state. If that read fails, it reports that the write succeeded and status could not be read; check `catalyst repo status` before repeating a write.
 
 `--json` preserves the list response for status and prints the refreshed repository row for a write. An older cloud reports that repository status is not served yet and needs a newer cloud. Agents can use `catalyst capabilities --json` to check route availability against the cached cloud contract.
 

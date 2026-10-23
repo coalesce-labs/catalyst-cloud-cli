@@ -5,9 +5,8 @@ import { main } from "../src/cli";
 import { configPathFor, type MeUser } from "../src/config";
 import { makeCtx, tempHome, type TestCtx } from "./helpers";
 
-// Planning fixture, not a captured /me response: paths come from CTC-4357;
-// the envelope and projects follow test/onboard-repositories-team.test.ts's agent list.
-// Pause attribution follows the { actor, email } shape reported by PR #454's review.
+// The fixture follows catalyst-cloud's RepoPauseWire (apps/mirror/src/registry/repo-pause-record-routes.ts),
+// served by the key routes under /api/v1/agent/repos: pausedBy is { actor, email }.
 type Body = Record<string, unknown>;
 type Request = { method: string; path: string; body: unknown; authorization: string | null };
 const now = Date.parse("2026-09-29T15:00:00Z");
@@ -49,6 +48,10 @@ beforeEach(() => {
         authorization: new Headers(init?.headers).get("authorization"),
       };
       requests.push(request);
+      // Like the live cloud, the /me family is cookie-session only and refuses a key.
+      if (request.path.startsWith("/api/v1/me/repos") && request.authorization?.startsWith("Bearer ")) {
+        return json({ error: "unauthorized" }, 401);
+      }
       return respond(request, requests.length - 1);
     },
   });
@@ -63,7 +66,7 @@ describe("repo status", () => {
       row({ id: "repo-retired", name: "retired", fullName: "acme/retired", status: "archived", projects: [{ id: "project-old", name: "Legacy", teamKey: "OLD" }] }),
     ]));
     expect(await main(["repo", "status"], ctx)).toBe(0);
-    expect(requests).toEqual([{ method: "GET", path: "/api/v1/me/repos", body: null, authorization: `Bearer ${personalKey}` }]);
+    expect(requests).toEqual([{ method: "GET", path: "/api/v1/agent/repos", body: null, authorization: `Bearer ${personalKey}` }]);
     expect(ctx.out).toEqual([
       "acme/app: paused by sam@example.com 3 hours ago: flaky deploy", "  projects: Application (APP)",
       "acme/api: active", "  projects: Application (APP)",
@@ -158,16 +161,16 @@ describe("repo pause and resume", () => {
     mutationFixture(row({ id }), row({ id, status, pausedAt: now }));
     expect(await main(["repo", action, "ACME/App", ...(reason === undefined ? [] : ["--reason", reason])], ctx)).toBe(0);
     expect(requests).toEqual([
-      { method: "GET", path: "/api/v1/me/repos", body: null, authorization: `Bearer ${personalKey}` },
-      { method: "POST", path: `/api/v1/me/repos/${encodeURIComponent(id)}/${action}`, body: reason === undefined ? {} : { reason: reason.trim() }, authorization: `Bearer ${personalKey}` },
-      { method: "GET", path: "/api/v1/me/repos", body: null, authorization: `Bearer ${personalKey}` },
+      { method: "GET", path: "/api/v1/agent/repos", body: null, authorization: `Bearer ${personalKey}` },
+      { method: "POST", path: `/api/v1/agent/repos/${action}`, body: reason === undefined ? { repoId: id } : { repoId: id, reason: reason.trim() }, authorization: `Bearer ${personalKey}` },
+      { method: "GET", path: "/api/v1/agent/repos", body: null, authorization: `Bearer ${personalKey}` },
     ]);
     expect(ctx.out).toEqual([status === "paused" ? "acme/app: paused by sam@example.com just now: flaky deploy" : "acme/app: active", "  projects: Application (APP)"]);
   });
   test.each(["pause", "resume"])("%s accepts exactly 500 trimmed characters", async (action) => {
     mutationFixture();
     expect(await main(["repo", action, "acme/app", "--reason", ` ${"x".repeat(500)} `], ctx)).toBe(0);
-    expect(requests[1]?.body).toEqual({ reason: "x".repeat(500) });
+    expect(requests[1]?.body).toEqual({ repoId: "repo-app", reason: "x".repeat(500) });
   });
   test.each(["pause", "resume"].flatMap((action) => [" ", "x".repeat(501), ""].map((reason) => ({ action, reason }))))("$action rejects invalid reason before authentication", async ({ action, reason }) => {
     rmSync(configPathFor(home));

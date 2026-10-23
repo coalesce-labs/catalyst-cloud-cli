@@ -1,10 +1,10 @@
-// Repository lifecycle commands use the person's member routes, independent of local checkouts.
+// Repository lifecycle commands use the key routes under /api/v1/agent/repos, independent of local checkouts.
 import { flagString, positionals, type ParsedArgs } from "./args.js";
 import { requireConfig, type Ctx } from "./config.js";
 import { MeError, UsageError } from "./errors.js";
 import { apiClient } from "./transport.js";
 
-const LIST_ROUTE = "/api/v1/me/repos";
+const LIST_ROUTE = "/api/v1/agent/repos";
 interface Repository extends Record<string, unknown> {
   id: string;
   owner: string;
@@ -26,7 +26,7 @@ function repository(value: unknown): value is Repository {
 }
 function decodeList(value: unknown): RepositoryList {
   if (!object(value) || !Array.isArray(value.repositories) || !value.repositories.every(repository) || typeof value.canManage !== "boolean") {
-    throw new MeError("GET /api/v1/me/repos returned an unexpected repository list shape", "shape");
+    throw new MeError(`GET ${LIST_ROUTE} returned an unexpected repository list shape`, "shape");
   }
   return { ...value, repositories: value.repositories, canManage: value.canManage };
 }
@@ -110,7 +110,7 @@ export async function cmdRepoStatus(args: ParsedArgs, ctx: Ctx): Promise<number>
   if (!selected) return refuse(args, ctx, `no repository ${wanted} is visible to your login; check catalyst repo status`, undefined, { error: "repository-not-visible" });
   if (matches.length !== 1) return refuse(args, ctx, `repository ${wanted} is ambiguous; check catalyst repo status`, undefined, { error: "repository-ambiguous" });
   if (selected.status === "archived") return refuse(args, ctx, `${wanted} is archived and cannot be paused or resumed`, 409, { error: "repository-archived" });
-  const written = await client.postJson(`${LIST_ROUTE}/${encodeURIComponent(selected.id)}/${action}`, reason === undefined ? {} : { reason }, { accept });
+  const written = await client.postJson(`${LIST_ROUTE}/${action}`, reason === undefined ? { repoId: selected.id } : { repoId: selected.id, reason }, { accept });
   if (written.status >= 400) {
     const detail = serverDetail(written.body);
     let message = `could not ${action} ${wanted}`;
