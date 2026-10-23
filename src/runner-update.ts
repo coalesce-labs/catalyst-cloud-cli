@@ -618,8 +618,10 @@ export function dockerRunnerUpdateEngine(
       const kept: string[] = [];
       for (const ref of images) {
         if ((await docker(["image", "rm", ref], { signal, timeoutMs: 120_000 })).code === 0) continue;
-        // A refusal for an image that is already gone is a removal; any other refusal keeps it.
-        if ((await docker(["image", "inspect", "--format", "{{.Id}}", ref], { signal })).code === 0) kept.push(ref);
+        // Only Docker saying the image does not exist counts as removed. A refusal, or a daemon that
+        // did not answer, keeps it for the next run.
+        const inspect = await docker(["image", "inspect", "--format", "{{.Id}}", ref], { signal });
+        if (inspect.code === 0 || !/No such image/i.test(inspect.stderr ?? "")) kept.push(ref);
       }
       return kept;
     },
