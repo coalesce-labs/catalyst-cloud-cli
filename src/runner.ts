@@ -90,6 +90,8 @@ interface UninstallJournal {
   tenant: string | null;
   requestId: string | null;
   teamId: string | null;
+  /** Set once the cloud revoked (or no longer had) the host or its key; until then `runner start` may undo the stop. */
+  cloudRevoked: boolean;
 }
 
 function owned(path: string, uid: number, kind: "file" | "directory"): boolean {
@@ -159,7 +161,8 @@ function readJournal(dir: string): UninstallJournal | null {
     const value = JSON.parse(readFileSync(join(dir, JOURNAL), "utf8")) as Record<string, unknown>;
     const field = (key: string, shape: RegExp) => typeof value[key] === "string" && shape.test(value[key] as string) ? value[key] as string : null;
     return value.version === 1 ? { version: 1, hostId: field("hostId", HOST_ID), team: field("team", /^[A-Za-z0-9_-]{1,32}$/),
-      tenant: field("tenant", /^[A-Za-z0-9._-]{1,128}$/), requestId: field("requestId", UUID), teamId: field("teamId", /^[A-Za-z0-9-]{1,64}$/) } : null;
+      tenant: field("tenant", /^[A-Za-z0-9._-]{1,128}$/), requestId: field("requestId", UUID), teamId: field("teamId", /^[A-Za-z0-9-]{1,64}$/),
+      cloudRevoked: value.cloudRevoked === true } : null;
   } catch { return null; }
 }
 function writeJournal(dir: string, journal: UninstallJournal): void {
@@ -247,8 +250,15 @@ export async function cmdRunnerLifecycle(args: ParsedArgs, ctx: Ctx, deps: Runne
       }
       return 0;
     }
-    if (exists(join(inst.dir, JOURNAL)))
-      throw new CliError("An uninstall of this runner has started, so it cannot be started again. Finish it with: catalyst runner uninstall", "runner_uninstall_pending", 1);
+    if (exists(join(inst.dir, JOURNAL))) {
+      // An uninstall that stopped the runner but changed nothing in the cloud (no login, another
+      // account, a member's 403, an outage) leaves a machine that can still work: start undoes it.
+      const pending = readJournal(inst.dir);
+      if (pending === null || pending.cloudRevoked)
+        throw new CliError("An uninstall of this runner has started, so it cannot be started again. Finish it with: catalyst runner uninstall", "runner_uninstall_pending", 1);
+      rmSync(join(inst.dir, JOURNAL), { force: true });
+      say("An earlier uninstall stopped this runner before the cloud changed anything, so it is cancelled.");
+    }
     if (!before) {
       const up = await run("docker", [...runnerComposeArgs(inst), "up", "--detach"], { timeoutMs: 600_000 });
       if (up.code !== 0 || (await supervisorRunning(run, inst)) !== true)
@@ -291,8 +301,8 @@ async function uninstall(
 
   // The cloud identity first, while the credential volume still exists. A journal from an earlier,
   // interrupted run supplies it after the volume is gone.
-  let journal: UninstallJournal = inst ? readJournal(inst.dir) ?? { version: 1, hostId: null, team: null, tenant: null, requestId: null, teamId: null }
-    : { version: 1, hostId: null, team: null, tenant: null, requestId: null, teamId: null };
+  let journal: UninstallJournal = inst ? readJournal(inst.dir) ?? { version: 1, hostId: null, team: null, tenant: null, requestId: null, teamId: null, cloudRevoked: false }
+    : { version: 1, hostId: null, team: null, tenant: null, requestId: null, teamId: null, cloudRevoked: false };
   if (inst && !journal.hostId && exists(join(inst.dir, ".env")) && inst.files.length > 0) {
     const enrollment = await dockerRunnerEngine({ exec: dockerEnvRun(run), platform }).enrollment(inst.dir);
     if (enrollment && !("unenrolled" in enrollment)) {
@@ -318,6 +328,22 @@ async function uninstall(
       return 2;
     }
   }
+  // The cloud steps need an owner or admin login on this runner's account. Check that before
+  // anything changes, so a wrong login leaves the machine running and taking work.
+  const cfg = journal.hostId || journal.requestId ? loadConfig(ctx.home) : null;
+  if (journal.hostId || journal.requestId) {
+    if (!cfg) record("host registration", "failed", "not logged in: run catalyst login as an owner or admin, then run this again");
+    else if (journal.tenant && cfg.account !== journal.tenant)
+      record("host registration", "failed", `this runner belongs to account ${journal.tenant}, but you are logged in to ${cfg.account}`);
+    if (steps.length > 0) {
+      if (args.json) ctx.stdout(JSON.stringify({ removed: false, steps, leftBehind: [] }));
+      else {
+        for (const s of steps) ctx.stdout(`${s.outcome.padEnd(7)} ${s.item}${s.detail ? ` (${s.detail})` : ""}`);
+        ctx.stdout("Nothing was changed: the runner keeps running. Fix the line above and run: catalyst runner uninstall");
+      }
+      return 1;
+    }
+  }
   if (inst) writeJournal(inst.dir, journal);
 
   // 1. No new work: stop the supervisor before the cloud forgets it.
@@ -328,48 +354,42 @@ async function uninstall(
 
   // 2. The cloud: the host registration, the runner key, and admission when no other machine needs it.
   let cloudFailed = false;
-  if (journal.hostId || journal.requestId) {
-    const cfg = loadConfig(ctx.home);
-    if (!cfg) {
-      record("host registration", "failed", "not logged in: run catalyst login as an owner or admin, then run this again");
-      cloudFailed = true;
-    } else if (journal.tenant && cfg.account !== journal.tenant) {
-      record("host registration", "failed", `this runner belongs to account ${journal.tenant}, but you are logged in to ${cfg.account}`);
-      cloudFailed = true;
-    } else {
-      const client = apiClient(cfg, ctx);
-      const account = encodeURIComponent(cfg.account);
-      const call = async (label: string, request: () => Promise<{ status: number }>, done: Outcome, statuses: Record<number, [Outcome, string?]>) => {
-        try {
-          const { status } = await request();
-          const [outcome, detail] = status >= 200 && status < 300 ? [done] : statuses[status] ?? ["failed", `the cloud answered ${status}`];
-          record(label, outcome, detail);
-          if (outcome === "failed") cloudFailed = true;
-        } catch (error) {
-          record(label, "failed", error instanceof Error ? error.message : "the cloud could not be reached");
-          cloudFailed = true;
-        }
-      };
-      if (journal.hostId)
-        await call("host registration", () => client.deleteJson(`/api/v1/hosts/${encodeURIComponent(journal.hostId!)}?account=${account}`, { accept: [403, 404] }),
-          "revoked", { 404: ["absent", "already revoked"], 403: ["failed", "admin access is required"] });
-      else record("host registration", "absent", "this machine never enrolled");
-      if (journal.requestId)
-        await call("runner key", () => client.deleteJson(`/api/v1/agent/runner-keys/${journal.requestId}?account=${account}`, { accept: [403, 404, 409, 503] }),
-          "revoked", { 404: ["absent", "no key was issued for this machine"], 403: ["failed", "admin access is required"],
-            409: ["failed", "the key's issue is still settling; run this again shortly"], 503: ["failed", "the key service is unavailable; run this again shortly"] });
-      if (journal.teamId && journal.team && !cloudFailed) {
-        // Admission is the team's, not the machine's: switch it off only when no machine remains.
-        try {
-          const listed = await client.getJson<{ hosts?: { team?: unknown; revokedAtMs?: unknown; hostId?: unknown }[] }>(`/api/v1/hosts/enrollments?account=${account}`);
-          const others = (listed.body.hosts ?? []).filter(h => h.team === journal.team && h.revokedAtMs === null && h.hostId !== journal.hostId);
-          if (others.length > 0) record("team runner admission", "kept", `${others.length} other machine(s) still run team ${journal.team}`);
-          else {
-            const put = await client.putJson(`/api/v1/agent/runner-admission?account=${account}&team=${encodeURIComponent(journal.teamId)}`, { admissionEnabled: false }, { accept: [403, 404, 409] });
-            record("team runner admission", put.status === 200 ? "removed" : "kept", put.status === 200 ? "switched off: no machine runs this team" : `left as it was (the cloud answered ${put.status})`);
-          }
-        } catch { record("team runner admission", "kept", "left as it was: the machine list could not be read"); }
+  if (cfg) {
+    const client = apiClient(cfg, ctx);
+    const account = encodeURIComponent(cfg.account);
+    const call = async (label: string, request: () => Promise<{ status: number }>, done: Outcome, statuses: Record<number, [Outcome, string?]>) => {
+      try {
+        const { status } = await request();
+        const [outcome, detail] = status >= 200 && status < 300 ? [done] : statuses[status] ?? ["failed", `the cloud answered ${status}`];
+        record(label, outcome, detail);
+        if (outcome === "failed") cloudFailed = true;
+        else if (inst && !journal.cloudRevoked) { journal = { ...journal, cloudRevoked: true }; writeJournal(inst.dir, journal); }
+      } catch (error) {
+        record(label, "failed", error instanceof Error ? error.message : "the cloud could not be reached");
+        cloudFailed = true;
       }
+    };
+    if (journal.hostId)
+      await call("host registration", () => client.deleteJson(`/api/v1/hosts/${encodeURIComponent(journal.hostId!)}?account=${account}`, { accept: [403, 404] }),
+        "revoked", { 404: ["absent", "already revoked"], 403: ["failed", "admin access is required"] });
+    else record("host registration", "absent", "this machine never enrolled");
+    if (journal.requestId)
+      await call("runner key", () => client.deleteJson(`/api/v1/agent/runner-keys/${journal.requestId}?account=${account}`, { accept: [403, 404, 409, 503] }),
+        "revoked", { 404: ["absent", "no key was issued for this machine"], 403: ["failed", "admin access is required"],
+          409: ["failed", "the key's issue is still settling; run this again shortly"], 503: ["failed", "the key service is unavailable; run this again shortly"] });
+    if (journal.teamId && journal.team && !cloudFailed) {
+      // Admission is the team's, not the machine's: switch it off only when no machine remains.
+      try {
+        const listed = await client.getJson<{ hosts?: { team?: unknown; teams?: unknown; revokedAtMs?: unknown; hostId?: unknown }[] }>(`/api/v1/hosts/enrollments?account=${account}`);
+        // A machine serves its enrolled team and every team added to it later (CTC-4455).
+        const serves = (h: { team?: unknown; teams?: unknown }) => h.team === journal.team || (Array.isArray(h.teams) && h.teams.includes(journal.team));
+        const others = (listed.body.hosts ?? []).filter(h => serves(h) && h.revokedAtMs === null && h.hostId !== journal.hostId);
+        if (others.length > 0) record("team runner admission", "kept", `${others.length} other machine(s) still run team ${journal.team}`);
+        else {
+          const put = await client.putJson(`/api/v1/agent/runner-admission?account=${account}&team=${encodeURIComponent(journal.teamId)}`, { admissionEnabled: false }, { accept: [403, 404, 409] });
+          record("team runner admission", put.status === 200 ? "removed" : "kept", put.status === 200 ? "switched off: no machine runs this team" : `left as it was (the cloud answered ${put.status})`);
+        }
+      } catch { record("team runner admission", "kept", "left as it was: the machine list could not be read"); }
     }
   }
   if (cloudFailed) return finish(args, ctx, steps, inst, true,

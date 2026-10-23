@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { main } from "../src/cli";
-import { readManifest, writeConfig } from "../src/config";
+import { configPathFor, loadConfig, readManifest, writeConfig } from "../src/config";
 import type { RunnerCommand } from "../src/runner";
 import { makeCtx, tempHome, type TestCtx } from "./helpers";
 
@@ -79,7 +79,7 @@ beforeEach(() => {
       const url = String(input);
       const method = init?.method ?? "GET";
       cloud.push({ method, url, body: typeof init?.body === "string" ? JSON.parse(init.body) : null });
-      const status = cloudStatus[method] ?? (method === "DELETE" && url.includes("runner-keys") ? 204 : 200);
+      const status = cloudStatus[`${method} ${url.includes("runner-keys") ? "runner-keys" : "hosts"}`] ?? cloudStatus[method] ?? (method === "DELETE" && url.includes("runner-keys") ? 204 : 200);
       if (status === 204) return new Response(null, { status });
       if (method === "GET") return Response.json({ hosts: otherHosts });
       if (method === "PUT") return Response.json({ account: "acme", admissionEnabled: false }, { status });
@@ -201,16 +201,16 @@ describe("runner uninstall", () => {
     expect(existsSync(dir)).toBe(false);
   });
 
-  it("keeps the credential when the cloud refuses, then finishes on a rerun from its journal", async () => {
-    cloudStatus.DELETE = 403;
+  it("keeps the credential when the cloud revoked only part, then finishes on a rerun from its journal", async () => {
+    cloudStatus["DELETE runner-keys"] = 503;
     expect(await runner("uninstall", "--yes")).toBe(1);
     expect(docker().some(c => c.includes(" down "))).toBe(false);
     expect(existsSync(join(dir, ".env"))).toBe(true);
-    expect(JSON.parse(readFileSync(join(dir, "uninstall.json"), "utf8"))).toMatchObject({ hostId: HOST, requestId: REQUEST, team: "ADV" });
-    expect(ctx.out.join("\n")).toContain("admin access is required");
+    expect(JSON.parse(readFileSync(join(dir, "uninstall.json"), "utf8"))).toMatchObject({ hostId: HOST, requestId: REQUEST, team: "ADV", cloudRevoked: true });
+    expect(ctx.out.join("\n")).toContain("the key service is unavailable");
     // The credential volume cannot be read any more; the journal still names the host.
     fake.enrolled = false;
-    delete cloudStatus.DELETE;
+    delete cloudStatus["DELETE runner-keys"];
     cloud = [];
     ctx.out.length = 0;
     await expect(runner("start")).resolves.toBe(1);
@@ -218,6 +218,37 @@ describe("runner uninstall", () => {
     expect(await runner("uninstall", "--yes")).toBe(0);
     expect(cloud[0]).toMatchObject({ method: "DELETE", url: expect.stringContaining(`/api/v1/hosts/${HOST}`) });
     expect(existsSync(join(dir, "uninstall.json"))).toBe(false);
+  });
+
+  it("CTC-5930: a member's refused uninstall changes nothing in the cloud, so runner start brings the machine back", async () => {
+    cloudStatus.DELETE = 403;
+    expect(await runner("uninstall", "--yes")).toBe(1);
+    expect(ctx.out.join("\n")).toContain("admin access is required");
+    expect(JSON.parse(readFileSync(join(dir, "uninstall.json"), "utf8"))).toMatchObject({ hostId: HOST, cloudRevoked: false });
+    fake.supervisor = "exited";
+    fake.calls = [];
+    ctx.out.length = 0;
+    expect(await runner("start")).toBe(0);
+    expect(existsSync(join(dir, "uninstall.json"))).toBe(false);
+    expect(docker().some(c => c.includes(" up --detach"))).toBe(true);
+    expect(ctx.out.join("\n")).toContain("before the cloud changed anything, so it is cancelled");
+  });
+
+  it.each(["not logged in", "another account"] as const)("CTC-5930: %s, uninstall changes nothing and the runner keeps taking work", async (mode) => {
+    if (mode === "not logged in") rmSync(configPathFor(ctx.home), { force: true });
+    else writeConfig(ctx.home, { ...loadConfig(ctx.home)!, account: "other" });
+    expect(await runner("uninstall", "--yes")).toBe(1);
+    expect(ctx.out.join("\n")).toContain("Nothing was changed: the runner keeps running.");
+    expect(docker().some(c => c.includes(" stop supervisor"))).toBe(false);
+    expect(existsSync(join(dir, "uninstall.json"))).toBe(false);
+    expect(cloud).toEqual([]);
+  });
+
+  it("CTC-5930: keeps team admission on while another machine serves the team as an added team", async () => {
+    otherHosts = [{ hostId: "host_other", team: "OPS", teams: ["OPS", "ADV"], revokedAtMs: null }];
+    expect(await runner("uninstall", "--yes")).toBe(0);
+    expect(cloud.some(c => c.method === "PUT")).toBe(false);
+    expect(ctx.out.join("\n")).toContain("1 other machine(s) still run team ADV");
   });
 
   it("treats a host the cloud already revoked as done, and leaves a network another owner made", async () => {
