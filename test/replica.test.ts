@@ -16,6 +16,7 @@ import {
   readWriterState,
   replicaStatus,
   resetSqliteCache,
+  SNAPSHOT_IDLE_TIMEOUT_MS,
   writerStatePath,
 } from "../src/replica";
 import { BUN_MIN, FIX_COMMAND } from "../src/runtime";
@@ -219,6 +220,33 @@ describe("replica start backs off and stops after repeated snapshot failures", (
     const out = ctx.out.join("\n");
     expect(out).toContain("catalyst replica start --detach");
     expect(out).toContain("optional");
+  });
+
+  test("the snapshot no-progress bound the CLI passes reaches the SDK: a pull slower than it fails with the SDK's idle error (CTC-6569)", async () => {
+    await seedJoined(home, server);
+    server.snapshotDelayMs = 300; // the mirror is still preparing the snapshot
+    try {
+      const { sleep } = fakeSleep();
+      const code = await main(["replica", "start"], ctx, {
+        replica: {
+          waitForStop: () => new Promise<void>(() => {}),
+          sleep,
+          random: () => 0.5,
+          snapshotRetry: { maxFailures: 1 },
+          snapshotIdleTimeoutMs: 100,
+        },
+      });
+      expect(code).toBe(1);
+      expect(readWriterState(defaultReplicaDbFor(home))!.lastError).toContain("no progress for 100ms");
+    } finally {
+      server.snapshotDelayMs = undefined;
+    }
+  });
+
+  test("the production snapshot no-progress bound outlasts the mirror's 120 s snapshot preparation (CTC-6569)", () => {
+    // A 30 s bound aborted nearly every first sync of a large workspace; host-sync and web pass 150 s.
+    expect(SNAPSHOT_IDLE_TIMEOUT_MS).toBe(150_000);
+    expect(SNAPSHOT_IDLE_TIMEOUT_MS).toBeGreaterThan(120_000);
   });
 
   test("a success resets the failure count; a clean stop afterwards clears the record entirely", async () => {
