@@ -298,13 +298,16 @@ The package pins the contract range `1.x || 2.x`, recorded in `package.json` und
 - `~/.config/catalyst-cloud/customer.json`, written with mode `0600`, holding your personal key, who you are, and the CLI path.
 - `~/.config/catalyst-cloud/contract.json`, your account's cached contract.
 - `~/.config/catalyst-cloud/published.json`, the cached answer to "what is the newest release" — no credential in it.
+- After `catalyst update` moves the CLI: `~/.config/catalyst-cloud/cli-runtimes/`, one directory per CLI version it installed and `active.json` naming the one your `catalyst` command runs.
 - Only if you start them: `~/.config/catalyst-cloud/replica.db` with its `.pid`, `.writer.lock` and `.writer.state` sidecars, `$XDG_STATE_HOME/catalyst/events/<tenant>/backbone/` (or the home-directory fallback) with bounded daily event segments, and `~/.config/catalyst-cloud/watch-cursor.json`.
 
 The skill files themselves are written by whichever install command you ran, in that tool's own location. Your personal key goes into that one config file and nowhere else.
 
 ## Updating
 
-A plugin install updates when we ship. Skills copied by `npx skills add` do not. After the source and destination check in Install, re-run the Cloud add command to refresh existing skills and pick up new ones. Update the CLI with `npm install -g @catalyst-cloud/cli@latest && catalyst login` — the re-login rewrites the CLI path the skills spawn, so they stop running the old bundle. To run one command against the latest publish without installing, use `npx -p @catalyst-cloud/cli@latest catalyst login`. The next `catalyst` run prints a one-line notice:
+`catalyst update --check` lists each installed component beside the version your workspace approved, says which one is behind and why, and changes nothing. Add `--project <absolute path>` to include a project's SDK; the report gives the one command that moves it, `catalyst update sdk --project <path>`. A project's files change only when you run that command, or after you turn its SDK updates on with `catalyst update policy sdk on --project <path>`. `catalyst update` moves the runner images, the CLI, the Cloud skills it finds copied on this machine, and a running local replica to the approved versions. The new CLI is installed beside the old one, and your `catalyst` command runs it from then on, at the same path. A running replica restarts on it and keeps its synced data; a stopped one stays stopped. For the development skills it prints the exact command instead. On a machine whose runner checks for releases every 15 minutes (`catalyst runner auto-update on`), that check moves the same components by itself. Otherwise they move when you run `catalyst update`. Each component is on by default; turn one off with `catalyst update policy <component> off` (for example `cli`), and `catalyst update policy` lists every setting. If you turned the installer's daily update off, the CLI and both skills packs start held, and `catalyst update policy cli on` turns the CLI back on. Add `--json` for a machine-readable report.
+
+A plugin install updates when we ship. A CLI older than `catalyst update` cannot move itself: install it once with `npm install -g @catalyst-cloud/cli@latest && catalyst login`. The re-login rewrites the CLI path the skills spawn, so they stop running the old bundle. To run one command against the latest publish without installing, use `npx -p @catalyst-cloud/cli@latest catalyst login`. The next `catalyst` run prints a one-line notice:
 
 ```
 [catalyst] updated 0.1.1 → 0.2.0: <that version's CHANGELOG.md summary> · update with: npm install -g @catalyst-cloud/cli@latest && catalyst login
@@ -312,7 +315,7 @@ A plugin install updates when we ship. Skills copied by `npx skills add` do not.
 
 A `customer.json` written by an older bundle is still read unchanged; it gains the CLI path and the cached contract the next time you run `catalyst login`.
 
-`catalyst ready` also says when either the installed skills or the CLI is behind the latest publish, naming both versions and the command for each; it is a note, never a failure, and `--offline` (or `CATALYST_SKILLS_OFFLINE=1`) skips the lookup.
+`catalyst ready` also says when either the installed skills or the CLI is behind, naming both versions and the command for each. It compares them with the approved release this machine last read, and only a machine that has not read one yet compares them with the latest publish. It is a note, never a failure, and `--offline` (or `CATALYST_SKILLS_OFFLINE=1`) skips the lookup.
 
 ## Uninstalling
 
@@ -325,6 +328,7 @@ catalyst replica stop
 rm -f ~/.config/catalyst-cloud/customer.json ~/.config/catalyst-cloud/contract.json ~/.config/catalyst-cloud/published.json ~/.config/catalyst-cloud/watch-cursor.json
 rm -f ~/.config/catalyst-cloud/replica.db ~/.config/catalyst-cloud/replica.db.pid ~/.config/catalyst-cloud/replica.db.writer.lock ~/.config/catalyst-cloud/replica.db.writer.state
 rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/catalyst/events"
+rm -rf ~/.config/catalyst-cloud/cli-runtimes
 npm uninstall -g @catalyst-cloud/cli
 ```
 

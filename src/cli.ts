@@ -1,5 +1,6 @@
 import { cmdHosts, type HostsDeps } from "./hosts.js";
 import { cmdRunner, type RunnerCommandDeps } from "./runner-command.js";
+import { cmdUpdate, type UpdateCommandDeps } from "./update-command.js";
 import { cmdSeat } from "./seat.js";
 // cli.ts — the `catalyst` dispatcher (npm: @catalyst-cloud/cli). Verbs live in
 // their own modules; this file keeps every export the 0.1 tests and the bin import.
@@ -215,6 +216,7 @@ export function usageText(): string {
     "  catalyst hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name>",
     "  catalyst runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts]   (this machine's self-hosted runner)",
     "  catalyst runner update [--check] | runner auto-update [status|on|off]   (move this machine's runner to the approved release)",
+    "  catalyst update [--check] [--project <path>] | update policy [<component> on|off]   (every installed component against the approved release)",
     "  catalyst mcp add|list|remove (vault references only) | mcp status <name>   (a server's state, grants and last 50 tool calls)",
     "  catalyst contract [--refresh] [--path <a.b.c>]",
     "  catalyst query <issues|issue <id>|pulls|pull <id>|projects|cycles|search <terms>|changes --since <cursor|head>>",
@@ -282,6 +284,7 @@ export interface MainDeps {
   connections?: ConnectionsDeps;
   hosts?: HostsDeps;
   runner?: RunnerCommandDeps;
+  update?: UpdateCommandDeps;
   identity?: IdentityDeps;
   messages?: MessagesDeps;
   team?: TeamDeps;
@@ -793,6 +796,8 @@ export async function main(
         return await cmdHosts(args, ctx, deps.hosts);
       case "runner":
         return await cmdRunner(args, ctx, deps.runner);
+      case "update":
+        return await cmdUpdate(args, ctx, deps.update);
       case "connections":
         return await cmdConnections(args, ctx, deps.connections ?? {});
       default:
@@ -874,6 +879,7 @@ const VERB_HELP_KNOWN: Record<string, true> = Object.fromEntries(
     "work",
     "legacy",
     "onboard",
+    "update",
   ].map((v) => [v, true]),
 );
 
