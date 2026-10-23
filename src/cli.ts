@@ -12,7 +12,7 @@ import {
 import { existsSync, openSync, closeSync } from "node:fs";
 import { ReadStream as TerminalInput } from "node:tty";
 import { Writable } from "node:stream";
-import { parseArgs, positionals, verbHelp, type ParsedArgs } from "./args.js";
+import { flagBool, parseArgs, positionals, verbHelp, type ParsedArgs } from "./args.js";
 import { reportCliVersion } from "./cli-version.js";
 import {
   CONFIG_MODE,
@@ -26,7 +26,6 @@ import {
   defaultReplicaDbFor,
   defaultSkillsDirFor,
   formatMode,
-  installerOwnsSkills,
   INSTALL_COMMAND,
   loadConfig,
   modernCliPath,
@@ -343,64 +342,18 @@ function migrateLegacyCliPath(ctx: Ctx): void {
   }
 }
 
-/**
- * The Tier-2 update path: when the bundle on disk is newer than the version the config last
- * recorded, refresh the copied skills FIRST and record the new version only once that succeeded.
- */
+/** Announce a new CLI bundle without changing approved skills. */
 function maybePrintUpdateNotice(args: ParsedArgs, ctx: Ctx): void {
   const say = HUMAN_VERBS.has(args.command ?? "") ? ctx.stdout : ctx.stderr;
   let cfg: CustomerConfig | null;
-  try {
-    cfg = loadConfig(ctx.home);
-  } catch {
-    return;
-  }
+  try { cfg = loadConfig(ctx.home); } catch { return; }
   if (!cfg) return;
   const manifest = readManifest();
-  if (cfg.lastSkillBundleVersion === manifest.version) return;
-  // CTC-6741: a newer CLI selected by `catalyst update` records its own bundle here, and the older
-  // npm-installed one still runs for `catalyst runtime`. Copied skills only ever move forward.
-  if (cfg.lastSkillBundleVersion && semverOlder(manifest.version, cfg.lastSkillBundleVersion)) return;
   const previous = cfg.lastSkillBundleVersion;
-  if (previous) {
-    const entry = parseChangelogEntry(readChangelog(), manifest.version);
-    say(updateNoticeLine(previous, manifest.version, entry));
-  }
-  if (installerOwnsSkills(ctx.home, ctx.env)) {
-    cfg.lastSkillBundleVersion = manifest.version;
-    try {
-      saveConfig(ctx.home, cfg);
-    } catch {
-      // Best effort: the notice prints again next time, and nothing else depends on it.
-    }
-    return;
-  }
-  const skillsDir = resolveSkillsDir(args, ctx, cfg);
-  let refreshed: SkillsInstallResult;
-  try {
-    refreshed = installSkills(skillsDir, { force: false, onlyExisting: true });
-  } catch (err) {
-    ctx.stderr(
-      `[catalyst] could not refresh the skills at ${skillsDir} (${err instanceof Error ? err.message : String(err)}) — the ${manifest.version} skills are not installed yet; re-run the install command: ${INSTALL_COMMAND}`,
-    );
-    return;
-  }
-  if (refreshed.installed.length > 0)
-    say(
-      `[catalyst] refreshed ${refreshed.installed.join(", ")} at ${skillsDir} to ${manifest.version}`,
-    );
-  if (refreshed.removed.length > 0)
-    say(
-      `[catalyst] removed retired skills ${refreshed.removed.join(", ")} from ${skillsDir}; their work moved into the skills this bundle ships`,
-    );
-  for (const s of refreshed.skipped) {
-    say(
-      `[catalyst] left "${s.name}" alone: ${skillsDir}/${s.name} was not installed by this package (catalyst install --force to replace)`,
-    );
-  }
+  if (previous === manifest.version || previous && semverOlder(manifest.version, previous)) return;
+  if (previous) say(updateNoticeLine(previous, manifest.version, parseChangelogEntry(readChangelog(), manifest.version)));
   cfg.lastSkillBundleVersion = manifest.version;
-  cfg.skillsDir = skillsDir;
-  saveConfig(ctx.home, cfg);
+  try { saveConfig(ctx.home, cfg); } catch { /* The notice can repeat on the next ordinary command. */ }
 }
 
 export async function main(
@@ -487,7 +440,7 @@ export async function main(
     }),
   };
   try {
-    if (args.command !== "onboard") {
+    if (args.command !== "onboard" && !(flagBool(args, "check") && (args.command === "update" || args.command === "runner"))) {
       migrateLegacyCliPath(ctx);
       maybePrintUpdateNotice(args, ctx);
     }

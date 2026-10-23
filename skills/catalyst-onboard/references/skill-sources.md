@@ -17,11 +17,12 @@ Global (`-g`) installs go to `~/.agents/skills/`, linked from `~/.claude/skills/
 
 ## Keeping each pack current
 
-Check installed components with `catalyst update --check --json`. Read each component's installed version, approved version, status and reason.
-Apply enabled updates with `catalyst update` when the person asks you to update. For a component it does not install itself, it prints the exact command; offer that command the same way.
-Keep every saved component hold. Do not turn a hold off without the person's instruction.
+Check installed components with `catalyst update --check --json`. For each installed skills pack and Cloud plugin, compare `installedCommit` with `approvedCommit` and read its status and reason. A matching version alone does not prove the approved skills are installed.
+When the person asks to update, run `catalyst update`. Keep every saved component hold. Do not turn a hold off without the person's instruction.
+If the report says `pack_not_approved`, keep that pack and explain that the approved release does not name it. Do not substitute a repository's newest commit or schedule a raw `npx skills add` command.
+If ownership is unknown or local changes are reported, keep those files and show the reason. Do not force a replacement.
 For a project's SDK, run `catalyst update --check --project <absolute project path>` and show the command it names. Run that command only when the person asks to update that project.
-After a plugin update, start a new agent session to load the installed version.
+After a Cloud plugin update, run `/reload-plugins` in Claude Code or start a new session to load it.
 
 ## Is each pack there
 

@@ -2,7 +2,7 @@
 // component is installed (with the version or image it runs), absent, or unknown with a reason;
 // unknown is never reported as current. Reading it starts no process, contacts no service, and a
 // machine with no runner installation never touches Docker.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { exactVersion } from "./approved-release.js";
 import { loadConfig, packageRoot, readManifest, updatePackageName, type Ctx, type CustomerConfig } from "./config.js";
@@ -15,7 +15,8 @@ import {
   releaseReference,
   type ReleaseComponent,
 } from "./runner-update.js";
-import { installedBundleVersion, resolveSkillsDir, skillsSourceDir } from "./skills.js";
+import { resolveSkillsDir } from "./skills.js";
+import { inspectSkillInstallation, type SkillInstallation } from "./update-skill-state.js";
 import { cloudPluginInventory, type PluginInventory } from "./update-plugin.js";
 
 export interface CliInventory {
@@ -35,10 +36,10 @@ export type ImageInventory =
       generation: number | null;
     };
 
-export type PackInventory =
+export type PackInventory = (
   | { state: "installed"; version: string; dir: string }
   | { state: "not_installed"; dir: string | null }
-  | { state: "unknown"; reason: string; dir: string | null };
+  | { state: "unknown"; reason: string; dir: string | null }) & { evidence?: SkillInstallation };
 
 export type ReplicaInventory =
   | { state: "not_installed" }
@@ -71,36 +72,20 @@ export function imageInventory(dir: string): ImageInventory {
   return { installed: true, dir, references, generation: readReleaseState(dir).generation };
 }
 
-function bundledSkillNames(): string[] {
-  try {
-    return readdirSync(skillsSourceDir(), { withFileTypes: true })
-      .filter((e) => e.isDirectory() && existsSync(join(skillsSourceDir(), e.name, "SKILL.md")))
-      .map((e) => e.name);
-  } catch {
-    return [];
-  }
+function packInventory(ctx: Ctx, cfg: CustomerConfig | null, pack: "cloud" | "dev"): PackInventory {
+  const dir = resolveSkillsDir({}, ctx, cfg);
+  const evidence = inspectSkillInstallation(ctx.home, ctx.env, pack, dir);
+  if (!evidence.present) return { state: "not_installed", dir, evidence };
+  if (evidence.version !== null && evidence.candidate) return { state: "installed", version: evidence.version, dir, evidence };
+  return { state: "unknown", reason: evidence.reason, dir, evidence };
 }
 
-/** The Cloud pack as installed in the agent skills directory, read from each skill's provenance line. */
 export function cloudPackInventory(ctx: Ctx, cfg: CustomerConfig | null): PackInventory {
-  const dir = resolveSkillsDir({}, ctx, cfg);
-  const found = installedBundleVersion(dir, bundledSkillNames());
-  if (found.version !== null) {
-    const version = exactVersion(found.version);
-    return version ? { state: "installed", version, dir } : { state: "unknown", reason: "version_unreadable", dir };
-  }
-  if (found.unstamped.length > 0) return { state: "unknown", reason: "version_unstamped", dir };
-  return { state: "not_installed", dir };
+  return packInventory(ctx, cfg, "cloud");
 }
 
-/** The Dev pack ships from its own repository with no provenance stamp this CLI reads, so its
- *  presence is known (its `research-codebase` skill, as the onboarding guide checks) but its version
- *  is not. Unknown is never reported as current. */
 export function devPackInventory(ctx: Ctx, cfg: CustomerConfig | null): PackInventory {
-  const dir = resolveSkillsDir({}, ctx, cfg);
-  return existsSync(join(dir, "research-codebase", "SKILL.md"))
-    ? { state: "unknown", reason: "version_unrecorded", dir }
-    : { state: "not_installed", dir };
+  return packInventory(ctx, cfg, "dev");
 }
 
 export function replicaInventory(ctx: Ctx, cfg: CustomerConfig | null): ReplicaInventory {

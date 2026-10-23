@@ -1,88 +1,115 @@
-// update-plugin.ts — the Claude plugin form of the Cloud skills pack moves with the release check
-// (CTC-6791). Claude Code installs the plugin from its own marketplace checkout of this repository,
-// which serves the repository's head, so the release check moves it only when that checkout carries
-// exactly the approved version: it refreshes the marketplace, reads the plugin version the checkout
-// now serves, and asks Claude Code to update the plugin only when that version is the approved one.
-// Claude Code has no way to install a plugin at a pinned version, so a marketplace ahead of the
-// approval leaves the plugin where it is. The 15-minute schedule finds `claude` at the absolute path
-// recorded when it was set up, then on PATH, then in Claude Code's usual install locations; only when
-// none has it is nothing changed, and the report names the command.
-import { accessSync, constants, readFileSync } from "node:fs";
-import { delimiter, join } from "node:path";
-import { exactVersion } from "./approved-release.js";
+// Select the verified approved Cloud checkout through Claude's supported marketplace commands.
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { exactVersion, type ApprovedSkillPack } from "./approved-release.js";
 import { spawnCliCommand, type CliExec } from "./update-cli.js";
+import { contentDigest, record, repositoryFor, skillReleaseDir, stageSkillSource, verifiedSkillSource, type SkillSourceDeps } from "./update-skill-source.js";
+import { plainDirectory } from "./update-skill-state.js";
+import { withSkillUpdateLock } from "./update-skills.js";
 
 export const CLOUD_MARKETPLACE = "catalyst-cloud";
 export const CLOUD_PLUGIN_ID = `catalyst@${CLOUD_MARKETPLACE}`;
-/** The one command that moves the plugin, for an owner whose release check cannot run Claude Code. */
-export const CLOUD_PLUGIN_COMMAND = `claude plugin marketplace update ${CLOUD_MARKETPLACE} && claude plugin update ${CLOUD_PLUGIN_ID}`;
-
+export const CLOUD_PLUGIN_COMMAND = "catalyst update";
+interface PluginSource { kind: "git" | "directory"; argument: string; dir: string; commit: string | null; gitUrl?: string }
 export type PluginInventory =
   | { state: "not_installed" }
-  /** `claude` is the command that can move it, or null when none was found. */
-  | { state: "installed"; version: string; scope: string; claude: string | null }
+  | { state: "installed"; version: string; scope: "user"; claude: string | null; commit: string | null; source: PluginSource }
   | { state: "unknown"; reason: string };
-
 export interface PluginApplyResult {
-  /** `no_claude`: no `claude` command was found, so nothing ran. `waiting`: the marketplace does not serve the approved version. */
-  outcome: "updated" | "failed" | "waiting" | "no_claude";
-  /** `updated`, or why not: `marketplace_update_failed`, `marketplace_not_approved`, `update_failed`, `verify_failed`. */
+  outcome: "updated" | "failed" | "no_claude";
   detail: string;
-  /** The plugin version Claude Code records after this call, when one reads. */
   version: string | null;
+  commit?: string | null;
 }
-
-export interface PluginApplyDeps {
+export interface PluginApplyDeps extends SkillSourceDeps {
   exec?: CliExec;
-  /** The `claude` command to run; resolved with `resolveClaude` when absent. */
   claudePath?: string | null;
 }
+export function claudeConfigDir(home: string, env: NodeJS.ProcessEnv): string { return env.CLAUDE_CONFIG_DIR || join(home, ".claude"); }
+const readJson = (path: string): unknown => JSON.parse(readFileSync(path, "utf8"));
+const cloudGitSource = (source: Record<string, unknown>): string | null => {
+  if (source.source === "github" && source.repo === repositoryFor("cloud")) return `https://github.com/${repositoryFor("cloud")}.git`;
+  if (source.source === "git" && (source.url === `https://github.com/${repositoryFor("cloud")}.git` || source.url === `https://github.com/${repositoryFor("cloud")}`)) return String(source.url);
+  return null;
+};
 
-export function claudeConfigDir(home: string, env: NodeJS.ProcessEnv): string {
-  return env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+/** A project or managed declaration must not be redirected by a home-directory updater. */
+function hasOverride(home: string, env: NodeJS.ProcessEnv, entries: unknown[]): boolean {
+  if (entries.some((entry) => !record(entry) || entry.scope !== "user")) return true;
+  const config = claudeConfigDir(home, env);
+  const files = [join(config, "managed-settings.json"), join(config, "settings.local.json")];
+  if (process.platform === "linux") files.push("/etc/claude-code/managed-settings.json");
+  if (process.platform === "darwin") files.push("/Library/Application Support/ClaudeCode/managed-settings.json");
+  if (process.platform === "win32" && env.ProgramFiles) files.push(join(env.ProgramFiles, "ClaudeCode/managed-settings.json"));
+  // Claude records project identity even when another plugin owns that scope.
+  const registry = readJson(join(config, "plugins/installed_plugins.json"));
+  if (record(registry) && record(registry.plugins)) for (const values of Object.values(registry.plugins)) {
+    if (!Array.isArray(values)) continue;
+    for (const value of values) if (record(value) && typeof value.projectPath === "string") {
+      files.push(join(value.projectPath, ".claude/settings.json"), join(value.projectPath, ".claude/settings.local.json"));
+    }
+  }
+  let cwd = resolve(env.PWD ?? home);
+  while (true) {
+    files.push(join(cwd, ".claude/settings.json"), join(cwd, ".claude/settings.local.json"));
+    const parent = dirname(cwd); if (parent === cwd) break; cwd = parent;
+  }
+  for (const path of new Set(files)) {
+    if (path === join(config, "settings.json") || !existsSync(path)) continue;
+    const value = readJson(path);
+    if (record(value) && record(value.extraKnownMarketplaces) && value.extraKnownMarketplaces[CLOUD_MARKETPLACE] !== undefined) return true;
+  }
+  return false;
 }
 
-function readJson(path: string): unknown {
-  return JSON.parse(readFileSync(path, "utf8"));
+function pluginManifest(dir: string, version: string): boolean {
+  try {
+    const marketplace = readJson(join(dir, ".claude-plugin/marketplace.json"));
+    const plugin = readJson(join(dir, ".claude-plugin/plugin.json"));
+    if (!record(marketplace) || marketplace.name !== CLOUD_MARKETPLACE || !Array.isArray(marketplace.plugins)) return false;
+    const entries = marketplace.plugins.filter((entry) => record(entry) && entry.name === "catalyst");
+    if (entries.length !== 1 || !record(entries[0]) || entries[0].source !== "./") return false;
+    if (!record(plugin) || plugin.name !== "catalyst" || plugin.version !== version) return false;
+    const paths = typeof plugin.skills === "string" ? [plugin.skills] : plugin.skills;
+    return Array.isArray(paths) && paths.length > 0 && paths.every((path) => typeof path === "string" && /^\.\/skills\/(?:[a-zA-Z0-9_-]+\/?)?$/.test(path) && plainDirectory(join(dir, path)));
+  } catch { return false; }
 }
 
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-
-/** The Cloud plugin as Claude Code records it: its user-scope install when there is one, else the first. */
 export function cloudPluginInventory(home: string, env: NodeJS.ProcessEnv): PluginInventory {
+  const config = claudeConfigDir(home, env);
   let registry: unknown;
-  try {
-    registry = readJson(join(claudeConfigDir(home, env), "plugins", "installed_plugins.json"));
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "ENOENT" ? { state: "not_installed" } : { state: "unknown", reason: "plugin_registry_unreadable" };
-  }
-  const entries = isRecord(registry) && isRecord(registry.plugins) ? registry.plugins[CLOUD_PLUGIN_ID] : undefined;
+  try { registry = readJson(join(config, "plugins/installed_plugins.json")); }
+  catch (error) { return error instanceof Error && "code" in error && error.code === "ENOENT" ? { state: "not_installed" } : { state: "unknown", reason: "plugin_registry_unreadable" }; }
+  const entries = record(registry) && record(registry.plugins) ? registry.plugins[CLOUD_PLUGIN_ID] : undefined;
   if (!Array.isArray(entries) || entries.length === 0) return { state: "not_installed" };
-  const entry = entries.find((e) => isRecord(e) && e.scope === "user") ?? entries[0];
-  const version = isRecord(entry) ? exactVersion(entry.version) : null;
-  if (version === null) return { state: "unknown", reason: "version_unreadable" };
-  return { state: "installed", version, scope: isRecord(entry) && typeof entry.scope === "string" ? entry.scope : "user", claude: resolveClaude(home, env) };
-}
-
-/** The plugin version the marketplace checkout serves now, or null when it cannot be read. */
-function servedPluginVersion(home: string, env: NodeJS.ProcessEnv): string | null {
-  const plugins = join(claudeConfigDir(home, env), "plugins");
-  let dir = join(plugins, "marketplaces", CLOUD_MARKETPLACE);
   try {
-    const known = readJson(join(plugins, "known_marketplaces.json"));
-    const entry = isRecord(known) ? known[CLOUD_MARKETPLACE] : undefined;
-    if (isRecord(entry) && typeof entry.installLocation === "string") dir = entry.installLocation;
-  } catch {
-    // No record of where it lives: Claude Code's default checkout directory.
-  }
-  try {
-    const manifest = readJson(join(dir, ".claude-plugin", "plugin.json"));
-    return isRecord(manifest) ? exactVersion(manifest.version) : null;
-  } catch {
-    return null;
-  }
+    if (hasOverride(home, env, entries)) return { state: "unknown", reason: "plugin_scope_unsupported" };
+    const entry = entries[0];
+    const version = record(entry) ? exactVersion(entry.version) : null;
+    if (version === null) return { state: "unknown", reason: "version_unreadable" };
+    const known = readJson(join(config, "plugins/known_marketplaces.json"));
+    const marketplace = record(known) ? known[CLOUD_MARKETPLACE] : null;
+    const settings = readJson(join(config, "settings.json"));
+    const declared = record(settings) && record(settings.extraKnownMarketplaces) ? settings.extraKnownMarketplaces[CLOUD_MARKETPLACE] : null;
+    if (!record(marketplace) || !record(marketplace.source) || typeof marketplace.installLocation !== "string" || !record(declared) || !record(declared.source) || marketplace.scope !== undefined && marketplace.scope !== "user") return { state: "unknown", reason: "installation_owner_unknown" };
+    const source = marketplace.source;
+    const dir = marketplace.installLocation;
+    if (!plainDirectory(dir)) return { state: "unknown", reason: "installation_owner_unknown" };
+    const git = cloudGitSource(source);
+    if (git) {
+      if (cloudGitSource(declared.source) !== git || source.ref !== declared.source.ref || source.ref !== undefined && (typeof source.ref !== "string" || source.ref.length === 0 || /[#\r\n]/.test(source.ref))) return { state: "unknown", reason: "source_mismatch" };
+      return { state: "installed", version, scope: "user", claude: resolveClaude(home, env), commit: null, source: { kind: "git", argument: `${source.source === "github" ? repositoryFor("cloud") : git.replace(/\.git$/, "") + ".git"}${typeof source.ref === "string" ? `#${source.ref}` : ""}`, gitUrl: git, dir, commit: null } };
+    }
+    if (source.source !== "directory" || source.path !== dir || declared.source.source !== "directory" || declared.source.path !== dir) return { state: "unknown", reason: "source_mismatch" };
+    const manifest = readJson(join(dir, "package.json"));
+    const commit = dir.slice(dir.lastIndexOf("/") + 1);
+    if (dir !== skillReleaseDir(home, "cloud", commit) || !/^[a-f0-9]{40}$/.test(commit) || !record(manifest) || exactVersion(manifest.version) === null) return { state: "unknown", reason: "installation_owner_unknown" };
+    const target = { repository: repositoryFor("cloud"), version: String(manifest.version), commit };
+    if (!verifiedSkillSource(home, "cloud", target)) return { state: "unknown", reason: "local_changes" };
+    if (!pluginManifest(dir, version)) return { state: "unknown", reason: "source_mismatch" };
+    return { state: "installed", version, scope: "user", claude: resolveClaude(home, env), commit, source: { kind: "directory", argument: dir, dir, commit } };
+  } catch { return { state: "unknown", reason: "installation_owner_unknown" }; }
 }
-
 /** The schedule's record of the `claude` command found when it was set up. */
 export const CLAUDE_PATH_ENV = "CATALYST_CLAUDE_PATH";
 
@@ -104,17 +131,55 @@ export function resolveClaude(home: string, env: NodeJS.ProcessEnv): string | nu
   return [...(recorded?.startsWith("/") ? [recorded] : []), ...onPath, ...usual].find(executable) ?? null;
 }
 
-/** Move the Cloud plugin to exact version `target` through Claude Code, when its marketplace serves it. */
-export function applyCloudPluginUpdate(home: string, env: NodeJS.ProcessEnv, target: string, scope: string, deps: PluginApplyDeps = {}): PluginApplyResult {
+
+export function applyCloudPluginUpdate(home: string, env: NodeJS.ProcessEnv, target: ApprovedSkillPack, pluginVersion: string, scope: string, deps: PluginApplyDeps = {}): PluginApplyResult {
+  const failed = (detail: string): PluginApplyResult => ({ outcome: "failed", detail, version: null, commit: null });
+  if (scope !== "user") return failed("plugin_scope_unsupported");
   const claude = deps.claudePath === undefined ? resolveClaude(home, env) : deps.claudePath;
   if (claude === null) return { outcome: "no_claude", detail: "claude_not_found", version: null };
-  const exec = deps.exec ?? spawnCliCommand;
-  if (exec([claude, "plugin", "marketplace", "update", CLOUD_MARKETPLACE], home, env).status !== 0)
-    return { outcome: "failed", detail: "marketplace_update_failed", version: null };
-  if (servedPluginVersion(home, env) !== target) return { outcome: "waiting", detail: "marketplace_not_approved", version: null };
-  const updated = exec([claude, "plugin", "update", CLOUD_PLUGIN_ID, "--scope", scope], home, env).status === 0;
-  const now = cloudPluginInventory(home, env);
-  const version = now.state === "installed" ? now.version : null;
-  if (!updated) return { outcome: "failed", detail: "update_failed", version };
-  return version === target ? { outcome: "updated", detail: "updated", version } : { outcome: "failed", detail: "verify_failed", version };
+  return withSkillUpdateLock(home, failed("update_in_progress"), () => {
+    const before = cloudPluginInventory(home, env);
+    if (before.state !== "installed") return failed(before.state === "unknown" ? before.reason : "not_installed");
+    const exec = deps.exec ?? spawnCliCommand;
+    const childEnv = { ...env, HOME: home, CLAUDE_CONFIG_DIR: claudeConfigDir(home, env), PWD: home };
+    if (before.source.kind === "git") {
+      // Only an unmodified, correctly sourced Git checkout can be adopted.
+      const origin = spawnCliCommand(["git", "-c", "core.hooksPath=/dev/null", "remote", "get-url", "origin"], before.source.dir, childEnv);
+      const clean = spawnCliCommand(["git", "-c", "core.hooksPath=/dev/null", "status", "--porcelain", "--untracked-files=all", "--ignored"], before.source.dir, childEnv);
+      if (origin.status !== 0 || origin.stdout.trim().replace(/\.git$/, "") !== before.source.gitUrl?.replace(/\.git$/, "")) return failed("source_mismatch");
+      if (clean.status !== 0 || clean.stdout.trim() !== "") return failed("local_changes");
+    }
+    let beforeDigest: string;
+    try { beforeDigest = contentDigest(before.source.dir, true); }
+    catch { return failed("local_changes"); }
+    const source = stageSkillSource(home, "cloud", target, { ...deps, env });
+    if (!source.ok) return failed(source.detail);
+    if (!pluginManifest(source.dir, pluginVersion)) return failed("source_mismatch");
+    const unchanged = cloudPluginInventory(home, env);
+    if (unchanged.state !== "installed" || unchanged.source.dir !== before.source.dir || unchanged.version !== before.version || contentDigest(before.source.dir, true) !== beforeDigest) return failed("source_mismatch");
+    const select = (argument: string) => exec([claude, "plugin", "marketplace", "add", argument, "--scope", "user"], home, childEnv).status === 0;
+    const update = () => exec([claude, "plugin", "update", CLOUD_PLUGIN_ID, "--scope", "user"], home, childEnv).status === 0;
+    let failure: string;
+    try {
+      if (!select(source.dir)) failure = "marketplace_update_failed";
+      else if (!update()) failure = "update_failed";
+      else {
+        const after = cloudPluginInventory(home, env);
+        if (after.state === "installed" && after.source.dir === source.dir && after.commit === target.commit && after.version === pluginVersion && contentDigest(source.dir, true) === source.digest)
+          return { outcome: "updated", detail: "approved_commit_installed", version: after.version, commit: after.commit };
+        failure = "verify_failed";
+      }
+    } catch { failure = "update_failed"; }
+    // Never remove the marketplace or hand-edit Claude's registries. Restore through the same API.
+    try {
+      const restored = select(before.source.argument);
+      let now = cloudPluginInventory(home, env);
+      if (restored && (now.state !== "installed" || now.version !== before.version)) {
+        if (!update()) return failed("rollback_failed");
+        now = cloudPluginInventory(home, env);
+      }
+      if (!restored || now.state !== "installed" || now.source.dir !== before.source.dir || now.version !== before.version || now.source.argument !== before.source.argument || contentDigest(now.source.dir, true) !== beforeDigest) return failed("rollback_failed");
+    } catch { return failed("rollback_failed"); }
+    return failed(failure);
+  });
 }

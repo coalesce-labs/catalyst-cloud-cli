@@ -90,6 +90,7 @@ describe("the release check lists every component against the approved release",
       pad("Dev skills", "-", NEXT, "not installed"),
       pad("Local replica", OLD, NEXT, "restart after CLI update"),
       pad(`SDK ${project}`, OLD, NEXT, "notification only"),
+      `Cloud skills commit: unknown -> ${"1".repeat(40)}`,
       `Update this project's SDK: catalyst update sdk --project ${project}`,
       "Checked the approved release; nothing was changed.",
     ]);

@@ -1,3 +1,5 @@
+import { configPathFor } from "../src/config";
+import { cloudPack, memberFetch, signIn } from "./update-fixtures";
 // update-command.test.ts — `catalyst update` and `catalyst update policy` through the real
 // dispatcher (CTC-6708), plus `catalyst runner update --check` listing every component, with the
 // image engine injected so output and exit codes are checked without Docker.
@@ -199,3 +201,17 @@ describe("runner update honours the owner's image holds (review fixes)", () => {
   });
 });
 
+
+// CTC-6742: check mode must bypass all pre-dispatch skill/config maintenance.
+it("public check preserves an old pack and notice bookkeeping", async () => {
+  const home = tempHome();
+  const skills = cloudPack(OLD);
+  signIn(home, undefined, { lastSkillBundleVersion: OLD, skillsDir: skills });
+  const before = readFileSync(configPathFor(home), "utf8");
+  const skill = readFileSync(join(skills, "catalyst-onboard/SKILL.md"), "utf8");
+  const ctx = makeCtx(home, { fetch: memberFetch(200, { ok: true, release: approved() }) });
+  expect(await main(["update", "--check", "--json"], ctx)).toBe(0);
+  expect(readFileSync(configPathFor(home), "utf8")).toBe(before);
+  expect(readFileSync(join(skills, "catalyst-onboard/SKILL.md"), "utf8")).toBe(skill);
+  expect(() => JSON.parse(ctx.out.join("\n"))).not.toThrow();
+});

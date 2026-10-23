@@ -9,14 +9,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { main } from "../src/cli";
+import type { ApprovedSkillPack } from "../src/approved-release";
 import { loadConfig } from "../src/config";
 import { pidAlive, type ReplicaStatus } from "../src/replica";
 import { readReleaseState } from "../src/runner-update";
 import { applyCliUpdate, spawnCliCommand, type CliExec } from "../src/update-cli";
 import { restartReplica } from "../src/update-replica";
-import { applyCloudPackUpdate } from "../src/update-skills";
+import { applyPackUpdate } from "../src/update-skills";
 import { makeCtx, seedReplica, seedWriterState, tempHome } from "./helpers";
-import { answered, approved, CLI_VERSION, cloudPack, countingEngine, fakeNpm, hostRelease, NEXT, OLD, ref, runnerInstall, sdkProject, signIn } from "./update-fixtures";
+import { answered, approved, CLI_VERSION, cloudPack, countingEngine, fakeNpm, hostRelease, NEXT, OLD, ref, runnerInstall, sdkProject, signIn, skillRepository } from "./update-fixtures";
 
 const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BIN = join(pkgRoot, "bin", "catalyst.js");
@@ -57,12 +58,14 @@ function install() {
   signIn(home);
   const dir = runnerInstall();
   const skills = cloudPack(OLD);
-  const engine = countingEngine(answered(hostRelease({ components: approved() })), { supervisor: ref("supervisor", "8"), watchdog: ref("watchdog", "9") });
+  const source = skillRepository();
+  const release = approved({ mutate: (r) => { r.skills = { cloud: source.target }; } });
+  const engine = countingEngine(answered(hostRelease({ components: release })), { supervisor: ref("supervisor", "8"), watchdog: ref("watchdog", "9") });
   const ctx = () => makeCtx(home, { env: { CATALYST_SKILLS_OFFLINE: "1", CATALYST_SKILLS_CLAUDE_DIR: skills } });
   const update = {
     engine,
     cliApply: (h: string, own: string, target: string) => applyCliUpdate(h, own, target, { exec: npm }),
-    packApply: (h: string, d: string, target: string) => applyCloudPackUpdate(h, d, target, { exec: npm }),
+    packApply: (h: string, env: NodeJS.ProcessEnv, pack: "cloud" | "dev", d: string, target: ApprovedSkillPack) => applyPackUpdate(h, env, pack, d, target, { baseline: { exec: npm }, repositoryUrl: () => source.repo }),
   };
   const version = () =>
     spawnSync(process.execPath, [BIN, "--version"], { cwd: pkgRoot, encoding: "utf8", env: { ...process.env, HOME: home, CATALYST_SKILLS_HOME: home } }).stdout;

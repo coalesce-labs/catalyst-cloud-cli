@@ -559,7 +559,7 @@ describe("main — Tier 2 notice (a new version's next session)", () => {
   });
 });
 
-describe("main — Codex P2: an update refreshes the copied skills before recording the new version", () => {
+describe("main — a CLI notice preserves installed skills", () => {
   const STALE =
     "---\nname: concierge\n---\n<!-- vendored-from: @catalyst-cloud/catalyst-skills -->\nSTALE COPY FROM 0.0.9\n";
 
@@ -570,7 +570,7 @@ describe("main — Codex P2: an update refreshes the copied skills before record
     }
   }
 
-  test("a stale stamp recopies every bundle-owned skill into the recorded skills dir, then stamps", async () => {
+  test("a stale stamp records the notice while preserving every installed skill", async () => {
     const skillsDir = join(home, "recorded", "skills");
     seedStaleCopies(skillsDir);
     saveConfig(home, seededConfig({ skillsDir }));
@@ -579,24 +579,23 @@ describe("main — Codex P2: an update refreshes the copied skills before record
     expect(err).toEqual([]);
     for (const name of CUSTOMER_SKILLS) {
       const md = readFileSync(join(skillsDir, name, "SKILL.md"), "utf8");
-      expect(md, `${name} must be the bundled copy after the update`).not.toContain("STALE COPY");
+      expect(md, `${name} must retain its installed bytes`).toBe(STALE.replace("concierge", name));
       expect(md).toContain(PROVENANCE_MARKER);
     }
-    expect(out.filter((l) => l.startsWith("[catalyst] refreshed"))).toHaveLength(1);
-    expect(out.find((l) => l.startsWith("[catalyst] refreshed"))).toContain(skillsDir);
+    expect(out.filter((l) => l.startsWith("[catalyst] refreshed"))).toHaveLength(0);
     expect(readConfig().lastSkillBundleVersion).not.toBe("0.0.9");
   });
 
-  test("a config without a recorded skills dir refreshes the default ~/.claude/skills", async () => {
+  test("a notice leaves the default skills directory and destination setting unchanged", async () => {
     const skillsDir = defaultSkillsDirFor(home);
     seedStaleCopies(skillsDir);
     saveConfig(home, seededConfig());
     await main(["notice"], ctx());
-    expect(readFileSync(join(skillsDir, "whats-happening", "SKILL.md"), "utf8")).not.toContain("STALE COPY");
-    expect(readConfig().skillsDir).toBe(skillsDir);
+    expect(readFileSync(join(skillsDir, "whats-happening", "SKILL.md"), "utf8")).toBe(STALE.replace("concierge", "whats-happening"));
+    expect(readConfig().skillsDir).toBeUndefined();
   });
 
-  test("a customer-authored skill dir is left alone and named; the bundle-owned ones still refresh", async () => {
+  test("a notice preserves both customer-authored and bundle-owned skill bytes", async () => {
     const skillsDir = defaultSkillsDirFor(home);
     seedStaleCopies(skillsDir);
     writeFileSync(join(skillsDir, "unstick", "SKILL.md"), "---\nname: unstick\n---\nmine");
@@ -604,30 +603,31 @@ describe("main — Codex P2: an update refreshes the copied skills before record
     const code = await main(["notice"], ctx());
     expect(code).toBe(0);
     expect(readFileSync(join(skillsDir, "unstick", "SKILL.md"), "utf8")).toContain("mine");
-    expect(readFileSync(join(skillsDir, "whats-happening", "SKILL.md"), "utf8")).not.toContain("STALE COPY");
-    expect(out.join("\n")).toContain('left "unstick" alone');
+    expect(readFileSync(join(skillsDir, "whats-happening", "SKILL.md"), "utf8")).toBe(STALE.replace("concierge", "whats-happening"));
+    expect(out.join("\n")).not.toContain('left "unstick" alone');
     expect(readConfig().lastSkillBundleVersion).not.toBe("0.0.9");
   });
 
-  test("a failed refresh keeps the OLD stamp so the next command retries, and names the install command", async () => {
+  test("a notice records the CLI version without attempting to repair an invalid skills path", async () => {
     const skillsDir = join(home, "not-a-dir");
     writeFileSync(skillsDir, "a file where the skills dir should be");
     saveConfig(home, seededConfig({ skillsDir }));
     const code = await main(["notice"], ctx());
     expect(code).toBe(0);
-    expect(readConfig().lastSkillBundleVersion).toBe("0.0.9");
-    expect(err.join("\n")).toContain("re-run the install command: curl -fsSL https://staging.catalystcloud.dev/install.sh | sh");
+    expect(readConfig().lastSkillBundleVersion).not.toBe("0.0.9");
+    expect(err).toEqual([]);
+    expect(readFileSync(skillsDir, "utf8")).toBe("a file where the skills dir should be");
     expect(out.filter((l) => l.startsWith("[catalyst] refreshed"))).toHaveLength(0);
   });
 
-  test("a config with no stamp at all (pre-notice install) refreshes once and stamps, printing no notice", async () => {
+  test("a config with no notice stamp records the CLI version and keeps skill bytes", async () => {
     const skillsDir = defaultSkillsDirFor(home);
     seedStaleCopies(skillsDir);
     saveConfig(home, seededConfig({ lastSkillBundleVersion: "" }));
     const code = await main(["status"], ctx());
     expect(code).toBe(0);
     expect(out.filter((l) => l.startsWith("[catalyst] updated"))).toHaveLength(0);
-    expect(readFileSync(join(skillsDir, "unstick", "SKILL.md"), "utf8")).not.toContain("STALE COPY");
+    expect(readFileSync(join(skillsDir, "unstick", "SKILL.md"), "utf8")).toBe(STALE.replace("concierge", "unstick"));
     expect(readConfig().lastSkillBundleVersion).not.toBe("");
   });
 });
