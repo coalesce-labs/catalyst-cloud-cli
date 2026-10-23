@@ -246,7 +246,22 @@ CLI and skill reads use the cloud API by default, including on a machine with a 
 
 For a local view, `catalyst replica status` checks the writer, heartbeat and cursor. It exits `0` for fresh, `1` for present but stale, `2` for not connected, `3` for absent. `replica status --probe` compares its cursor with the cloud head. These diagnostics do not change the default read source, and an absent replica does not make `catalyst ready` fail.
 
-`catalyst events tail`, `wait-for`, `query` and `status` read from the cloud by default, with no local file. `events tail` prints one JSON line per new event and stays in the foreground; `events wait-for --ticket ... --timeout ...` prints the first match and exits 0, or exits 1 when none arrives in time; `events query` reads one page of filtered history (`--ticket`, `--type`, `--limit` up to 200, `--order desc|asc`, `--before`, `--after`); `events status` names the cloud head. Add `--from-cache` to read this machine's local event cache instead, which pays off when several agents on one machine share one cloud connection. `catalyst events status --from-cache --probe` checks the cache's own cursor against the cloud head; `replica status --probe` checks the separate entity-replica cursor. A fresh replica does not prove event freshness. The replica process is the single writer and reports an event-sync failure without terminating a healthy entity replica. The event cache keeps closed daily segments for at most seven days or 256 MiB per account and reports an explicit gap when a requested sequence has retired.
+`catalyst events tail`, `wait-for`, `query` and `status` read from the cloud by default, with no local file. `events tail` prints one JSON line per new event and stays in the foreground; `events wait-for --ticket ... --timeout ...` prints the first match and exits 0, or exits 1 when none arrives in time; `events query` reads one page of filtered history (`--ticket`, `--type`, `--limit` up to 200, `--order desc|asc`, `--before`, `--after`); `events status` names the cloud head.
+
+`events wait-for` can also wait on a repository (`--repo owner/name`), a branch (`--ref owner/name:branch`), a pull request (`--pr owner/name#n`), a phase session (`--session TICKET/phase#n`), events addressed to you (`--to me`), or a family of types (`--type pr.*`). Values of one flag are OR'ed and different flags are AND'ed, and `--repo`, `--ref`, `--pr` and `--session` can repeat. Such a wait holds one connection and prints nothing until a match, so a long `--timeout` such as 14400 costs nothing while it waits. It prints every matching event as one JSON line. After a dropped connection it replays from its cursor, so no event is missed or printed twice.
+
+| `wait-for` exit | Meaning |
+| --- | --- |
+| 0 | a match, printed on stdout |
+| 1 | none arrived in time; with a scope flag, stderr names the `--after` to resume from |
+| 2 | the cloud refused the wait (for example a ticket outside your teams), or the wait failed; stderr gives the reason |
+| 3 | `--from-cache` and the local event cache is absent or its writer stopped |
+| 4 | the cloud was unreachable for five attempts in a row: an outage, not a timeout |
+| 130 | interrupted |
+
+`catalyst messages read --ticket KEY-123 [--since SEQUENCE]` prints the messages sent to a ticket on your teams, with each sender and time, for example after a wait on `--type comms.message.posted` returns.
+
+Add `--from-cache` to read this machine's local event cache instead, which pays off when several agents on one machine share one cloud connection. `catalyst events status --from-cache --probe` checks the cache's own cursor against the cloud head; `replica status --probe` checks the separate entity-replica cursor. A fresh replica does not prove event freshness. The replica process is the single writer and reports an event-sync failure without terminating a healthy entity replica. The event cache keeps closed daily segments for at most seven days or 256 MiB per account and reports an explicit gap when a requested sequence has retired.
 
 The replica is a Node process, not a service: the supported path is the plain command, and `skills/catalyst-onboard/references/local-sync.md` gives launchd and systemd examples for people who want the writer to survive a reboot.
 
