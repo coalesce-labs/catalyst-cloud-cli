@@ -144,8 +144,27 @@ describe("services, stop, readiness and cleanup", () => {
 
   it("removeImages removes each replaced image by its digest reference", async () => {
     const { exec, calls } = scripted(() => ({ code: 0, stdout: "" }));
-    await dockerRunnerUpdateEngine({ exec, env: {} }).removeImages([REF, `${REF}x`]);
+    expect(await dockerRunnerUpdateEngine({ exec, env: {} }).removeImages([REF, `${REF}x`])).toEqual([]);
     expect(calls).toEqual([["image", "rm", REF], ["image", "rm", `${REF}x`]]);
+  });
+
+  it("removeImages returns an image Docker refused while it is still present, and not one already gone", async () => {
+    const used = `${REF}used`;
+    const gone = `${REF}gone`;
+    const { exec } = scripted((args) => {
+      if (args[1] === "rm") return { code: 1, stdout: "" };
+      if (args.includes(used)) return { code: 0, stdout: "sha256:abc\n" };
+      if (args.includes(gone)) return { code: 1, stdout: "", stderr: `Error response from daemon: No such image: ${gone}` };
+      return undefined;
+    });
+    expect(await dockerRunnerUpdateEngine({ exec, env: {} }).removeImages([used, gone])).toEqual([used]);
+  });
+
+  it("removeImages keeps an image when Docker does not answer, so a later run tries again", async () => {
+    const { exec } = scripted(() => ({ code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock" }));
+    expect(await dockerRunnerUpdateEngine({ exec, env: {} }).removeImages([REF])).toEqual([REF]);
+    const thrown: RunnerExec = async () => { throw new Error("spawn docker ENOENT"); };
+    expect(await dockerRunnerUpdateEngine({ exec: thrown, env: {} }).removeImages([REF])).toEqual([REF]);
   });
 
   it("a thrown docker command is a failure, never an exception", async () => {

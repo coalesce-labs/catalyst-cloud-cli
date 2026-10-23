@@ -139,6 +139,8 @@ interface FakeOptions {
   /** What is running before the update. Default: what `.env` names. */
   live?: Images;
   stop?: boolean;
+  /** Images Docker refuses to remove, for example because a running phase still uses them. */
+  inUse?: (image: string) => boolean;
 }
 /** A machine: what runs is what `.env` named at the last successful compose up. */
 function fakeEngine(dir: string, options: FakeOptions = {}) {
@@ -167,7 +169,7 @@ function fakeEngine(dir: string, options: FakeOptions = {}) {
       return true;
     },
     async supervisorReadySinceStart() { return options.ready ? options.ready(live.supervisor) : true; },
-    async removeImages(images) { calls.push(`rm:${images.join(",")}`); },
+    async removeImages(images) { calls.push(`rm:${images.join(",")}`); return images.filter((image) => options.inUse?.(image) ?? false); },
   };
   return { engine, calls, live: () => live };
 }
@@ -403,6 +405,101 @@ describe("runRunnerUpdate", () => {
       await runRunnerUpdate(engine, { dir, ...fastClock() });
       expect(custodyCalls(calls)).toEqual([]);
     });
+  });
+});
+
+// CTC-6709: a release whose supervisor reads the same journal as the one a failure goes back to is
+// taken with phases running; any other release still waits for an idle machine.
+describe("an update in place, decided by the supervisor's journal format", () => {
+  const withFormat = (format: unknown, component: ReleaseComponent = "supervisor") =>
+    (b: Record<string, unknown>) => { (b[component] as Record<string, unknown>).journalFormat = format; };
+  const NEXT: Images = { runner: ref("runner", "4"), supervisor: ref("supervisor", "5"), watchdog: ref("watchdog", "6") };
+  const next = (format?: number) =>
+    answered(release({ generation: 2, digits: ["4", "5", "6"], mutate: format === undefined ? undefined : withFormat(format) }));
+  /** A machine that applied generation 1, whose release named `format` (or none). */
+  const applied = async (format?: number) => {
+    const d = install();
+    const read = answered(release({ mutate: format === undefined ? undefined : withFormat(format) }));
+    expect(await runRunnerUpdate(fakeEngine(d, { read }).engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "updated", generation: 1 });
+    return d;
+  };
+
+  it("the supervisor's format is parsed; a malformed one, or one on another image, refuses the release", () => {
+    expect(parseDesiredRelease(release({ mutate: withFormat(2) }))).toMatchObject({ journalFormat: 2 });
+    expect(parseDesiredRelease(release())).toMatchObject({ journalFormat: null });
+    for (const bad of [0, -1, 1.5, "2", null]) expect(parseDesiredRelease(release({ mutate: withFormat(bad) }))).toBeNull();
+    expect(parseDesiredRelease(release({ mutate: withFormat(2, "runner") }))).toBeNull();
+    expect(parseDesiredRelease(release({ mutate: withFormat(2, "watchdog") }))).toBeNull();
+  });
+
+  it("an applied release records its supervisor's format; one that names none records nothing", async () => {
+    expect(readReleaseState(await applied(2)).journal).toEqual({ format: 2, supervisor: TARGET.supervisor });
+    expect(readReleaseState(await applied()).journal).toBeNull();
+  });
+
+  it("POSITIVE CONTROL: the same format with phases running updates in place and never looks for phases", async () => {
+    const d = await applied(2);
+    const { engine, calls, live } = fakeEngine(d, { read: next(2), busy: [2, 2] });
+    const result = await runRunnerUpdate(engine, { dir: d, ...fastClock() });
+    expect(result).toMatchObject({ outcome: "updated", detail: "updated:runner,supervisor,watchdog:in_place", generation: 2 });
+    expect(calls.some((c) => c.startsWith("attempts:"))).toBe(false);
+    expect(calls).toEqual(["read", "prepare:3", "stop", "up", `rm:${TARGET.runner},${TARGET.supervisor},${TARGET.watchdog}`]);
+    expect(live()).toEqual(NEXT);
+    expect(readReleaseState(d).journal).toEqual({ format: 2, supervisor: NEXT.supervisor });
+  });
+
+  it("the runner image under phases left running is kept and removed by a later run once they finish", async () => {
+    const d = await applied(2);
+    const busy = fakeEngine(d, { read: next(2), inUse: (image) => image === TARGET.runner });
+    expect(await runRunnerUpdate(busy.engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "updated", generation: 2 });
+    expect(readReleaseState(d).pendingRemoval).toEqual([TARGET.runner]);
+    // Still running at the next check: kept again.
+    const stillBusy = fakeEngine(d, { read: next(2), inUse: (image) => image === TARGET.runner });
+    expect(await runRunnerUpdate(stillBusy.engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "current" });
+    expect(stillBusy.calls).toEqual([`rm:${TARGET.runner}`, "read"]);
+    expect(readReleaseState(d).pendingRemoval).toEqual([TARGET.runner]);
+    // The phases finished: the next check frees it.
+    const idle = fakeEngine(d, { read: next(2) });
+    expect(await runRunnerUpdate(idle.engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "current" });
+    expect(idle.calls).toEqual([`rm:${TARGET.runner}`, "read"]);
+    expect(readReleaseState(d).pendingRemoval).toEqual([]);
+  });
+
+  it("a pending image that .env names again is never removed and stays pending", async () => {
+    const d = await applied(2);
+    await runRunnerUpdate(fakeEngine(d, { read: next(2), inUse: (image) => image === TARGET.runner }).engine, { dir: d, ...fastClock() });
+    writeFileSync(join(d, ".env"), rewriteEnvText(readFileSync(join(d, ".env"), "utf8"), { CATALYST_RUNNER_IMAGE: TARGET.runner }), { mode: 0o600 });
+    const after = fakeEngine(d, { read: { kind: "unreachable", detail: "TimeoutError", hostId: "host_abc" } });
+    expect(await runRunnerUpdate(after.engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "retained" });
+    expect(after.calls).toEqual(["read"]);
+    expect(readReleaseState(d).pendingRemoval).toEqual([TARGET.runner]);
+  });
+
+  it.each([
+    ["a newer format", 2, 3],
+    ["a release that names no format", 2, undefined],
+    ["a machine whose applied release named none", undefined, 2],
+  ])("NEGATIVE: %s waits for an idle machine", async (_label, before, after) => {
+    const d = await applied(before);
+    const { engine, calls } = fakeEngine(d, { read: next(after), busy: [1] });
+    expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "deferred_busy", detail: "attempt_containers:1" });
+    expect(calls).not.toContain("stop");
+  });
+
+  it("NEGATIVE: a supervisor in .env other than the recorded one waits, since a failure would go back to it", async () => {
+    const d = await applied(2);
+    writeFileSync(join(d, ".env"), rewriteEnvText(readFileSync(join(d, ".env"), "utf8"), { CATALYST_SUPERVISOR_IMAGE: OLD.supervisor }), { mode: 0o600 });
+    const { engine } = fakeEngine(d, { read: next(2), busy: [1] });
+    expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "deferred_busy" });
+  });
+
+  it("an in-place update whose supervisor never reports ready goes back to the previous release, still without looking for phases", async () => {
+    const d = await applied(2);
+    const { engine, calls, live } = fakeEngine(d, { read: next(2), busy: [1, 1], ready: (image) => image !== NEXT.supervisor });
+    expect(await runRunnerUpdate(engine, { dir: d, ...fastClock(), readyDeadlineMs: 20_000 })).toMatchObject({ outcome: "rolled_back", exitCode: 1 });
+    expect(calls.some((c) => c.startsWith("attempts:"))).toBe(false);
+    expect(live()).toEqual(TARGET);
+    expect(readReleaseState(d)).toMatchObject({ generation: 1, journal: { format: 2, supervisor: TARGET.supervisor } });
   });
 });
 
