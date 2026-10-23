@@ -110,6 +110,8 @@ import { cmdConnections, type ConnectionsDeps } from "./connections.js";
 import {
   cmdOnboard,
   onboardErrorJournal,
+  onboardStatePath,
+  readOnboardJournal,
   type OnboardDeps,
 } from "./onboard.js";
 import type { OnboardBootstrapPreview } from "./onboard-bootstrap.js";
@@ -293,6 +295,12 @@ export interface MainDeps {
  * the `catalyst` launcher beside it, once, on the next run of either name. Read and write back to
  * back, so the window for racing a concurrent OAuth refresh is as small as the update notice's.
  */
+/** Setup's saved local sync choice; an unreadable record reads as off, which only adds a hint. */
+function savedLocalSync(ctx: Ctx): boolean {
+  try { return readOnboardJournal(onboardStatePath(ctx.home, ctx.env))?.localSync === true; }
+  catch { return false; }
+}
+
 function migrateLegacyCliPath(ctx: Ctx): void {
   let cfg: CustomerConfig | null;
   try {
@@ -749,7 +757,7 @@ export async function main(
       case "repo":
         return await cmdRepo(args, ctx);
       case "legacy":
-        return await cmdLegacy(args, ctx, deps.legacy ?? {});
+        return await cmdLegacy(args, ctx, { localSyncSelected: savedLocalSync(ctx), ...deps.legacy });
       case "identity":
         return await cmdIdentity(args, ctx, deps.identity ?? {});
       case "hosts":

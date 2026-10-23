@@ -13,6 +13,9 @@ import {
   OLD_USER_UNITS,
   type LegacyRun,
 } from "../src/legacy";
+import { stopReplicaWriterForTest } from "../src/local-sync-data";
+import { onboardStatePath } from "../src/onboard";
+import { spawn } from "node:child_process";
 import { makeCtx, tempHome, type TestCtx } from "./helpers";
 
 let home: string;
@@ -165,6 +168,54 @@ describe("a machine with nothing old", () => {
 });
 
 describe("current shared data on a fresh installation", () => {
+  test("a fresh replica with no old runtime is current data: legacy --json exits 0 with an empty found list", async () => {
+    write(".config/catalyst-cloud/replica.db", "saved database");
+    expect(await main(["legacy", "--json"], ctx, deps())).toBe(0);
+    const body = JSON.parse(ctx.out[0]!);
+    expect(body.found).toEqual([]);
+    expect(body.localSyncFiles.map((file: { path: string }) => file.path)).toEqual([join(home, ".config/catalyst-cloud/replica.db")]);
+    expect(body.requiredFlag).toBe("--remove --data");
+    expect(readFileSync(join(home, ".config/catalyst-cloud/replica.db"), "utf8")).toBe("saved database");
+    expect(calls).toEqual([]);
+  });
+
+  test("with local sync selected in the saved setup, legacy names its files as current data and recommends no removal", async () => {
+    write(".config/catalyst-cloud/replica.db", "saved database");
+    const state = onboardStatePath(home, ctx.env);
+    mkdirSync(join(state, ".."), { recursive: true });
+    writeFileSync(state, JSON.stringify({ schema: 1, startedAt: "2026-10-23T00:00:00.000Z", localSync: true, steps: [] }));
+    expect(await main(["legacy"], ctx, deps())).toBe(0);
+    expect(ctx.out.join("\n")).toContain("Local sync is on, so these files are current data and kept.");
+    expect(ctx.out.join("\n")).not.toContain("--remove --data");
+    ctx.out.length = 0;
+    expect(await main(["legacy", "--json"], ctx, deps())).toBe(0);
+    const body = JSON.parse(ctx.out[0]!);
+    expect(body.found).toEqual([]);
+    expect(body.requiredFlag).toBeUndefined();
+    expect(body.localSyncFiles).toHaveLength(1);
+  });
+
+  test("a stale pidfile naming a live process that is not a writer sends no signal and does not block cleanup", async () => {
+    const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await expect(stopReplicaWriterForTest(other.pid!)).resolves.toBeUndefined();
+      expect(other.exitCode).toBeNull();
+      expect(other.signalCode).toBeNull();
+      write(".config/catalyst-cloud/replica.db", "saved database");
+      write(".config/catalyst-cloud/replica.db.pid", String(other.pid));
+      expect(await main(["legacy", "--remove", "--data", "--yes"], ctx, deps())).toBe(0);
+      expect(existsSync(join(home, ".config/catalyst-cloud/replica.db"))).toBe(false);
+      expect(existsSync(join(home, ".config/catalyst-cloud/replica.db.pid"))).toBe(false);
+      expect(other.exitCode).toBeNull();
+      expect(other.signalCode).toBeNull();
+    } finally { other.kill("SIGKILL"); }
+  });
+
+  test("a pid reused by another user's process (EPERM) or by init reads as no writer", async () => {
+    await expect(stopReplicaWriterForTest(1)).resolves.toBeUndefined();
+  });
+
   test("--remove --data without a terminal keeps data and reports the complete retry command", async () => {
     write(".config/catalyst-cloud/replica.db", "saved database");
     expect(await main(["legacy", "--remove", "--data"], ctx, deps())).toBe(1);

@@ -88,19 +88,23 @@ export function localSyncInventory(files: readonly LocalSyncFile[]): string[] {
   return files.map((file) => `${file.path} (${file.size} bytes)`);
 }
 
+/** Stop the replica writer a pidfile or lock names. A pid that is gone, belongs to another user
+ *  (EPERM: a writer this person started runs as them) or runs another command is a stale record
+ *  left by a crash or reboot: no signal is sent, and cleanup goes on. */
 async function stopWriter(pid: number): Promise<void> {
   if (pid === process.pid) throw new Error("refusing to stop the cleanup process as a replica writer");
   const alive = () => {
     try { process.kill(pid, 0); return true; }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH" || code === "EPERM") return false;
       throw error;
     }
   };
   if (!alive()) return;
   const command = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", timeout: 1000 });
   if (command.status !== 0 || !/(?:^|[/\s])catalyst(?:-skills)?(?:\.js)?\s+replica\s+start\b|(?:^|[/\s])catalyst-replica-sync(?:\s|$)/.test(command.stdout))
-    throw new Error(`cannot verify pid ${pid} is a replica writer; local data kept`);
+    return;
   process.kill(pid, "SIGTERM");
   const deadline = Date.now() + 5000;
   while (alive()) {
@@ -108,6 +112,9 @@ async function stopWriter(pid: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
+
+/** Internal test seam for the production writer stop, without a process override. */
+export const stopReplicaWriterForTest = stopWriter;
 
 /** Wait for every detached writer before unlinking. Refuse a replacement file after approval. */
 export async function removeLocalSyncData(

@@ -95,6 +95,8 @@ export type LegacyRun = (
 export interface LegacyDeps {
   /** Setup with local sync reuses the existing replica. */
   preserveReplica?: boolean;
+  /** The saved setup choice has local sync on, so its files are current data, not leftovers. */
+  localSyncSelected?: boolean;
   /** Process boundary: stop a detached writer and wait for it to exit. */
   stopWriter?: (pid: number) => Promise<void>;
   /** Setup pins the precise file inventory approved by the person. */
@@ -336,11 +338,12 @@ export async function cmdLegacy(
     emit(
       {
         sourceCommit: LEGACY_SOURCE_COMMIT,
-        found: local,
+        found: [],
         removed: [],
         remaining: [],
         kept: [...shared, ...local],
-        ...(local.length ? { requiredFlag: "--remove --data", localSyncFiles: local } : {}),
+        ...(local.length ? { localSyncFiles: local } : {}),
+        ...(local.length && !deps.localSyncSelected ? { requiredFlag: "--remove --data" } : {}),
       },
       [
         "no leftovers of the old local Catalyst runtime on this machine",
@@ -348,10 +351,14 @@ export async function cmdLegacy(
           ? ["shared current Catalyst data folders are present and kept"]
           : []),
         ...inventory,
-        ...(local.length ? ["Local sync data kept. Run catalyst legacy --remove --data to review and remove it."] : []),
+        ...(local.length
+          ? [deps.localSyncSelected
+              ? "Local sync is on, so these files are current data and kept."
+              : "Local sync data kept. If you no longer use local sync, run catalyst legacy --remove --data to review and remove it."]
+          : []),
       ],
     );
-    return local.length && !wantRemove ? 1 : 0;
+    return 0;
   }
   const listLines = [
     `Leftovers of the old local Catalyst runtime on this machine (${legacy.length}):`,
