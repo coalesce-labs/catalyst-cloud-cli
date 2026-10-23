@@ -457,7 +457,57 @@ function cleanPath(path) {
       throw failure("directory");
   }
 }
-function directory(path, privateChannel = false) {
+var DARWIN_THOUGHTS_UNSAFE_DIRECTORY_SUBCHECKS = [
+  "not_directory",
+  "authority_changed",
+  "special_bits",
+  "group_other_write",
+  "owner_rwx",
+  "private_bits",
+  "private_owner",
+  "bootstrap_other_bits"
+];
+var BOOTSTRAP_LEVELS = [
+  ["thoughts_root", "thoughts_tenant", "thoughts_owner", "thoughts_repository"],
+  ["locks_root", "locks_tenant"],
+  ["requests_root", "requests_tenant", "requests_owner", "requests_repository"],
+  ["responses_root", "responses_tenant", "responses_owner", "responses_repository"]
+];
+var DARWIN_THOUGHTS_DIRECTORY_ROLES = [
+  "requests_channel",
+  "responses_channel",
+  "checkout",
+  "lock",
+  "git",
+  "thoughts_root_wait",
+  "locks_root_wait",
+  ...BOOTSTRAP_LEVELS.flat()
+];
+function bootstrapRole(index, level) {
+  const role = BOOTSTRAP_LEVELS[index]?.[level];
+  if (!role)
+    throw failure("bootstrap_path");
+  return role;
+}
+function unsafeDirectory(role, subcheck) {
+  if (!DARWIN_THOUGHTS_DIRECTORY_ROLES.includes(role) || !DARWIN_THOUGHTS_UNSAFE_DIRECTORY_SUBCHECKS.includes(subcheck))
+    return failure("unsafe_directory");
+  return failure(`unsafe_directory:${role}:${subcheck}`);
+}
+function darwinThoughtsUnsafeDirectorySubcheck(stat, privateChannel) {
+  if ((stat.mode & 0o7000n) !== 0n)
+    return "special_bits";
+  if ((stat.mode & 0o022n) !== 0n)
+    return "group_other_write";
+  if ((stat.mode & 0o700n) !== 0o700n)
+    return "owner_rwx";
+  if (privateChannel && (stat.mode & 0o077n) !== 0n)
+    return "private_bits";
+  if (privateChannel && stat.uid !== 0n && stat.uid !== 10001n)
+    return "private_owner";
+  return;
+}
+function directory(path, role, privateChannel = false) {
   return guarded(() => {
     cleanPath(path);
     const named = fs.lstatSync(path, { bigint: true });
@@ -465,17 +515,21 @@ function directory(path, privateChannel = false) {
     try {
       const opened = fs.fstatSync(fd, { bigint: true });
       const after = fs.lstatSync(path, { bigint: true });
-      if (!opened.isDirectory() || !sameDirectoryAuthority(named, opened) || !sameDirectoryAuthority(opened, after) || (opened.mode & 0o7022n) !== 0n || (opened.mode & 0o700n) !== 0o700n || privateChannel && ((opened.mode & 0o077n) !== 0n || opened.uid !== 0n && opened.uid !== 10001n)) {
-        throw failure("unsafe_directory");
-      }
+      if (!opened.isDirectory())
+        throw unsafeDirectory(role, "not_directory");
+      if (!sameDirectoryAuthority(named, opened) || !sameDirectoryAuthority(opened, after))
+        throw unsafeDirectory(role, "authority_changed");
+      const subcheck = darwinThoughtsUnsafeDirectorySubcheck(opened, privateChannel);
+      if (subcheck)
+        throw unsafeDirectory(role, subcheck);
       return opened;
     } finally {
       fs.closeSync(fd);
     }
   });
 }
-function currentIdentity(path, logicalPath) {
-  const stat = directory(path);
+function currentIdentity(path, logicalPath, role) {
+  const stat = directory(path, role);
   return {
     path: logicalPath,
     device: stat.dev.toString(),
@@ -534,7 +588,7 @@ function isInitialGuestOwnerProjection(before, current, stagedFile) {
   return before.dev === current.dev && before.ino === current.ino && before.mode === current.mode && before.uid === 0n && before.gid === 0n && current.uid === 10001n && current.gid === 10001n && process.getuid?.() === 10001 && process.geteuid?.() === 10001 && process.getgid?.() === 10001 && stagedFile.uid === 10001n && stagedFile.gid === 10001n;
 }
 function receiveStagingChannel(path, before, stagedFile, observedAncestors) {
-  const current = directory(path, true);
+  const current = directory(path, "requests_channel", true);
   if (sameDirectoryAuthority(before, current))
     return current;
   if (!isInitialGuestOwnerProjection(before, current, stagedFile))
@@ -549,16 +603,20 @@ function receiveStagingChannel(path, before, stagedFile, observedAncestors) {
 function receiveWaitingResponseChannel(path, before, stagedFile, observedAncestors, responsePath, bootstrapRoots, authenticatePresentResponse, bootstrapProjection) {
   const maxPasses = bootstrapRoots ? 4 : 2;
   for (let pass = 0;pass < maxPasses; pass += 1) {
-    const current = directory(path, true);
-    const projections = [{ path, before, current, privateChannel: true }];
-    for (const root of bootstrapRoots ? [bootstrapRoots.thoughtsRoot, bootstrapRoots.locksRoot] : []) {
+    const current = directory(path, "responses_channel", true);
+    const projections = [{ path, role: "responses_channel", before, current, privateChannel: true }];
+    for (const [root, role] of bootstrapRoots ? [
+      [bootstrapRoots.thoughtsRoot, "thoughts_root_wait"],
+      [bootstrapRoots.locksRoot, "locks_root_wait"]
+    ] : []) {
       const captured = observedAncestors.find((ancestor) => ancestor.path === root);
       if (!captured)
         throw failure("ancestor_identity");
       projections.push({
         path: root,
+        role,
         before: captured.stat,
-        current: directory(root),
+        current: directory(root, role),
         privateChannel: false
       });
     }
@@ -589,7 +647,7 @@ function receiveWaitingResponseChannel(path, before, stagedFile, observedAncesto
     checkAncestors(observedAncestors.filter((ancestor) => !projections.some((projection) => projection.path === ancestor.path)), bootstrapProjection);
     let resample = false;
     for (const projection of projections) {
-      const next = directory(projection.path, projection.privateChannel);
+      const next = directory(projection.path, projection.role, projection.privateChannel);
       if (sameDirectoryAuthority(projection.current, next))
         continue;
       if (!receiveProjection(projection.current, next, stagedFile))
@@ -660,9 +718,10 @@ function checkBootstrapDirectories(paths, allowMissing) {
       throw failure("bootstrap_path");
     let current = root;
     const components = ["", ...leaf.slice(root.length + 1).split("/")];
-    for (const component of components) {
+    for (const [level, component] of components.entries()) {
       if (component)
         current = join(current, component);
+      const role = bootstrapRole(index, level);
       try {
         fs.lstatSync(current);
       } catch (error) {
@@ -670,11 +729,11 @@ function checkBootstrapDirectories(paths, allowMissing) {
           break;
         throw failure("bootstrap_directory", error);
       }
-      const stat = directory(current, index >= 2);
+      const stat = directory(current, role, index >= 2);
       if (stat.uid !== 0n && stat.uid !== 10001n)
         throw failure("bootstrap_owner");
       if ((stat.mode & 0o007n) !== 0n)
-        throw failure("unsafe_directory");
+        throw unsafeDirectory(role, "bootstrap_other_bits");
     }
   }
 }
@@ -695,21 +754,21 @@ async function exchange(options, bootstrap) {
     issuedAtMs,
     expiresAtMs: options.deadlineMs
   }));
-  let requests = directory(options.requestDir, true);
-  let responses = directory(options.responseDir, true);
+  let requests = directory(options.requestDir, "requests_channel", true);
+  let responses = directory(options.responseDir, "responses_channel", true);
   const creationPaths = bootstrap ? bootstrapPaths(authority, options.tenant, options.repository) : [];
   if (bootstrap)
     checkBootstrapDirectories(creationPaths, true);
   else {
-    currentIdentity(options.checkoutPath, targets.checkoutSource);
-    currentIdentity(options.lockPath, targets.lockSource);
+    currentIdentity(options.checkoutPath, targets.checkoutSource, "checkout");
+    currentIdentity(options.lockPath, targets.lockSource, "lock");
   }
   const gitPath = join(options.checkoutPath, ".git");
   if (options.gitPath !== undefined && options.gitPath !== gitPath)
     throw failure("git_path");
   const initialGitPresent = options.gitPath !== undefined || gitPresent(gitPath);
   if (initialGitPresent)
-    currentIdentity(gitPath, join(targets.checkoutSource, ".git"));
+    currentIdentity(gitPath, join(targets.checkoutSource, ".git"), "git");
   const aliasAncestors = guarded(() => ancestors([
     options.requestDir,
     options.responseDir,
@@ -745,11 +804,11 @@ async function exchange(options, bootstrap) {
       authority,
       request,
       nowMs: now(),
-      engineCheckout: currentIdentity(options.checkoutPath, targets.checkoutSource),
-      engineLock: currentIdentity(options.lockPath, targets.lockSource)
+      engineCheckout: currentIdentity(options.checkoutPath, targets.checkoutSource, "checkout"),
+      engineLock: currentIdentity(options.lockPath, targets.lockSource, "lock")
     };
     if (gitPresent(gitPath))
-      expectation.engineGit = currentIdentity(gitPath, join(targets.checkoutSource, ".git"));
+      expectation.engineGit = currentIdentity(gitPath, join(targets.checkoutSource, ".git"), "git");
     verifyDarwinThoughtsCustodyResponse(bytes, expectation);
   };
   const projection = () => {
@@ -789,7 +848,7 @@ async function exchange(options, bootstrap) {
     }
     requests = receiveStagingChannel(options.requestDir, requests, owned, aliasAncestors);
     checkAncestors(aliasAncestors);
-    if (!sameDirectoryAuthority(requests, directory(options.requestDir, true)))
+    if (!sameDirectoryAuthority(requests, directory(options.requestDir, "requests_channel", true)))
       throw failure("channel_identity");
     try {
       fs.lstatSync(finalPath);
@@ -814,11 +873,11 @@ async function exchange(options, bootstrap) {
           throw failure("ancestor_identity");
         requests = receivedRequest.stat;
       }
-      for (const [path, expected] of [
-        [options.requestDir, requests],
-        [options.responseDir, responses]
+      for (const [path, role, expected] of [
+        [options.requestDir, "requests_channel", requests],
+        [options.responseDir, "responses_channel", responses]
       ]) {
-        const current = directory(path, true);
+        const current = directory(path, role, true);
         if (!sameDirectoryAuthority(current, expected))
           throw failure("channel_identity");
       }
@@ -841,11 +900,11 @@ async function exchange(options, bootstrap) {
           authority,
           request,
           nowMs: 0,
-          engineCheckout: currentIdentity(options.checkoutPath, targets.checkoutSource),
-          engineLock: currentIdentity(options.lockPath, targets.lockSource)
+          engineCheckout: currentIdentity(options.checkoutPath, targets.checkoutSource, "checkout"),
+          engineLock: currentIdentity(options.lockPath, targets.lockSource, "lock")
         };
         if (receivedGitPresent)
-          expectation.engineGit = currentIdentity(gitPath, join(targets.checkoutSource, ".git"));
+          expectation.engineGit = currentIdentity(gitPath, join(targets.checkoutSource, ".git"), "git");
         checkAncestors(aliasAncestors, projection());
         checkAncestors(receivedGitAncestors, projection());
         expectation.nowMs = now();
