@@ -56,6 +56,15 @@ describe("installed CLI release reporting", () => {
     await send(request, {headers: new Headers({authorization:"Bearer override"})});
     expect(new Headers(captured[2].init?.headers).get("authorization")).toBe("Bearer override");
   });
+  test("keeps a plain-record headers init a plain record, and an array an array", async () => {
+    const captured: RequestInit[] = [];
+    const transport: typeof fetch = async (_input, init) => { captured.push(init ?? {}); return new Response("{}"); };
+    const send = reportCliVersion(transport, "0.16.29", () => [origin]);
+    await send(`${origin}/api/v1/stage`, { method: "POST", body: "{}", headers: { "content-type": "application/json", "X-Catalyst-Cli-Version": "forged" } });
+    expect(captured[0]!.headers).toEqual({ "content-type": "application/json", "x-catalyst-cli-version": "0.16.29" });
+    await send(`${origin}/api/v1/stage`, { headers: [["content-type", "application/json"], ["x-catalyst-cli-version", "forged"]] });
+    expect(captured[1]!.headers).toEqual([["content-type", "application/json"], ["x-catalyst-cli-version", "0.16.29"]]);
+  });
   test("does not decorate unrelated initial destinations, provider calls or malformed release values", async () => {
     const captured: RequestInit[] = [];
     const transport: typeof fetch = async (_input, init) => { captured.push(init ?? {}); return new Response("{}"); };

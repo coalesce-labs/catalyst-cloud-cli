@@ -15,8 +15,21 @@ export function reportCliVersion(transport: typeof fetch, version: string, origi
     } catch {
       return transport(input, init);
     }
-    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-    headers.set(HEADER, version);
-    return transport(input, { ...init, headers });
+    return transport(input, { ...init, headers: withVersion(init?.headers ?? (input instanceof Request ? input.headers : undefined), version) });
   };
+}
+
+/** Adds the header in the shape the caller used, so a transport that reads a plain record keeps
+ *  reading one. A caller's own copy of the header, in any case, is replaced. */
+function withVersion(headers: HeadersInit | undefined, version: string): HeadersInit {
+  if (headers instanceof Headers) {
+    const copy = new Headers(headers);
+    copy.set(HEADER, version);
+    return copy;
+  }
+  if (Array.isArray(headers)) return [...headers.filter(([name]) => name.toLowerCase() !== HEADER), [HEADER, version]];
+  const record: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers ?? {})) if (name.toLowerCase() !== HEADER) record[name] = value;
+  record[HEADER] = version;
+  return record;
 }
