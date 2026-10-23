@@ -49,6 +49,16 @@ describe("dispatcher", () => {
     expect(await main(["notice"], c2)).toBe(0);
     expect(c2.out.some((l) => l.startsWith("[catalyst] updated 0.0.1"))).toBe(true);
   });
+  test("an older CLI never moves the copied skills back from a newer bundle a selected CLI recorded", async () => {
+    const skill = join(defaultSkillsDirFor(home), "catalyst-onboard");
+    mkdirSync(skill, { recursive: true });
+    const newer = `---\nname: catalyst-onboard\n---\n<!-- ${PROVENANCE_MARKER}@99.0.0 -->\nNewer copy\n`;
+    writeFileSync(join(skill, "SKILL.md"), newer);
+    saveConfig(home, joinedConfig(server, { lastSkillBundleVersion: "99.0.0" }));
+    expect(await main(["capabilities", "--json"], makeCtx(home, { env: { CATALYST_SKILLS_OFFLINE: "1" } }))).toBe(0);
+    expect(readFileSync(join(skill, "SKILL.md"), "utf8")).toBe(newer);
+    expect((JSON.parse(readFileSync(configPathFor(home), "utf8")) as { lastSkillBundleVersion?: string }).lastSkillBundleVersion).toBe("99.0.0");
+  });
   test("an installer-owned CLI probe preserves an old stamped skill until the installer replaces it", async () => {
     const skill = join(defaultSkillsDirFor(home), "catalyst-onboard");
     mkdirSync(skill, { recursive: true });

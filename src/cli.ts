@@ -63,6 +63,7 @@ import {
 } from "./execution.js";
 import { cmdQuery } from "./query.js";
 import { maybePrintPublishedUpdateNotice } from "./cli-update-notice.js";
+import { semverOlder } from "./semver.js";
 import { cmdReady } from "./ready.js";
 import { cmdReplica, type ReplicaDeps } from "./replica.js";
 import { cmdRuntime, type RuntimeVerbDeps } from "./runtime-verb.js";
@@ -357,6 +358,9 @@ function maybePrintUpdateNotice(args: ParsedArgs, ctx: Ctx): void {
   if (!cfg) return;
   const manifest = readManifest();
   if (cfg.lastSkillBundleVersion === manifest.version) return;
+  // CTC-6741: a newer CLI selected by `catalyst update` records its own bundle here, and the older
+  // npm-installed one still runs for `catalyst runtime`. Copied skills only ever move forward.
+  if (cfg.lastSkillBundleVersion && semverOlder(manifest.version, cfg.lastSkillBundleVersion)) return;
   const previous = cfg.lastSkillBundleVersion;
   if (previous) {
     const entry = parseChangelogEntry(readChangelog(), manifest.version);

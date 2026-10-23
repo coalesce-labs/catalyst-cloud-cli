@@ -581,6 +581,12 @@ export function updateReportLines(report: UpdateReport): string[] {
       lines.push(`${COMPONENT_LABELS[c.id]}: this CLI does not install ${c.approved ?? "it"} by itself yet. Run: ${c.action}`);
   for (const project of report.projects)
     if (project.command !== null && project.applied?.outcome !== "updated") lines.push(`Update this project's SDK: ${project.command}`);
+  // CTC-6741: a failed CLI move leaves the running version in place; say so, and when it is tried again.
+  const cli = report.components.find((c) => c.id === "cli");
+  if (cli?.status === "failed")
+    lines.push(
+      `CLI: the update to ${cli.approved ?? "the approved version"} failed (${cli.reason}). You keep running ${cli.installed ?? "the installed version"}. The next release check tries again: within 15 minutes when automatic updates are on, or run catalyst update.`,
+    );
 
   if (unchanged) lines.push("Checked the approved release; nothing was changed.");
   else {

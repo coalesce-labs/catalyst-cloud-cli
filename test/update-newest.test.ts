@@ -48,6 +48,17 @@ describe("newestCliVersion", () => {
     const fetchImpl = (async () => new Response(JSON.stringify({ latest: "9.9.9" }), { status: 200 })) as typeof fetch;
     expect(await newestCliVersion(makeCtx(home, { env: {}, fetch: fetchImpl }))).toMatchObject({ latest: "9.9.9", source: "network" });
   });
+
+  it("an approved release on another train is not the answer: the npm lookup is", async () => {
+    const home = tempHome();
+    recordApproval(home, (r) => {
+      r.releaseLine = "9.1";
+      r.members = { cli: "9.1.0" };
+      r.skills = {};
+    });
+    const fetchImpl = (async () => new Response(JSON.stringify({ latest: "9.9.9" }), { status: 200 })) as typeof fetch;
+    expect(await newestCliVersion(makeCtx(home, { env: {}, fetch: fetchImpl }))).toMatchObject({ latest: "9.9.9", source: "network" });
+  });
 });
 
 describe("the update notice", () => {
@@ -57,6 +68,18 @@ describe("the update notice", () => {
     const ctx = makeCtx(home, { env: {}, fetch: noRegistry() });
     await maybePrintPublishedUpdateNotice(ctx, { interactive: true, json: false, command: "status", version: OLD });
     expect(ctx.err).toEqual([`Catalyst ${NEXT} is approved for this workspace. Update with: catalyst update`]);
+  });
+
+  it("never names catalyst update for an approved release on another train", async () => {
+    const home = tempHome();
+    recordApproval(home, (r) => {
+      r.releaseLine = "9.1";
+      r.members = { cli: "9.1.0" };
+      r.skills = {};
+    });
+    const ctx = makeCtx(home, { env: {}, fetch: (async () => new Response("{}", { status: 503 })) as typeof fetch });
+    await maybePrintPublishedUpdateNotice(ctx, { interactive: true, json: false, command: "status", version: OLD });
+    expect(ctx.err.join("\n")).not.toContain("catalyst update");
   });
 });
 

@@ -157,6 +157,9 @@ describe("one applying release check moves the CLI, the Cloud pack and then the 
     expect(byId.replica).toMatchObject({ status: "pending", reason: "cli_update_failed" });
     expect(replicaCalls).toEqual([]);
     expect(report.exitCode).toBe(1);
+    expect(updateReportLines(report)).toContain(
+      `CLI: the update to ${NEXT} failed (install_failed). You keep running ${CLI_VERSION}. The next release check tries again: within 15 minutes when automatic updates are on, or run catalyst update.`,
+    );
   });
 
   it("a held replica keeps its code while the CLI moves; a check moves neither", async () => {
