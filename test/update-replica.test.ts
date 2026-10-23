@@ -154,7 +154,7 @@ describe("a restart that did not finish (review of the interval promise)", () =>
     const r = replica(pid);
     const first = await restartReplica(makeCtx(home), cfg, NEXT, { timeoutMs: 60, pollMs: 20, launcher: "/usr/bin/catalyst", status: r.status, signal: () => {}, start: () => 1 });
     expect(first).toMatchObject({ outcome: "failed", detail: "stop_timeout" });
-    expect(existsSync(pendingRestartPathFor(home))).toBe(true);
+    expect(JSON.parse(readFileSync(pendingRestartPathFor(home), "utf8"))).toEqual({ dbPath: r.dbPath, target: NEXT });
     // The old writer exits late; the replica now reads as stopped.
     process.kill(pid, "SIGKILL");
     while (pidAlive(pid)) await new Promise((done) => setTimeout(done, 10));
@@ -171,6 +171,21 @@ describe("a restart that did not finish (review of the interval promise)", () =>
     expect(second).toEqual({ outcome: "updated", detail: "restarted", version: NEXT });
     expect(starts).toHaveLength(1);
     expect(existsSync(pendingRestartPathFor(home))).toBe(false);
+  });
+
+  it("replica status says a writer a release check restarted is down for that reason, and its data is kept", async () => {
+    const home = tempHome();
+    signIn(home);
+    const dbPath = join(mkdtempSync(join(tmpdir(), "update-replica-status-")), "replica.db");
+    writeFileSync(pendingRestartPathFor(home), JSON.stringify({ dbPath, target: NEXT }));
+    const ctx = makeCtx(home);
+    await main(["replica", "status", "--db", dbPath], ctx);
+    expect(ctx.out.at(-1)).toBe(
+      `  a release check restarted it on CLI ${NEXT} and the new writer is not running; its synced data is kept at ${dbPath}, and the next release check starts it again`,
+    );
+    const json = makeCtx(home);
+    await main(["replica", "status", "--db", dbPath, "--json"], json);
+    expect(JSON.parse(json.out[0]!)).toMatchObject({ dbPath, pendingRestart: { dbPath, target: NEXT } });
   });
 
   it("the owner's own replica stop clears it, so their stop is never undone", async () => {
