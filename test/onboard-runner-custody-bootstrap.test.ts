@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { darwinThoughtsInstallException, darwinThoughtsInstallRefusal, receiveDarwinThoughtsBootstrapForTest } from "../src/onboard-runner-custody.js";
+import { darwinThoughtsInstallAdvice, darwinThoughtsInstallException, darwinThoughtsInstallRefusal, receiveDarwinThoughtsBootstrapForTest } from "../src/onboard-runner-custody.js";
 import {
   canonicalDarwinThoughtsJson,
   deriveDarwinThoughtsTargets,
@@ -22,7 +22,7 @@ const CID = "c".repeat(64);
 const LABEL = "dev.catalystcloud.custody-token";
 type Mode = "complete" | "ack-timeout" | "ack-invalid" | "foreign-label" |
   "foreign-image" | "foreign-name" | "foreign-cache" | "foreign-daemon" |
-  "rm-noop" | "late-create" | "proof-refused" | "unknown-refusal";
+  "rm-noop" | "late-create" | "proof-refused" | "unknown-refusal" | "mount-refused" | "mount-refused-persisted";
 interface State {
   mode: Mode; calls: string[][]; created?: string[]; removed: boolean; inspectCount: number;
   row?: { Id: string; Name: string; Image: string; Config: { Image: string; Labels: Record<string, string> } };
@@ -78,9 +78,13 @@ describe("production custody bootstrap helper ACK and cleanup", () => {
       if(raw[0]!=='--config'||raw[2]!=='--host'||raw[3]!==${JSON.stringify(authority.endpoint)})throw Error('fixture_unscoped_cli');
       if(args[0]==='image')out(state.row&&state.mode==='foreign-cache'?'sha256:'+'f'.repeat(64):${JSON.stringify(IMAGE_ID)});
       else if(args[0]==='info')out(state.row&&state.mode==='foreign-daemon'?'foreign-daemon':${JSON.stringify(authority.daemonId)});
+      else if(args[0]==='create'&&state.mode==='mount-refused'){
+        state.created=args;save();process.stderr.write('docker: Error response from daemon: invalid mount config for type "bind": bind source path does not exist: /opt/homebrew/x\\n');process.exit(125);
+      }
       else if(args[0]==='create'){
         const labels={};for(let i=0;i<args.length;i++)if(args[i]==='--label'){const value=args[++i],at=value.indexOf('=');labels[value.slice(0,at)]=value.slice(at+1)}
         state.created=args;state.row={Id:${JSON.stringify(CID)},Name:'/'+args[args.indexOf('--name')+1],Image:${JSON.stringify(IMAGE_ID)},Config:{Image:${JSON.stringify(IMAGE)},Labels:labels}};save();
+        if(state.mode==='mount-refused-persisted'){process.stderr.write('docker: Error response from daemon: Mounts denied: the path /opt/homebrew/x is not shared from the host\\n');process.exit(125);}
         if(state.mode==='ack-timeout'){setInterval(()=>{},100);setTimeout(()=>process.exit(0),5000);}
         else if(['ack-invalid','late-create','foreign-label','foreign-image','foreign-name','foreign-cache','foreign-daemon'].includes(state.mode))out('invalid-create-ack');
         else out(${JSON.stringify(CID)});
@@ -116,7 +120,9 @@ describe("production custody bootstrap helper ACK and cleanup", () => {
     fs.writeFileSync(configPath, canonicalDarwinThoughtsJson({ version: 1, authority,
       dockerExecutable, dockerExecutableSha256: createHash("sha256").update(fs.readFileSync(dockerExecutable)).digest("hex") }), { mode: 0o600 });
     const state = (): State => JSON.parse(fs.readFileSync(statePath, "utf8")) as State;
-    return { authority, request, targets, state, input: { authority, configPath, supervisorImage: IMAGE,
+    const verifierPath = join(stateRoot, "verifier.mjs");
+    fs.copyFileSync(new URL("../vendor/self-host/darwin-thoughts-custody/verifier.mjs", import.meta.url), verifierPath);
+    return { authority, request, targets, state, input: { authority, configPath, verifierPath, supervisorImage: IMAGE,
       deadlineMs, nodeExecutable: fs.realpathSync(process.execPath), dockerExecutable } };
   }
   function commands(state: State) { return state.calls.map(call => call.slice(4)); }
@@ -171,6 +177,42 @@ describe("production custody bootstrap helper ACK and cleanup", () => {
     await expect(receiveDarwinThoughtsBootstrapForTest(f.input)).rejects.toThrow(/bootstrap_cleanup_unproved/);
     expect(commands(f.state())).toContainEqual(["rm", "--force", CID]);
     expect(f.state().removed).toBe(false);
+  });
+  it("mounts the verifier from its staged path", async () => {
+    const f = fixture("complete"); await receiveDarwinThoughtsBootstrapForTest(f.input);
+    const args = f.state().created!;
+    const mounts = args.flatMap((arg, index) => arg === "--mount" ? [args[index + 1]!] : []);
+    expect(mounts).toContain("type=bind,src=" + f.input.verifierPath + ",dst=/custody-verifier.mjs,readonly");
+  });
+  it("CTC-5928: keeps a refused mount once its token label proves nothing persisted, and names the fix", async () => {
+    const f = fixture("mount-refused");
+    let error: unknown;
+    try { await receiveDarwinThoughtsBootstrapForTest(f.input); } catch (caught) { error = caught; }
+    expect(darwinThoughtsInstallRefusal(error)).toBe("bootstrap_create_mount_refused");
+    expect(darwinThoughtsInstallAdvice(error)).toMatch(/Settings, then Resources, then File sharing/);
+    expect(String(error)).not.toContain("/opt/homebrew");
+    const state = f.state(); const calls = commands(state);
+    const label = state.created![state.created!.indexOf("--label") + 1]!;
+    expect(label).toMatch(/^dev\.catalystcloud\.custody-token=[a-f0-9]{64}$/);
+    const create = calls.findIndex(args => args[0] === "create");
+    expect(calls.slice(create + 1)).toContainEqual(["ps", "--all", "--no-trunc", "--quiet", "--filter", "label=" + label]);
+    expect(calls.filter(args => ["inspect", "start", "rm"].includes(args[0]!))).toEqual([]);
+  });
+  it("CTC-5928: still recovers and removes a helper the Engine persisted despite a refused mount", async () => {
+    const f = fixture("mount-refused-persisted");
+    let error: unknown;
+    try { await receiveDarwinThoughtsBootstrapForTest(f.input); } catch (caught) { error = caught; }
+    expect(darwinThoughtsInstallRefusal(error)).toBe("bootstrap_create_mount_refused");
+    expect(String(error)).not.toContain("/opt/homebrew");
+    const state = f.state(); receivedIdentity(state); removedAndAbsent(state);
+    expect(state.removed).toBe(true);
+  });
+  it("CTC-5928: gives no advice for a refusal that names no cause a person can change", async () => {
+    const f = fixture("proof-refused");
+    let error: unknown;
+    try { await receiveDarwinThoughtsBootstrapForTest(f.input); } catch (caught) { error = caught; }
+    expect(darwinThoughtsInstallRefusal(error)).toMatch(/^bootstrap_proof_refused/);
+    expect(darwinThoughtsInstallAdvice(error)).toBeUndefined();
   });
   it("keeps the signed-response channel read-only in the actual create argv", async () => {
     const f = fixture("complete"); await receiveDarwinThoughtsBootstrapForTest(f.input);

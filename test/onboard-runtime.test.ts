@@ -27,6 +27,7 @@ import {
 } from "../src/onboard.js";
 import { createOnboardRuntime } from "../src/onboard-runtime.js";
 import type { OnboardUi } from "../src/onboard-ui.js";
+import { seedReplica } from "./helpers.js";
 
 const homes: string[] = [];
 const baseUrl = "https://staging.catalystcloud.dev";
@@ -157,6 +158,164 @@ function consentUi(): OnboardUi {
 }
 
 describe("onboarding production runtime", () => {
+  test.each(["yes", "no"])("local-sync-off setup lists writer and cache sizes before one explicit %s", async (answer) => {
+    const f = fixture();
+    f.seed();
+    const plist = join(f.home, "Library", "LaunchAgents", "ai.coalesce.catalyst-replica-sync.plist");
+    mkdirSync(join(plist, ".."), { recursive: true });
+    writeFileSync(plist, "existing writer");
+    const local = [
+      join(f.home, ".config", "catalyst-cloud", "replica.db"),
+      join(f.home, ".config", "catalyst-cloud", "replica.db-wal"),
+      join(f.home, ".config", "catalyst-cloud", "replica.db.writer.lock"),
+      join(f.home, ".local", "state", "catalyst", "events", "tenant-a", "backbone", "cursor.json"),
+      join(f.home, ".local", "state", "catalyst", "events", "tenant-a", "backbone", "2026-10-04.jsonl"),
+    ];
+    for (const path of local) {
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, "local cache bytes");
+    }
+    const protectedFiles = [configPathFor(f.home), contractPathFor(f.home), join(f.home, ".config", "catalyst", "settings.json")];
+    mkdirSync(join(protectedFiles[2], ".."), { recursive: true });
+    writeFileSync(protectedFiles[1], "saved contract");
+    writeFileSync(protectedFiles[2], "saved settings");
+    const before = protectedFiles.map((path) => readFileSync(path, "utf8"));
+    let running = true;
+    let confirmations = 0;
+    const ui = consentUi();
+    ui.message = (text) => f.transcript.push(text);
+    const args = parseArgs(["onboard", "--only", "legacy"]);
+    const runtime = createOnboardRuntime(args, f.ctx, {
+      ...f.hooks, ui, realHome: () => f.home,
+      legacy: {
+        platform: "darwin", uid: 501, isTty: () => true,
+        prompt: async () => {
+          confirmations++;
+          expect(running).toBe(true);
+          for (const path of [plist, ...local]) expect(f.transcript.join("\n")).toContain(path);
+          expect(f.transcript.join("\n")).toContain("17 bytes");
+          return answer;
+        },
+        run: () => { running = false; return { status: 0, stdout: "", stderr: "" }; },
+      },
+    });
+    expect(await cmdOnboard(args, f.ctx, runtime)).toBe(answer === "yes" ? 0 : 11);
+    expect(confirmations).toBe(1);
+    expect(running).toBe(answer !== "yes");
+    for (const path of [plist, ...local]) expect(existsSync(path)).toBe(answer !== "yes");
+    expect(protectedFiles.map((path) => readFileSync(path, "utf8"))).toEqual(before);
+  });
+
+  test("headless local-sync-off setup without a removal flag reports files and deletes nothing", async () => {
+    const f = fixture();
+    f.seed();
+    const data = join(f.home, ".config", "catalyst-cloud", "replica.db");
+    writeFileSync(data, "local cache bytes");
+    const args = parseArgs(["onboard", "--headless", "--only", "legacy", "--yes", "--json"]);
+    const runtime = createOnboardRuntime(args, f.ctx, { ...f.hooks, realHome: () => f.home });
+    expect(await cmdOnboard(args, f.ctx, runtime)).toBe(11);
+    expect(readFileSync(data, "utf8")).toBe("local cache bytes");
+    expect(f.transcript.join("\n")).toContain(data);
+    expect(f.transcript.join("\n")).toContain("17 bytes");
+    expect(f.transcript.join("\n")).toContain("--remove-local-data");
+  });
+
+  test("setup does not delete a cache file that appeared after its cleanup inventory was approved", async () => {
+    const f = fixture();
+    f.seed();
+    const data = join(f.home, ".config", "catalyst-cloud", "replica.db");
+    const newFile = `${data}-wal`;
+    writeFileSync(data, "approved local data");
+    const ui = consentUi();
+    ui.confirmLocalSyncRemoval = async () => {
+      writeFileSync(newFile, "not in the approved inventory");
+      return true;
+    };
+    const args = parseArgs(["onboard", "--only", "legacy"]);
+    const runtime = createOnboardRuntime(args, f.ctx, { ...f.hooks, ui, realHome: () => f.home });
+    await cmdOnboard(args, f.ctx, runtime);
+    expect(readFileSync(newFile, "utf8")).toBe("not in the approved inventory");
+    expect(existsSync(data)).toBe(false);
+  });
+
+  test("headless local-sync-off setup removes listed data only with its explicit removal flag, after stopping the writer", async () => {
+    const f = fixture();
+    f.seed();
+    const data = join(f.home, ".config", "catalyst-cloud", "replica.db");
+    writeFileSync(data, "existing local data");
+    writeFileSync(`${data}.pid`, "424242");
+    let stopped = false;
+    const args = parseArgs(["onboard", "--headless", "--only", "legacy", "--remove-local-data", "--yes", "--json"]);
+    const runtime = createOnboardRuntime(args, f.ctx, {
+      ...f.hooks, realHome: () => f.home,
+      legacy: { stopWriter: async (pid) => {
+        expect(pid).toBe(424242);
+        expect(readFileSync(data, "utf8")).toBe("existing local data");
+        stopped = true;
+      } },
+    });
+    expect(await cmdOnboard(args, f.ctx, runtime)).toBe(0);
+    expect(stopped).toBe(true);
+    expect(existsSync(data)).toBe(false);
+    expect(existsSync(`${data}.pid`)).toBe(false);
+  });
+
+  test("local-sync-on setup reuses a fresh existing replica without changing its DB", async () => {
+    const f = fixture();
+    f.seed();
+    const data = await seedReplica(f.home, { cursor: 17, heartbeatAgeMs: 0 });
+    const before = readFileSync(data);
+    const args = parseArgs(["onboard", "--local-sync", "--only", "daemon", "--yes", "--json"]);
+    const runtime = createOnboardRuntime(args, f.ctx, { ...f.hooks, realHome: () => f.home });
+    expect(await cmdOnboard(args, f.ctx, runtime)).toBe(0);
+    expect(readFileSync(data)).toEqual(before);
+  });
+
+  test.each([
+    ["selected unattended", ["--local-sync", "--yes", "--json"]],
+    ["selected in the plan", []],
+  ])("setup with local sync %s keeps the running old replica and its data while cleaning other legacy services", async (_selection, flags) => {
+    const f = fixture();
+    f.seed();
+    const jobs = join(f.home, "Library", "LaunchAgents");
+    mkdirSync(jobs, { recursive: true });
+    const replica = join(jobs, "ai.coalesce.catalyst-replica-sync.plist");
+    const other = join(jobs, "com.catalyst.agent.plist");
+    writeFileSync(replica, "existing replica service");
+    writeFileSync(other, "other legacy service");
+    const data = join(f.home, ".config", "catalyst", "replica.db");
+    mkdirSync(join(data, ".."), { recursive: true });
+    writeFileSync(data, "existing replica data");
+    writeFileSync(`${data}-wal`, "uncheckpointed replica data");
+    let replicaRunning = true;
+    const args = parseArgs(["onboard", "--only", "legacy", ...flags]);
+    const runtime = createOnboardRuntime(args, f.ctx, {
+      ...f.hooks,
+      ui: { ...consentUi(), confirmPlan: async () => ({ proceed: true, localSync: true }) },
+      realHome: () => f.home,
+      legacy: {
+        platform: "darwin",
+        uid: 501,
+        run: (command, argv) => {
+          if (
+            command === "launchctl" &&
+            argv.includes("gui/501/ai.coalesce.catalyst-replica-sync")
+          )
+            replicaRunning = false;
+          return { status: 0, stdout: "", stderr: "" };
+        },
+      },
+    });
+
+    expect(await cmdOnboard(args, f.ctx, runtime)).toBe(0);
+
+    expect(replicaRunning).toBe(true);
+    expect(readFileSync(replica, "utf8")).toBe("existing replica service");
+    expect(readFileSync(data, "utf8")).toBe("existing replica data");
+    expect(readFileSync(`${data}-wal`, "utf8")).toBe("uncheckpointed replica data");
+    expect(existsSync(other)).toBe(false);
+  });
+
   test("fake HOME reports a legacy service and never stops or removes it", async () => {
     const f = fixture();
     const plist = join(

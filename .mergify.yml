@@ -1,7 +1,7 @@
-# Mergify merge queue for `catalyst-cloud-skills` (CTC-2563).
+# Mergify merge queue for `catalyst-cloud-cli` (CTC-6009).
 #
 # Entry is opt-OUT, matching `catalyst-cloud`: any pull request against `main` that is green,
-# non-draft, and has zero unresolved review threads self-enqueues. To keep one OUT, apply the
+# non-draft, reviewed, and has zero unresolved review threads self-enqueues. To keep one OUT, apply the
 # `hold` label — that is the only thing anyone does by hand.
 #
 # WHY THIS EXISTS: without a queue, the relay's merge phase fails `merge_excluded_no_merge_queue`,
@@ -27,11 +27,13 @@ queue_rules:
       - label!=hold
       - "#review-threads-unresolved=0"
       - "check-success=check"
+      - "check-success=Review Evidence"
     merge_conditions:
       - base=main
       - label!=hold
       - "#review-threads-unresolved=0"
       - "check-success=check"
+      - "check-success=Review Evidence"
 
 pull_request_rules:
   # The trigger, not a second gate: its conditions mirror queue_conditions so a pull request that
@@ -43,6 +45,7 @@ pull_request_rules:
       - label!=hold
       - "#review-threads-unresolved=0"
       - "check-success=check"
+      - "check-success=Review Evidence"
     actions:
       queue: {}
 
@@ -55,3 +58,4 @@ merge_protections:
       - -draft
     success_conditions:
       - "#review-threads-unresolved=0"
+      - "check-success=Review Evidence"

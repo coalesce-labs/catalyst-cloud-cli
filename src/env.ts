@@ -1,20 +1,37 @@
-// env.ts — `catalyst env inventory` / `env check`: a LOCAL, OFFLINE, repo-scoped reporter and
-// validator. Unlike every other verb in this file's siblings, `cmdEnv` never calls `requireConfig` or
-// `apiClient` — it needs neither a login nor a network call, which is the whole point of the feature:
-// a person reviews what a repository declares without connecting anything first.
+// env.ts — `catalyst env inventory` / `check` / `migrate` / `draft`: a LOCAL, OFFLINE, repo-scoped
+// reporter and validator. Unlike every other verb in this file's siblings, those four never call
+// `requireConfig` or `apiClient` — they need neither a login nor a network call, which is the whole
+// point of the feature: a person reviews what a repository declares without connecting anything first.
+// `env shell` (env/shell.ts) talks to Docker, and asks the cloud only when a credential-free download
+// of the image is refused; Catalyst's own image needs no login.
+//
+// The two exceptions store values and so sign in: `env import` and `env draft --write`'s offer to
+// store this computer's values. Both are delegated to `env-import.ts`; this module itself stays offline.
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { flagBool, flagString, positionals, type ParsedArgs } from "./args.js";
 import type { Ctx } from "./config.js";
+import { cmdEnvImport, offerMachineImport, type EnvImportDeps, type ImportReport } from "./env-import.js";
 import { validateSettingsToml } from "./env/settings-toml.js";
 import { convertLegacyEnvironmentJson } from "./env/legacy.js";
 import { draftEnvironment } from "./env/draft.js";
 import { inventoryRepo } from "./env/inventory.js";
+import type { MachineScan } from "./env/machine.js";
 import { inventoryToJson, renderInventory } from "./env/render.js";
+import { runEnvShell, type EnvShellDeps } from "./env/shell.js";
 import type { ScanDeps } from "./env/types.js";
 import { UsageError } from "./errors.js";
+import { stdinIsTty } from "./prompt.js";
+import { validateFullSettings } from "../vendor/settings/index.js";
 
-export type EnvDeps = Partial<ScanDeps> & { writeFile?: (path: string, content: string) => void };
+export type EnvDeps = Partial<ScanDeps> & {
+  writeFile?: (path: string, content: string) => void;
+  /** `env import` and `env draft --write`'s offer to store values. */
+  import?: EnvImportDeps;
+  shell?: EnvShellDeps;
+};
+
+const NEXT_IMPORT_LINE = "Next: catalyst env import stores this computer's values for these names. It signs in and asks first.";
 
 export async function cmdEnv(
   args: ParsedArgs,
@@ -23,13 +40,21 @@ export async function cmdEnv(
 ): Promise<number> {
   const [sub, ...rest] = positionals(args);
   if (sub === undefined)
-    throw new UsageError("env needs a subcommand: inventory | check | migrate | draft");
+    throw new UsageError("env needs a subcommand: inventory | check | migrate | draft | import | shell");
+
+  if (sub === "import") return cmdEnvImport(args, ctx, deps.import ?? {});
+
+  if (sub === "shell") return await runEnvShell(args, ctx, deps.shell ?? {});
 
   if (sub === "draft") {
     if (rest.length > 0) throw new UsageError("env draft takes no positional arguments; use --root DIR");
+    const importValues = flagBool(args, "import-values");
+    if (importValues && !flagBool(args, "write")) {
+      throw new UsageError("--import-values needs --write; for an existing .catalyst/catalyst.toml run: catalyst env import");
+    }
     const root = resolve(flagString(args, "root") ?? ".");
     const target = join(root, ".catalyst/catalyst.toml");
-    const draft = draftEnvironment(root, deps);
+    const draft = draftEnvironment(root, deps, { machine: { home: ctx.home, env: ctx.env } });
     if (draft.state === "invalid") {
       if (args.json) ctx.stdout(JSON.stringify(draft));
       else for (const error of draft.errors) ctx.stderr(error);
@@ -44,10 +69,13 @@ export async function cmdEnv(
       sources: draft.sources,
       destination: ".catalyst/catalyst.toml",
       toml: draft.toml,
+      mcpServers: draft.mcpServers.map(({ name, configName, scope, url, headers }) => ({ name, configName, scope, url, headers })),
+      machine: machineJson(draft.machine),
     };
     const write = flagBool(args, "write");
     if (write && existsSync(target)) {
       ctx.stderr(`${summary.destination} already exists; no file was written. Review the draft with --diff and merge it by hand.`);
+      ctx.stderr("To store this computer's values for the names it declares, run: catalyst env import");
       return 1;
     }
     if (write) {
@@ -56,23 +84,34 @@ export async function cmdEnv(
         ctx.stderr(`draft failed local validation: ${checked.state === "invalid" ? checked.errors.join("; ") : "no environment table"}`);
         return 1;
       }
+      if (!validateFullSettings(`[project]\nlinear_team = "DRAFT"\n\n${draft.toml}`).ok) {
+        ctx.stderr("draft failed Catalyst's settings check; no file was written");
+        return 1;
+      }
       if (deps.writeFile) deps.writeFile(target, draft.toml);
       else {
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(target, draft.toml, { encoding: "utf8", flag: "wx" });
       }
     }
-    if (args.json) ctx.stdout(JSON.stringify({ ...summary, written: write }));
-    else if (flagBool(args, "diff")) {
+    if (args.json) {
+      // The import's answer joins the one JSON object, so it runs first; its lines go to stderr.
+      const offered = write ? await afterWrite(root, draft, args, ctx, deps, importValues) : { code: 0 };
+      ctx.stdout(JSON.stringify({ ...summary, written: write, ...(offered.report === undefined ? {} : { import: offered.report }) }));
+      return offered.code;
+    }
+    if (flagBool(args, "diff")) {
       ctx.stdout(`--- /dev/null\n+++ b/${summary.destination} (draft)\n@@\n${draft.toml.split("\n").filter(Boolean).map((line) => `+${line}`).join("\n")}`);
     } else {
       ctx.stdout(`Drafted ${summary.destination} from ${draft.sources.length ? draft.sources.join(", ") : "no environment sources"}.`);
       ctx.stdout(`Names: ${draft.names.length} (${draft.secretNames.length} secret; all optional)`);
+      for (const line of machineLines(draft.machine, draft.mcpServers)) ctx.stdout(line);
       ctx.stdout(`Setup: ${draft.setup.length}; verify: ${draft.verify.length}`);
       ctx.stdout(draft.toml);
     }
-    if (write && !args.json) ctx.stdout(`Wrote ${summary.destination}; review and commit it through your repository's pull request.`);
-    return 0;
+    if (!write) return 0;
+    ctx.stdout(`Wrote ${summary.destination}; review and commit it through your repository's pull request.`);
+    return (await afterWrite(root, draft, args, ctx, deps, importValues)).code;
   }
 
   if (sub === "migrate") {
@@ -177,5 +216,69 @@ export async function cmdEnv(
     return result.state === "invalid" ? 1 : 0;
   }
 
-  throw new UsageError(`unknown env subcommand "${sub}": inventory | check | migrate | draft`);
+  throw new UsageError(`unknown env subcommand "${sub}": inventory | check | migrate | draft | import | shell`);
+}
+
+/** After a successful write: store now (`--import-values`), ask in a terminal, or name the next command. */
+async function afterWrite(
+  root: string,
+  draft: { names: string[]; toml: string },
+  args: ParsedArgs,
+  ctx: Ctx,
+  deps: EnvDeps,
+  importValues: boolean,
+): Promise<{ code: number; report?: ImportReport }> {
+  if (draft.names.length === 0) return { code: 0 };
+  const toml = draft.toml;
+  const importDeps = deps.import ?? {};
+  if (importValues) return offerMachineImport({ root, toml, args, ctx, deps: importDeps, mode: "yes" });
+  if (!args.json && (importDeps.isTty ?? stdinIsTty)()) return offerMachineImport({ root, toml, args, ctx, deps: importDeps, mode: "ask" });
+  if (args.json) ctx.stderr(NEXT_IMPORT_LINE);
+  else ctx.stdout(NEXT_IMPORT_LINE);
+  return { code: 0 };
+}
+
+function machineJson(machine: MachineScan | null) {
+  if (machine === null) return null;
+  return {
+    envrc: machine.envrc === null ? null : {
+      exported: machine.envrc.exported.map(({ name }) => name),
+      notRead: machine.envrc.notRead,
+      skippedNames: machine.envrc.skippedNames,
+    },
+    claudeJson: machine.claude === null ? null : {
+      servers: machine.claude.servers.map(({ name }) => name),
+      notDrafted: machine.claude.notDrafted,
+      ...(machine.claude.note === undefined ? {} : { note: machine.claude.note }),
+    },
+    notes: machine.notes,
+  };
+}
+
+/** What came from this computer and what was left out, names and reasons only. */
+function machineLines(machine: MachineScan | null, servers: ReadonlyArray<{ name: string; configName: string; derived: ReadonlyArray<{ variable: string; header: string }> }>): string[] {
+  if (machine === null || (machine.envrc === null && machine.claude === null && machine.notes.length === 0)) return [];
+  const lines = ["From this computer:"];
+  if (machine.envrc !== null) {
+    const notRead = machine.envrc.notRead.length === 0
+      ? ""
+      : ` Not read: ${machine.envrc.notRead.map(({ line, reason }) => `line ${line} ${reason}`).join(", ")}; names those lines load are not drafted.`;
+    lines.push(`  .envrc: ${machine.envrc.exported.length} exported names.${notRead}`);
+    if (machine.envrc.skippedNames.length > 0) lines.push(`    Not drafted (settings of this computer): ${machine.envrc.skippedNames.join(", ")}`);
+  }
+  if (machine.claude !== null) {
+    if (machine.claude.note !== undefined) lines.push(`  ${machine.claude.note}`);
+    else {
+      const names = servers.map(({ name, configName }) => (name === configName ? name : `${name} (from ${JSON.stringify(configName)})`));
+      lines.push(`  ~/.claude.json: ${servers.length} HTTP MCP servers${names.length ? ` (${names.join(", ")})` : ""}. Each header names a variable; no header value is copied.`);
+    }
+    for (const server of servers) {
+      for (const { variable, header } of server.derived) {
+        lines.push(`    ${server.name}: its ${header} header held a value; drafted as $${variable}, which env import reads from ~/.claude.json`);
+      }
+    }
+    for (const { name, reason } of machine.claude.notDrafted) lines.push(`    Not drafted: ${name} (${reason})`);
+  }
+  for (const note of machine.notes) lines.push(`  ${note}`);
+  return lines;
 }

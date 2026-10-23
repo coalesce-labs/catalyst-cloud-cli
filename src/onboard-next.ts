@@ -4,6 +4,7 @@ import { INSTALL_COMMAND, loadConfig, normalizeBaseUrl } from "./config.js";
 import type { OnboardJournal, OnboardStep } from "./onboard.js";
 import { githubInstallationPage } from "./onboard-permissions.js";
 import { valuesFacts, valuesFix } from "./ready-copy.js";
+import { DEFAULT_HOST_FREE_FLOOR_GIB, isRunnerDiskUnmeasured, runnerDiskCopy } from "./onboard-runner-disk.js";
 
 /** What a person reads for a step that is not done. Each line ends in an action they can take. */
 const REASONS: Record<string, string> = {
@@ -201,8 +202,6 @@ const REASONS: Record<string, string> = {
     "Setup could not confirm this project's registered repositories and its default repository for capacity. Run catalyst ready to see the project checks, then run catalyst setup again. Starting a ticket checks its own repository's admission.",
   capacity_identity_unverified:
     "Setup could not confirm your workspace and administrator role for the capacity check. Run catalyst login, then run catalyst setup again.",
-  capacity_admission_unverified:
-    "No runner is allowed to take work for this workspace yet. Enroll a self-hosted runner host, or ask Catalyst to enable cloud runners for it. Then run catalyst onboard.",
   capacity_currently_full:
     "Every runner slot for this repository is in use. Run catalyst onboard again after current work finishes.",
   capacity_unavailable:
@@ -246,7 +245,15 @@ const REASONS: Record<string, string> = {
   runner_enrollment_unavailable:
     "Setup could not read this workspace's runner hosts. Run catalyst onboard again to retry.",
   runner_enrolled_for_other_team:
-    "This runner is enrolled for another Linear team. Keep using that team, or ask your administrator to revoke the old enrollment before setting up this machine for the selected team.",
+    "This runner is enrolled for another Linear team, and Catalyst could not add the selected team to it. Keep using that team, or ask your administrator to revoke the old enrollment before setting up this machine for the selected team.",
+  runner_team_not_added:
+    "This runner does not serve the selected Linear team yet. Run catalyst setup --runner to add the team to it.",
+  runner_team_limit:
+    "This runner already serves 16 Linear teams, the most one runner can serve. Set up another machine for the selected team.",
+  runner_team_add_failed:
+    "Setup could not add the selected Linear team to this runner. Run catalyst setup --runner again to retry.",
+  runner_supervisor_outdated:
+    "This runner's supervisor has not reported that it can serve several teams yet. Run docker compose -p catalyst-host logs supervisor to check it is running, then run catalyst setup --runner again.",
   runner_enrollment_revoked:
     "Catalyst confirms that this machine's saved enrollment was revoked. Keep its credential and organization key. Ask your workspace administrator to review the enrollment before replacing it, then run catalyst setup --runner.",
   runner_credential_unverified:
@@ -293,6 +300,14 @@ const REASONS: Record<string, string> = {
     "The runner started but has not enrolled yet. Run docker compose -p catalyst-host logs supervisor to see why, or run catalyst onboard again in a minute.",
   runner_needs_runner_flag:
     "This machine was set up to run Catalyst's work, but its runner is not running or not enrolled. To bring it up, run catalyst onboard --runner.",
+  runner_host_disk_sampler_python_missing:
+    "Setup needs Python 3 to measure this Mac's disk for the runner. Install Apple's Command Line Tools with xcode-select --install, or python3 from Homebrew, then run catalyst setup --runner.",
+  runner_host_disk_location_unverified:
+    "Setup could not tell which disk holds your Docker engine's virtual machine, so it cannot measure this Mac's free space for the runner. Set CATALYST_HOST_DISK_PATH to that folder (for a relocated Docker Desktop disk image, the folder chosen in Settings, Resources, Advanced), then run catalyst setup --runner.",
+  runner_host_disk_sampler_failed:
+    "Setup could not start the dev.catalystcloud.host-disk LaunchAgent that measures this Mac's disk, so the runner will advertise zero free slots. Run launchctl print gui/$(id -u)/dev.catalystcloud.host-disk, or user/$(id -u)/dev.catalystcloud.host-disk when no one is logged in at the console, to see why, then run catalyst setup --runner.",
+  runner_host_disk_sampler_not_repeating:
+    "Setup loaded the dev.catalystcloud.host-disk LaunchAgent, but launchd did not keep it measuring this Mac's disk: it published no new sample within 25 seconds, so the runner will advertise zero free slots. launchd can hold back an agent loaded from an SSH session. Log in to this Mac's desktop, at the console or over Screen Sharing, and run catalyst setup --runner in Terminal there. To see what launchd did, run launchctl print gui/$(id -u)/dev.catalystcloud.host-disk and read its runs and pended lines.",
   runner_capability_pending:
     "The runner enrolled but has not reported its capacity yet. Run catalyst onboard again in a minute.",
   runner_admission_unverified:
@@ -637,9 +652,16 @@ export function onboardReasonText(
       ? `This setup step is not available on this server yet. Continue in the web app at ${page}, then run catalyst onboard.`
       : "This setup step is not available on this server yet. Run catalyst onboard after the server update.";
   }
+  // CTC-6180: the command that enrolls this computer, named with its team.
+  // The command is its own line (never wrapped), and runnable as printed: with no known team key,
+  // setup asks for the team.
+  if (reason === "capacity_admission_unverified") {
+    const key = onboardTeamKey(context.journal);
+    return `No runner is allowed to take work for this workspace yet. To use Catalyst's cloud runners, ask Catalyst support to turn on cloud runners for your workspace, then run catalyst onboard. To run work on this computer instead, enroll it as a self-hosted runner${key ? "" : " (setup asks for your Linear team)"} with:\ncatalyst onboard --runner${key ? ` --team ${key}` : ""}`;
+  }
   if(reason === "runner_native_egress_setup_required"){
-    const commands=nativeEgressInstallCommands();
-    return "Native Linux needs a root-managed session egress producer before the runner can take work. Its elevated installation creates the isolated session network and private-range and host-isolation nftables rules. Review and authorize this separately; setup has not run it. It requires systemd, python3, Docker and nftables. " + (commands ? "Install the verified bundled artifacts, then run the same setup command:\n"+commands : "Setup could not verify its bundled artifacts. Reinstall the CLI before authorizing installation.");
+    const command=nativeEgressInstallCommands();
+    return "Native Linux needs a root-managed session egress service before this computer can take work. It creates the isolated session network and the nftables rules that keep sessions off private addresses and this machine. It needs systemd, python3, Docker and nftables, and setup has not run it. " + (command ? "Review it, run this one command, then run the same setup command:\n"+command : "Setup could not verify its bundled files. Reinstall the CLI, then run the same setup command.");
   }
   if (reason === "runner_images_unavailable" || reason === "runner_supervisor_image_unavailable") {
     const image = step.evidence?.image;
@@ -657,6 +679,26 @@ export function onboardReasonText(
       ? `at ${normalizeBaseUrl(context.baseUrl)}/settings/account-keys`
       : "on the web app's Account API keys page";
     return `The runner is enrolled, but it takes no work without an organization key. A workspace owner or administrator runs catalyst onboard --runner on this machine; it mints the key and stores it for the runner. If their cloud cannot mint one yet, they create one with the mirror:read, mirror:write and mirror:feed scopes ${where}, save it in a file only they can read, and run catalyst onboard --runner with CATALYST_RUNNER_ORG_KEY_FILE set to that file.`;
+  }
+  if (reason === "runner_host_disk_sampler_conflict") {
+    // Both settings are needed: a custom directory turns off setup's sampler, and the sample file
+    // name is then empty unless it is set too.
+    const safe = (value: unknown) => typeof value === "string" && /^\/[^\x00-\x1f'"]{0,500}$/.test(value) ? value : null;
+    const dir = safe(step.evidence?.sampleDir) ?? "<directory the other agent writes to>";
+    const file = safe(step.evidence?.sampleFile) ?? "/var/lib/catalyst/host-disk/<its file name>";
+    return `Another dev.catalystcloud.host-disk LaunchAgent on this Mac writes its disk sample somewhere else, so setup left it alone and the runner has no disk measurement. To use that agent's sample, set both CATALYST_HOST_DISK_SAMPLE_DIR=${dir} and CATALYST_HOST_DISK_SAMPLE_FILE=${file}, then run catalyst setup --runner; the directory alone leaves the runner without a sample file. Or remove the other agent: run launchctl bootout gui/$(id -u)/dev.catalystcloud.host-disk and launchctl bootout user/$(id -u)/dev.catalystcloud.host-disk (one of them reports it is not loaded), delete ~/Library/LaunchAgents/dev.catalystcloud.host-disk.plist, then run catalyst setup --runner.`;
+  }
+  if (reason === "runner_host_disk_below_floor" || reason === "runner_host_disk_unmeasured") {
+    const e = step.evidence ?? {};
+    const num = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+    const floorGiB = num(e.floorGiB) ?? DEFAULT_HOST_FREE_FLOOR_GIB, availableGiB = num(e.availableGiB);
+    if (reason === "runner_host_disk_below_floor" && availableGiB === null)
+      return `The runner advertises zero free slots: the disk it measures has less than ${floorGiB} GiB free. Free disk space, then run catalyst ready to see how much is free.`;
+    const detail = typeof e.diskDetail === "string" && isRunnerDiskUnmeasured(e.diskDetail) ? e.diskDetail : "physical_host_disk_sample_required";
+    const copy = runnerDiskCopy(reason === "runner_host_disk_below_floor" && availableGiB !== null
+      ? { state: "below_floor", availableGiB, floorGiB }
+      : { state: "unmeasured", detail, floorGiB }, e.vm === true);
+    return `${copy.line} ${copy.fix}`;
   }
   if (reason === "runner_host_not_ready") {
     const failing = step.evidence?.failing;

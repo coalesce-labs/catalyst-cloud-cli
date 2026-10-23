@@ -233,9 +233,9 @@ function answers(s: Scenario): Record<string, unknown> {
     ...(s.accountsFail
       ? {}
       : s.accounts !== undefined
-        ? { "accounts --json": s.accounts }
+        ? { "accounts --all --json": s.accounts }
         : s.codingAccounts !== undefined
-          ? { "accounts --json": HEALTHY_ACCOUNTS }
+          ? { "accounts --all --json": HEALTHY_ACCOUNTS }
           : {}),
     ...(s.codingAccounts === undefined
       ? {}

@@ -1,4 +1,5 @@
 import { cmdHosts, type HostsDeps } from "./hosts.js";
+import { cmdRunner, type RunnerCommandDeps } from "./runner-command.js";
 import { cmdSeat } from "./seat.js";
 // cli.ts — the `catalyst` dispatcher (npm: @catalyst-cloud/cli). Verbs live in
 // their own modules; this file keeps every export the 0.1 tests and the bin import.
@@ -11,6 +12,7 @@ import { existsSync, openSync, closeSync } from "node:fs";
 import { ReadStream as TerminalInput } from "node:tty";
 import { Writable } from "node:stream";
 import { parseArgs, positionals, verbHelp, type ParsedArgs } from "./args.js";
+import { reportCliVersion } from "./cli-version.js";
 import {
   CONFIG_MODE,
   DEFAULT_BASE_URL,
@@ -105,10 +107,13 @@ import { cmdProject } from "./project.js";
 import { cmdRepo } from "./repo.js";
 import { cmdLegacy, type LegacyDeps } from "./legacy.js";
 import { cmdIdentity, type IdentityDeps } from "./identity.js";
+import { cmdMessages, type MessagesDeps } from "./messages.js";
 import { cmdConnections, type ConnectionsDeps } from "./connections.js";
 import {
   cmdOnboard,
   onboardErrorJournal,
+  onboardStatePath,
+  readOnboardJournal,
   type OnboardDeps,
 } from "./onboard.js";
 import type { OnboardBootstrapPreview } from "./onboard-bootstrap.js";
@@ -207,19 +212,22 @@ export function usageText(): string {
     "  catalyst status | notice | me | ready | accounts",
     "  catalyst seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE]",
     "  catalyst hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name>",
-    "  catalyst mcp add|list|remove (vault references only)",
+    "  catalyst runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts]   (this machine's self-hosted runner)",
+    "  catalyst runner update [--check] | runner auto-update [status|on|off]   (move this machine's runner to the approved release)",
+    "  catalyst mcp add|list|remove (vault references only) | mcp status <name>   (a server's state, grants and last 50 tool calls)",
     "  catalyst contract [--refresh] [--path <a.b.c>]",
     "  catalyst query <issues|issue <id>|pulls|pull <id>|projects|cycles|search <terms>|changes --since <cursor|head>>",
     '  catalyst replica <start [--detach]|stop|status [--probe]|sql "<select>"|schema [table]>',
     "  catalyst runtime <status [--json]|install|path|uninstall>   (a pinned Node this CLI manages itself)",
     "  catalyst events <tail|wait-for|query|status> [--type NAME] [--ticket CTC-N] [--after SEQUENCE] [--from-cache]",
+    "  catalyst events wait-for [--repo O/N] [--ref O/N:BRANCH] [--pr O/N#N] [--session T/PHASE#N] [--to me] [--type pr.*] [--timeout SECONDS]   (one connection; nothing printed until a match)",
     "  catalyst explain <ticket> | history <ticket> | running [--ticket T --phase P] | queue [--team K]",
     "  catalyst watch [--team K] [--ticket T]... [--project P] [--exec CMD]",
     "  catalyst write <comment|state|label|create|reaction|attachment|session> ...",
-    "  catalyst ask <raise|accept|list> ...",
+    "  catalyst ask <raise|accept|answer --proxy|proxy [status|on|off]|disown|list> ...",
     "  catalyst release <ticket> --because <what changed> [--retry-unchanged] [--dry-run] | release --class <c> --team <K> ...",
     "  catalyst environment [read] | environment propose --file <path>|--stdin [--approve] | environment approve   (your account; needs login)",
-    "  catalyst env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write]> [--json]   (this repository, offline — no login, no network)",
+    "  catalyst env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (this repository; no login — shell needs Docker and downloads Catalyst's image once)",
     "  catalyst secret set <NAME> --repo <owner/name> [--command '<cmd>'] | secret import <file> --repo <owner/name> [--names NAME[,NAME...]]",
     "  catalyst var set <NAME> | var import <file> [--repo <owner/name>] [--names NAME[,NAME...]]   (plain environment variables)",
     "  catalyst team <list|check|map|adopt|migrate|checklist> ...",
@@ -227,9 +235,12 @@ export function usageText(): string {
     "  catalyst project list [--json]   (all workspace projects, including those with no stage mapping)",
     "  catalyst stage <start|renew|done|fail> <ticket> <phase>   (a cloud-claimed local phase)",
     "  catalyst project wip-limit <get|set <n>|set default> [--team K]   (a project's new-start WIP limit; members read, owners and admins set)",
+    "  catalyst repo pause <owner/name> --reason <text> | repo resume <owner/name> [--reason <text>]   (owner or admin; reason: 1 to 500 trimmed characters)",
+    "  catalyst repo status [--json]   (visible workspace repositories and their paused state; needs login)",
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
     "  catalyst identity linear <status|options|set> [<linearUserId>] [--json]",
+    "  catalyst messages read --ticket CTC-N [--since SEQUENCE] [--json]   (messages sent to a ticket on your teams)",
     "  catalyst connections personal <linear|github> <start|status> [--wait <seconds>] [--json]",
     "",
     "Every verb takes --help. --json makes the output machine-readable.",
@@ -267,7 +278,9 @@ export interface MainDeps {
   var?: VarDeps;
   connections?: ConnectionsDeps;
   hosts?: HostsDeps;
+  runner?: RunnerCommandDeps;
   identity?: IdentityDeps;
+  messages?: MessagesDeps;
   team?: TeamDeps;
   legacy?: LegacyDeps;
   loadSdk?: () => Promise<unknown>;
@@ -288,6 +301,12 @@ export interface MainDeps {
  * the `catalyst` launcher beside it, once, on the next run of either name. Read and write back to
  * back, so the window for racing a concurrent OAuth refresh is as small as the update notice's.
  */
+/** Setup's saved local sync choice; an unreadable record reads as off, which only adds a hint. */
+function savedLocalSync(ctx: Ctx): boolean {
+  try { return readOnboardJournal(onboardStatePath(ctx.home, ctx.env))?.localSync === true; }
+  catch { return false; }
+}
+
 function migrateLegacyCliPath(ctx: Ctx): void {
   let cfg: CustomerConfig | null;
   try {
@@ -443,6 +462,20 @@ export async function main(
     command: args.command,
     version: manifest.version,
   });
+  ctx = {
+    ...ctx,
+    fetch: reportCliVersion(ctx.fetch, manifest.version, () => {
+      let configured: string | undefined;
+      try {
+        configured = loadConfig(ctx.home)?.baseUrl;
+      } catch {
+        // The command reports its existing config error.
+      }
+      return [args.baseUrl, ctx.env.CATALYST_CLOUD_BASE_URL, configured, DEFAULT_BASE_URL].filter(
+        (origin): origin is string => typeof origin === "string",
+      );
+    }),
+  };
   try {
     if (args.command !== "onboard") {
       migrateLegacyCliPath(ctx);
@@ -744,11 +777,15 @@ export async function main(
       case "repo":
         return await cmdRepo(args, ctx);
       case "legacy":
-        return await cmdLegacy(args, ctx, deps.legacy ?? {});
+        return await cmdLegacy(args, ctx, { localSyncSelected: savedLocalSync(ctx), ...deps.legacy });
       case "identity":
         return await cmdIdentity(args, ctx, deps.identity ?? {});
+      case "messages":
+        return await cmdMessages(args, ctx, deps.messages ?? {});
       case "hosts":
         return await cmdHosts(args, ctx, deps.hosts);
+      case "runner":
+        return await cmdRunner(args, ctx, deps.runner);
       case "connections":
         return await cmdConnections(args, ctx, deps.connections ?? {});
       default:
@@ -820,6 +857,7 @@ const VERB_HELP_KNOWN: Record<string, true> = Object.fromEntries(
     "environment",
     "connections",
     "identity",
+    "messages",
     "mcp",
     "team",
     "capabilities",

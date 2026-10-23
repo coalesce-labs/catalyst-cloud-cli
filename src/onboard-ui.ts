@@ -76,6 +76,10 @@ const RUNNER_EXPLAINED = [
 
 /** Rendering cannot approve a step: the receipt engine owns execution and evidence. */
 export interface OnboardUi {
+  /** Cleanup inventory is visible even when the install engine already covered machine checks. */
+  showLocalSyncInventory?(lines: readonly string[]): void;
+  /** The inventory was shown immediately before this one destructive confirmation. */
+  confirmLocalSyncRemoval?(): Promise<boolean>;
   readonly signal: AbortSignal;
   readonly interactive?: boolean;
   /** True only when this UI installs and disposes its own process signal controller. */
@@ -673,6 +677,28 @@ export function createClackOnboardUi(
       message(
         "Setup reads your AI accounts without sending them a request.",
       );
+    },
+    showLocalSyncInventory(lines) {
+      stop();
+      for (const line of lines)
+        if (renderer) renderer.detail(line);
+        else prompts.log.message(line, { output: streams.output });
+    },
+    async confirmLocalSyncRemoval() {
+      stop();
+      if (abort.signal.aborted || !interactive) return false;
+      if (renderer) question();
+      const answer = await select({
+        ...options,
+        message: "Stop the local writer and delete the listed files? Login, contract and settings are kept.",
+        initialValue: "keep",
+        options: [
+          { value: "remove", label: "Yes, remove the listed local sync files" },
+          { value: "keep", label: "No, keep them" },
+        ],
+      });
+      if (prompts.isCancel(answer)) { abort.abort(); return false; }
+      return answer === "remove";
     },
     async confirmPlan(localSync, signin = "unavailable") {
       if (deps.consentGiven || !interactive)

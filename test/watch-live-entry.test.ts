@@ -54,11 +54,13 @@ test("watch streams frames with the replica-bearing SDK entry unloadable", async
   await expect(import("@catalyst-cloud/sdk/node")).rejects.toThrow(/mocking a module/); // positive control: the node entry cannot load
   const ctx = makeCtx(home);
   const sockets: FakeWs[] = [];
+  const urls: string[] = [];
   let stop!: () => void;
   const stopped = new Promise<void>((r) => (stop = r));
   const cfg = JSON.parse(readFileSync(`${home}/.config/catalyst-cloud/customer.json`, "utf8"));
   const done = runWatch(ctx, cfg, { scope: {} }, {
-    wsFactory: () => {
+    wsFactory: (url) => {
+      urls.push(url);
       const ws = new FakeWs();
       sockets.push(ws);
       return ws;
@@ -68,6 +70,7 @@ test("watch streams frames with the replica-bearing SDK entry unloadable", async
     maxBackoffMs: 10,
   });
   await waitFor(() => sockets.length === 1);
+  expect(new URL(urls[0]!).searchParams.get("cli_version")).toBe(JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
   sockets[0]!.onopen?.({});
   await waitFor(() => sockets[0]!.sent.length === 1);
   sockets[0]!.onmessage?.({
@@ -75,6 +78,9 @@ test("watch streams frames with the replica-bearing SDK entry unloadable", async
   });
   await waitFor(() => readCursorFile(watchCursorPathFor(home))?.cursor === 11);
   expect(JSON.parse(ctx.out[0]!)).toMatchObject({ seq: 11, entity: "issues" });
+  sockets[0]!.close();
+  await waitFor(() => sockets.length === 2);
+  expect(new URL(urls[1]!).searchParams.get("cli_version")).toBe(new URL(urls[0]!).searchParams.get("cli_version"));
   stop();
   expect(await done).toBe(0);
 });

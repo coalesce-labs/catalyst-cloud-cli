@@ -164,7 +164,20 @@ Before any network call, the run checks that every input is present. Each missin
 
 With a person at the terminal, `catalyst onboard` starts each of these approvals itself and prints the exact link to approve.
 
-With `--runner yes`, setup starts the self-hosted runner and verifies enrollment, advertised capacity and team admission. This needs Docker with Compose, pinned host images and an organization key file (`CATALYST_RUNNER_ORG_KEY_FILE`). When images, a key or admission are missing, exit 11 names that gate. A failed setup step exits 10. Use `--runner no` to skip the machine's runner. Unlike the interactive optional runner step, an explicitly requested headless runner must finish before exit 0.
+With `--runner yes`, setup starts the self-hosted runner and verifies enrollment, advertised capacity and team admission. This needs Docker with Compose, pinned host images and an organization key file (`CATALYST_RUNNER_ORG_KEY_FILE`). When images, a key or admission are missing, exit 11 names that gate. A failed setup step exits 10. Use `--runner no` to skip the machine's runner. Unlike the interactive optional runner step, an explicitly requested headless runner must finish before exit 0. On a Mac, setup also installs the `dev.catalystcloud.host-disk` LaunchAgent, which measures the Mac's free disk space every 10 seconds, because Docker's virtual machine cannot see it. It needs Python 3 from Apple's Command Line Tools or Homebrew. When the machine takes no work because the disk Docker uses has less than 25 GiB free (`CATALYST_HOST_FREE_FLOOR_GIB` changes the amount) or has no fresh measurement, exit 11 says which, with the fix, and `catalyst ready` fails its `runner:disk` check the same way. If setup cannot tell which folder holds your Docker engine's disk image, set `CATALYST_HOST_DISK_PATH` to that folder.
+
+### Stopping or removing this machine's runner
+
+Run these on the machine itself:
+
+| command | what it does |
+| -- | -- |
+| `catalyst runner stop` | The machine takes no new work. Work it already started finishes or reaches its deadline. Its registration, settings and checkouts are kept, and `catalyst hosts` shows it as `stopped`. |
+| `catalyst runner start` | Starts it again with the same registration. |
+| `catalyst runner status` | Says whether it is running, stopped or not installed. |
+| `catalyst runner uninstall` | Asks first (`--yes` confirms without a terminal; an owner or admin login is needed). It stops new work, revokes the machine's registration and the runner key setup issued, and switches the project's runner admission off when no other machine runs it. Then it removes the runner's containers, their volumes and the session network, and the setup files in the runner folder. On macOS it also removes the storage LaunchAgent and its folders, and the disk-measuring LaunchAgent setup installed. On Linux it also removes the session-egress units, their script and state, and the `inet catalyst_session` nftables table, through `sudo`. |
+
+Uninstall removes only what setup created. Anything that does not match what setup wrote, such as a network with another label, a changed unit file or a disk-measuring LaunchAgent that writes somewhere else, is left in place. Your repository and thoughts checkouts are kept unless you add `--delete-checkouts`. The command ends with a "Left behind" list naming everything it did not remove. When a step fails, such as a cloud call while you are offline, it says which one and exits 1. Run it again: it picks up where the last run stopped. Do not delete the runner folder by hand while the runner is installed. That deletes its settings while its containers keep running.
 
 With `--json`, stdout carries exactly one document: the onboarding receipt plus a `headless` block (`schema: "catalyst-onboard-headless/1"`). The block holds the resolved `inputs` (the key appears only as its source: `env`, `file` or `saved`), and lists of items under `missing`, `refused`, `failed`, `deferred` and `warnings`. Each item has `id`, `kind` (`input`, `grant` or `step`), `reason` and a one-line `text`, plus `flag`, `env` and `url` where they apply. Everything else goes to stderr.
 
@@ -201,6 +214,24 @@ Open a new session and ask about your own cloud account. The skills read the con
 
 `catalyst team list` inventories visible teams without running readiness checks. `team check ENG` prints readiness for one team; `team check --all` runs checks for every team. `team map ENG`, `team adopt ENG`, and `team migrate ENG` print a plan and exit 3 before changing configuration; review the plan and rerun the chosen command with `--yes --plan-hash <hash>` from that preview. `team adopt ENG --undo` previews the exact previously created stages, and `team migrate ENG --retire` requires its own confirmation after the ticket move. `team checklist ENG` prints the same manual setup lines as the browser. These commands use the member's own login; an admin or owner seat is required for setup, and Adopt and Migrate also need that member's personal Linear connection.
 
+## Repository status and pauses
+
+Use your existing login to list the repositories visible to you, their status and attached projects:
+
+```sh
+catalyst repo status
+catalyst repo status --json
+catalyst repo pause acme/app --reason "flaky deploy"
+catalyst repo resume acme/app --reason "deploy fixed"
+catalyst repo resume acme/app
+```
+
+Any workspace member can read status. Pausing or resuming requires a workspace owner or admin. Pause requires a reason; resume accepts an optional reason. A supplied reason must contain 1 to 500 characters after trimming. These commands work outside a local checkout.
+
+Paused rows show who paused the repository (their email, or the key or operator that paused it), when and why, when those details are available. An empty list means no repositories are visible to your login. After a write, the command reads and prints the repository's current state. If that read fails, it reports that the write succeeded and status could not be read; check `catalyst repo status` before repeating a write.
+
+`--json` preserves the list response for status and prints the refreshed repository row for a write. An older cloud reports that repository status is not served yet and needs a newer cloud. Agents can use `catalyst capabilities --json` to check route availability against the cached cloud contract.
+
 ## What has to be running
 
 Nothing, by default. After `login`, every read, write, ask and explanation goes to the cloud's origin-fresh API with the config file and the cached contract on disk. Two optional processes exist for people who want them:
@@ -215,7 +246,22 @@ CLI and skill reads use the cloud API by default, including on a machine with a 
 
 For a local view, `catalyst replica status` checks the writer, heartbeat and cursor. It exits `0` for fresh, `1` for present but stale, `2` for not connected, `3` for absent. `replica status --probe` compares its cursor with the cloud head. These diagnostics do not change the default read source, and an absent replica does not make `catalyst ready` fail.
 
-`catalyst events tail`, `wait-for`, `query` and `status` read from the cloud by default, with no local file. `events tail` prints one JSON line per new event and stays in the foreground; `events wait-for --ticket ... --timeout ...` prints the first match and exits 0, or exits 1 when none arrives in time; `events query` reads one page of filtered history (`--ticket`, `--type`, `--limit` up to 200, `--order desc|asc`, `--before`, `--after`); `events status` names the cloud head. Add `--from-cache` to read this machine's local event cache instead, which pays off when several agents on one machine share one cloud connection. `catalyst events status --from-cache --probe` checks the cache's own cursor against the cloud head; `replica status --probe` checks the separate entity-replica cursor. A fresh replica does not prove event freshness. The replica process is the single writer and reports an event-sync failure without terminating a healthy entity replica. The event cache keeps closed daily segments for at most seven days or 256 MiB per account and reports an explicit gap when a requested sequence has retired.
+`catalyst events tail`, `wait-for`, `query` and `status` read from the cloud by default, with no local file. `events tail` prints one JSON line per new event and stays in the foreground; `events wait-for --ticket ... --timeout ...` prints the first match and exits 0, or exits 1 when none arrives in time; `events query` reads one page of filtered history (`--ticket`, `--type`, `--limit` up to 200, `--order desc|asc`, `--before`, `--after`); `events status` names the cloud head.
+
+`events wait-for` can also wait on a repository (`--repo owner/name`), a branch (`--ref owner/name:branch`), a pull request (`--pr owner/name#n`), a phase session (`--session TICKET/phase#n`), events addressed to you (`--to me`), or a family of types (`--type pr.*`). Values of one flag are OR'ed and different flags are AND'ed, and `--repo`, `--ref`, `--pr` and `--session` can repeat. Such a wait holds one connection and prints nothing until a match, so a long `--timeout` such as 14400 costs nothing while it waits. It prints every matching event as one JSON line. After a dropped connection it replays from its cursor, so no event is missed or printed twice.
+
+| `wait-for` exit | Meaning |
+| --- | --- |
+| 0 | a match, printed on stdout |
+| 1 | none arrived in time; with a scope flag, stderr names the `--after` to resume from |
+| 2 | the cloud refused the wait (for example a ticket outside your teams), or the wait failed; stderr gives the reason |
+| 3 | `--from-cache` and the local event cache is absent or its writer stopped |
+| 4 | the cloud was unreachable for five attempts in a row: an outage, not a timeout |
+| 130 | interrupted |
+
+`catalyst messages read --ticket KEY-123 [--since SEQUENCE]` prints the messages sent to a ticket on your teams, with each sender and time, for example after a wait on `--type comms.message.posted` returns.
+
+Add `--from-cache` to read this machine's local event cache instead, which pays off when several agents on one machine share one cloud connection. `catalyst events status --from-cache --probe` checks the cache's own cursor against the cloud head; `replica status --probe` checks the separate entity-replica cursor. A fresh replica does not prove event freshness. The replica process is the single writer and reports an event-sync failure without terminating a healthy entity replica. The event cache keeps closed daily segments for at most seven days or 256 MiB per account and reports an explicit gap when a requested sequence has retired.
 
 The replica is a Node process, not a service: the supported path is the plain command, and `skills/catalyst-onboard/references/local-sync.md` gives launchd and systemd examples for people who want the writer to survive a reboot.
 
@@ -236,10 +282,12 @@ Some of these only read, and some write: a comment, a card move, an ask, a relea
 
 ## What a key cannot see yet
 
-Your personal key reads everything the skills need — tickets, pull requests, the eligibility explainer, the dispatch queue, fleet activity, per-ticket execution history (`catalyst explain --history <ticket>`: phase attempts, remediation rounds, park state) and coding-account status (`catalyst accounts`: provider, declared and observed state, usage limits, walls, quarantine — never a credential; enrolling or pausing one is `<your cloud>/settings/coding-accounts`, with no command yet). It also releases a parked or held ticket once its cause is fixed: `catalyst release <ticket> --because <what changed>` (the `unstick` skill runs it), recorded against your name and shown in the ticket's history. And it declares what your containers need: `catalyst environment` reads the account-wide declaration, `environment propose --file <path> --approve` proposes and approves it in one compare-and-set, and the values behind the names stay in the cloud — reading needs any active seat, proposing and approving need an admin or owner one. An admin or owner can put a repository's values in from the terminal. `catalyst secret import .env --repo owner/name` stores every name in the file and lists the declared names that still have no value. `catalyst secret set NAME --repo owner/name --command 'op read op://Vault/item/field'` runs the command on your machine and stores its output; with no `--command` it reads the value from stdin, or asks for it without echoing. No value is ever printed, and the cloud's audit records the command, not its output. That is the account's own declaration — a repository's own `.catalyst/catalyst.toml`, which `catalyst-onboard` already reports on, is a separate thing. `catalyst env inventory` lists the environment variable names a repository needs — never a value; `env check` checks the TOML syntax and environment variable table in `.catalyst/catalyst.toml` offline; `env migrate [catalyst.env.json]` prints a TOML environment table from a legacy declaration, with all names optional and values omitted. These commands need no login (the `what-this-repo-needs` skill walks through them). Two things it cannot do, and the skills say so by name rather than guess:
+Your personal key reads everything the skills need — tickets, pull requests, the eligibility explainer, the dispatch queue, fleet activity, per-ticket execution history (`catalyst explain --history <ticket>`: phase attempts, remediation rounds, park state) and coding-account status (`catalyst accounts`: provider, declared and observed state, usage limits, walls, quarantine — never a credential; enrolling or pausing one is `<your cloud>/settings/coding-accounts`, with no command yet). It also releases a parked or held ticket once its cause is fixed: `catalyst release <ticket> --because <what changed>` (the `unstick` skill runs it), recorded against your name and shown in the ticket's history. And it declares what your containers need: `catalyst environment` reads the account-wide declaration, `environment propose --file <path> --approve` proposes and approves it in one compare-and-set, and the values behind the names stay in the cloud — reading needs any active seat, proposing and approving need an admin or owner one. An admin or owner can put a repository's values in from the terminal. `catalyst secret import .env --repo owner/name` stores every name in the file and lists the declared names that still have no value. `catalyst secret set NAME --repo owner/name --command 'op read op://Vault/item/field'` runs the command on your machine and stores its output; with no `--command` it reads the value from stdin, or asks for it without echoing. No value is ever printed, and the cloud's audit records the command, not its output. That is the account's own declaration — a repository's own `.catalyst/catalyst.toml`, which `catalyst-onboard` already reports on, is a separate thing. `catalyst env inventory` lists the environment variable names a repository needs — never a value; `env check` checks the TOML syntax and environment variable table in `.catalyst/catalyst.toml` offline; `env migrate [catalyst.env.json]` prints a TOML environment table from a legacy declaration, with all names optional and values omitted. `env draft --write` writes a new `.catalyst/catalyst.toml` from the repository's files and from this computer — the names the repository's `.envrc` exports, and Claude Code's HTTP MCP servers with each header as a variable reference — then offers to store this computer's values; `catalyst env import` stores them later. A value is never written to the file or printed. These commands need no login, except `env import` (the `what-this-repo-needs` skill walks through them). Two things it cannot do, and the skills say so by name rather than guess:
 
 - Read pull-request labels or the reviewer's reaction. The mirror does not carry them; GitHub's own page does.
 - Compute a flow number — cycle time, throughput, or how long pull requests have been open. Nothing serves those yet, so say they are not computed rather than counting something else and calling it that.
+
+`catalyst env shell` opens this repository's environment on your computer: the image Catalyst's agents work in, the toolchain your `.catalyst/catalyst.toml` declares, and the variables it names, with values taken from your terminal or an `--env-file`. It needs Docker (Docker Desktop, OrbStack or Docker Engine) and no sign-in. The first run downloads the image, about 2.3 GB, with no credential. `catalyst env shell --check` prepares the same environment and reports each toolchain and variable without opening a shell.
 
 ## Versions and origins
 
@@ -267,6 +315,8 @@ A `customer.json` written by an older bundle is still read unchanged; it gains t
 `catalyst ready` also says when either the installed skills or the CLI is behind the latest publish, naming both versions and the command for each; it is a note, never a failure, and `--offline` (or `CATALYST_SKILLS_OFFLINE=1`) skips the lookup.
 
 ## Uninstalling
+
+If this machine runs Catalyst's work, run `catalyst runner uninstall` first (see "Stopping or removing this machine's runner").
 
 Remove the skills the way you installed them: `/plugin uninstall catalyst@catalyst-cloud` in Claude Code, or delete the skill directories (`catalyst-github`, `catalyst-linear`, `catalyst-onboard`, `run-this-project`, `unstick`, `what-needs-me`, `what-this-repo-needs`, `whats-happening`) from wherever `npx skills add` wrote them. Skills an earlier release shipped (`catalyst-setup`, `connect-me`, `how-catalyst-works`) go the same way; the CLI removes its own stamped copies of them when it installs or refreshes skills. Then remove what the CLI wrote:
 

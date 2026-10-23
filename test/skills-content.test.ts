@@ -391,7 +391,7 @@ describe("each skill's scripts spawn the catalyst verbs it teaches", () => {
       /"contract",\s*"--refresh",\s*"--path",\s*"teams"/,
       /"contract",\s*"--path",\s*"merge\.repositories"/,
       /"environment",\s*"read"/,
-      /"accounts",\s*"--json"/,
+      /"accounts",\s*"--all",\s*"--json"/,
       /"contract",\s*"--path",\s*"readinessChecks"/,
     ],
     "catalyst-github": [
@@ -766,6 +766,22 @@ describe("the install page (README) states what a customer needs, in the order t
       );
     }
   });
+
+  test("the readiness guide documents the runner disk check and its fix", () => {
+    const text = readFileSync(
+      join(skillsRoot, "catalyst-onboard", "references", "reading-ready.md"),
+      "utf8",
+    );
+    const section = text.slice(text.indexOf("## The machine checks the CLI adds"));
+    const row = section.split("\n").find((line) => line.startsWith("| `runner:disk` |"));
+    expect(row, "a runner:disk row under the machine checks").toBeDefined();
+    expect(row).toContain("catalyst setup --runner");
+    expect(row).toContain("25 GiB");
+    expect(row).toContain("CATALYST_HOST_FREE_FLOOR_GIB");
+    // Between sdk and replica, the order ready emits them.
+    expect(section.indexOf("| `sdk` |")).toBeLessThan(section.indexOf("| `runner:disk` |"));
+    expect(section.indexOf("| `runner:disk` |")).toBeLessThan(section.indexOf("| `replica` |"));
+  });
 });
 
 test("onboarding inventories teams without running every team's readiness check", () => {
@@ -798,8 +814,8 @@ describe("the package manifest", () => {
     // CTC-4625: fast-wrap-ansi is the wrapper @clack/prompts itself ships with (already in the
     // tree); `catalyst setup` wraps with it directly, so it is declared at the same pinned version.
     expect(manifest.dependencies).toEqual({
-      "@catalyst-cloud/sdk": "0.16.6",
-      "@catalyst-cloud/sdk-replica-node": "0.16.6",
+      "@catalyst-cloud/sdk": "0.16.19",
+      "@catalyst-cloud/sdk-replica-node": "0.16.19",
       "@clack/prompts": "1.8.1",
       "fast-wrap-ansi": "0.2.2",
       "fast-string-width": "3.0.2",
