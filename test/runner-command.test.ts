@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { main } from "../src/cli";
 import type { SchedulerRun } from "../src/runner-auto-update";
 import type { RunnerUpdateEngine } from "../src/runner-update";
+import { effectivePolicy, readUpdatePolicy } from "../src/update-policy";
 import { makeCtx, tempHome } from "./helpers";
 
 // `catalyst runner update` and `catalyst runner auto-update` through the real dispatcher, with the
@@ -32,7 +33,13 @@ describe("catalyst runner update", () => {
     const ctx = makeCtx(tempHome());
     const dir = install();
     expect(await main(["runner", "update", "--check", "--dir", dir], ctx, { runner: { engine: engine(503) } })).toBe(0);
-    expect(ctx.out).toEqual(["Kept the current images.", "Release: none, generation none (release_unavailable)."]);
+    // The image result stays first; since CTC-6708 the component report follows from the same read.
+    expect(ctx.out).toEqual([
+      "Kept the current images.",
+      "Release: none, generation none (release_unavailable).",
+      "Approved release unavailable: this workspace does not yet provide component versions.",
+      "Nothing was changed.",
+    ]);
   });
 
   it("--json prints the result object, and a revoked machine exits 1", async () => {
@@ -153,5 +160,15 @@ describe("catalyst runner auto-update", () => {
     const ctx = makeCtx(tempHome());
     const run: SchedulerRun = () => ({ status: 0, stdout: "", stderr: "" });
     expect(await main(["runner", "auto-update", "sometimes"], ctx, { runner: { scheduler: scheduler("linux", run) } })).not.toBe(0);
+  });
+  it("off holds the three images in the owner's update settings, on lifts them, and setup's call never does (CTC-6708)", async () => {
+    const home = tempHome();
+    const run: SchedulerRun = (cmd) => ({ status: 0, stdout: cmd === "loginctl" ? "Linger=yes\n" : "", stderr: "" });
+    expect(await main(["runner", "auto-update", "off"], makeCtx(home), { runner: { scheduler: scheduler("linux", run) } })).toBe(0);
+    const held = readUpdatePolicy(home);
+    for (const id of ["runner", "supervisor", "watchdog"] as const) expect(effectivePolicy(held, id)).toEqual({ enabled: false, source: "owner" });
+    expect(effectivePolicy(held, "cli")).toEqual({ enabled: true, source: "default" });
+    expect(await main(["runner", "auto-update", "on", "--dir", install()], makeCtx(home), { runner: { scheduler: scheduler("linux", run) } })).toBe(0);
+    for (const id of ["runner", "supervisor", "watchdog"] as const) expect(effectivePolicy(readUpdatePolicy(home), id).enabled).toBe(true);
   });
 });

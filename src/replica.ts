@@ -3,10 +3,11 @@
 // `status` is the check every skill runs first and it needs no network and no SDK: the pidfile, the
 // writer-lock heartbeat, and the `sync_meta.cursor` row (read through node:sqlite read-only). Exit
 // 0 fresh, 1 present but stale, 2 not configured, 3 absent. `--probe` adds the one network call.
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 import { flagBool, flagInt, flagString, positionals, type ParsedArgs } from "./args.js";
-import { apiBase, loadConfig, replicaDbPath, replicaOptedIn, type Ctx, type CustomerConfig } from "./config.js";
+import { apiBase, configDirFor, loadConfig, readManifest, replicaDbPath, replicaOptedIn, type Ctx, type CustomerConfig } from "./config.js";
 import { detachSelf } from "./detach.js";
 import { CliError, UsageError } from "./errors.js";
 import { apiClient } from "./transport.js";
@@ -71,6 +72,9 @@ export interface ReplicaWriterState {
   lastFailureAt: number | null;
   /** set only once the writer gave up; null while it is still retrying */
   stopped: { at: number; reason: string; restartWith: string } | null;
+  /** The CLI version the writer runs, so a release check can tell an old detached writer from a
+   *  current one (CTC-6708). Absent on a record written before it was kept. */
+  version?: string;
 }
 
 export interface ReplicaStatus {
@@ -120,7 +124,8 @@ export function readWriterState(dbPath: string): ReplicaWriterState | null {
       typeof rec.consecutiveFailures !== "number" ||
       !(rec.lastError === null || typeof rec.lastError === "string") ||
       !(rec.lastFailureAt === null || typeof rec.lastFailureAt === "number") ||
-      !stoppedOk
+      !stoppedOk ||
+      !(rec.version === undefined || typeof rec.version === "string")
     ) {
       return null;
     }
@@ -130,8 +135,8 @@ export function readWriterState(dbPath: string): ReplicaWriterState | null {
   }
 }
 
-export function writeWriterState(dbPath: string, s: Omit<ReplicaWriterState, "updatedAt">, nowMs: number): void {
-  writeFileSync(writerStatePath(dbPath), JSON.stringify({ ...s, updatedAt: nowMs }));
+export function writeWriterState(dbPath: string, s: Omit<ReplicaWriterState, "updatedAt" | "version">, nowMs: number): void {
+  writeFileSync(writerStatePath(dbPath), JSON.stringify({ ...s, version: readManifest().version, updatedAt: nowMs }));
 }
 
 /** Remove the writer state sidecar; a no-op (never throws) when it is already gone. */
@@ -141,6 +146,12 @@ export function clearWriterState(dbPath: string): void {
   } catch {
     // already gone
   }
+}
+
+/** A restart a release check began and has not finished (update-replica.ts, CTC-6708). The owner's
+ *  own `replica stop` clears it, so their stop is never undone. */
+export function pendingRestartPathFor(home: string): string {
+  return join(configDirFor(home), "replica-restart.json");
 }
 
 export function pidAlive(pid: number | null): boolean {
@@ -666,6 +677,7 @@ async function cmdStart(args: ParsedArgs, ctx: Ctx, cfg: CustomerConfig, dbPath:
 }
 
 function cmdStop(ctx: Ctx, dbPath: string): number {
+  rmSync(pendingRestartPathFor(ctx.home), { force: true });
   const pid = readPidfile(dbPath);
   if (pid === null) {
     ctx.stdout(`no pidfile at ${pidfilePath(dbPath)} — nothing to stop (a foreground writer is stopped with Ctrl-C)`);

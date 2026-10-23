@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
 import { flagBool, flagString, positionals, type ParsedArgs } from "./args.js";
 import type { Ctx } from "./config.js";
-import { UsageError } from "./errors.js";
+import { CliError, UsageError } from "./errors.js";
 import {
   autoUpdateStatus,
   disableAutoUpdate,
@@ -13,12 +13,16 @@ import {
 import {
   dockerRunnerUpdateEngine,
   readReleaseState,
+  RELEASE_COMPONENTS,
   runnerDir,
   runRunnerUpdate,
   updateResultLines,
   type RunnerUpdateEngine,
+  type UpdateResult,
 } from "./runner-update.js";
 import { dockerFleetUpdateEngine, runFleetUpdate, type FleetUpdateEngine } from "./runner-update-fleet.js";
+import { runUpdate, sharedReleaseRead, updateReportJson, updateReportLines, type UpdateOptions } from "./update.js";
+import { effectivePolicy, readUpdatePolicy, setComponentPolicy } from "./update-policy.js";
 import { cmdRunnerLifecycle, RUNNER_LIFECYCLE_ACTIONS, type RunnerLifecycleDeps } from "./runner.js";
 
 // `catalyst runner update [--check] [--auto] [--dir <dir>] [--fleet]` and
@@ -30,6 +34,8 @@ export interface RunnerCommandDeps extends RunnerLifecycleDeps {
   engine?: RunnerUpdateEngine;
   fleetEngine?: FleetUpdateEngine;
   scheduler?: Partial<AutoUpdateDeps>;
+  /** The scheduled run's component movers; tests pass fakes. */
+  components?: Pick<UpdateOptions, "cliApply" | "replicaRestart" | "packApply" | "sdkExec">;
 }
 
 const USAGE =
@@ -67,6 +73,17 @@ function statusLine(status: AutoUpdateStatus): string {
   return `Automatic runner updates are not available on this machine (${status.detail}). Run catalyst runner update yourself.`;
 }
 
+/** Why this machine's images must not move now: an owner's hold, or settings that cannot be read
+ *  (which never count as "everything on"). Null when every image may move. */
+function imageHold(ctx: Ctx): "owner_setting" | "update_policy_unreadable" | null {
+  try {
+    const policy = readUpdatePolicy(ctx.home);
+    return RELEASE_COMPONENTS.some((id) => !effectivePolicy(policy, id).enabled) ? "owner_setting" : null;
+  } catch {
+    return "update_policy_unreadable";
+  }
+}
+
 /** Setup's call: turn the schedule on for `dir` and say what happened in one line. */
 export function enableRunnerAutoUpdate(ctx: Ctx, dir: string): string {
   return statusLine(enableAutoUpdate(schedulerDeps(ctx, {}), dir));
@@ -91,13 +108,63 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     const auto = flagBool(args, "auto");
     const fleet = flagBool(args, "fleet");
     if (fleet && dirFlag === undefined) throw new UsageError("--fleet needs --dir, the directory that holds compose.json");
+    // One desired-release read serves the image check and the component report (CTC-6708).
+    const engine = sharedReleaseRead(deps.engine ?? dockerRunnerUpdateEngine({ env: ctx.env }));
+    // The 15-minute schedule runs `runner update --auto`. After the images it carries on with every
+    // other component (the CLI, the Cloud pack, the replica, opted-in SDK projects), on the same
+    // release read, so one schedule keeps the whole install on the approved release (CTC-6708). An
+    // image hold keeps only the images. A check never applies; with --json the components join the
+    // one JSON result, otherwise they get one line, and only when a release was read.
+    const components = async (imageResult: UpdateResult | undefined) => {
+      if (!auto || fleet || check) return null;
+      const report = await runUpdate(ctx, { mode: "apply", imagesDir: dir(), engine: () => engine, ...(imageResult ? { imageResult } : {}), ...deps.components });
+      if (report.approved === null) return null;
+      const rows = report.components.filter((c) => !RELEASE_COMPONENTS.some((id) => id === c.id));
+      return {
+        rows,
+        line: `${ctx.now().toISOString()} components ${rows.map((c) => `${c.id}=${c.status}${c.status === "failed" || c.status === "pending" ? `(${c.reason})` : ""}`).join(" ")}`,
+        exitCode: rows.some((c) => c.status === "failed") || report.projects.some((p) => p.applied?.outcome === "failed") ? 1 : 0,
+      };
+    };
+    const print = (result: UpdateResult, extra: Awaited<ReturnType<typeof components>>) => {
+      if (args.json) ctx.stdout(JSON.stringify(extra ? { ...result, components: extra.rows } : result));
+      else if (auto) {
+        ctx.stdout(`${ctx.now().toISOString()} ${result.outcome} ${result.detail} generation=${result.generation ?? "none"}`);
+        if (extra) ctx.stdout(extra.line);
+      } else for (const line of updateResultLines(result)) ctx.stdout(line);
+      return Math.max(result.exitCode, extra?.exitCode ?? 0);
+    };
+    // An owner's image hold stops this command's image work too, including the schedule's (CTC-6708).
+    const hold = check ? null : imageHold(ctx);
+    if (hold !== null) {
+      const retained = { outcome: "retained" as const, detail: hold, generation: readReleaseState(dir()).generation, exitCode: hold === "owner_setting" ? 0 : 1 };
+      // Unreadable settings move nothing; a hold leaves the other components to the release check.
+      return print(retained, hold === "owner_setting" ? await components(undefined) : null);
+    }
     const result = fleet
       ? await runFleetUpdate(deps.fleetEngine ?? dockerFleetUpdateEngine({ env: ctx.env }), { dir: dir(), check })
-      : await runRunnerUpdate(deps.engine ?? dockerRunnerUpdateEngine({ env: ctx.env }), { dir: dir(), check });
-    if (args.json) ctx.stdout(JSON.stringify(result));
-    else if (auto) ctx.stdout(`${ctx.now().toISOString()} ${result.outcome} ${result.detail} generation=${result.generation ?? "none"}`);
-    else for (const line of updateResultLines(result)) ctx.stdout(line);
-    return result.exitCode;
+      : await runRunnerUpdate(engine, { dir: dir(), check });
+    // `runner update --check` also lists every installed component against the approved release, as
+    // `catalyst update --check` does. The image fields stay where scripts already read them.
+    if (check && !fleet && !auto) {
+      let report;
+      try {
+        report = await runUpdate(ctx, { mode: "check", imagesDir: dir(), engine: () => engine, imageResult: result });
+      } catch (err) {
+        // Unreadable update settings cost the component report only; the image result still prints.
+        if (!(err instanceof CliError)) throw err;
+        ctx.stderr(`catalyst: ${err.message}`);
+        if (args.json) ctx.stdout(JSON.stringify(result));
+        else for (const line of updateResultLines(result)) ctx.stdout(line);
+        return result.exitCode;
+      }
+      if (args.json) {
+        const { schemaVersion, release, components, projects } = updateReportJson(report);
+        ctx.stdout(JSON.stringify({ ...result, schemaVersion, release, components, projects }));
+      } else for (const line of [...updateResultLines(result), ...updateReportLines(report)]) ctx.stdout(line);
+      return result.exitCode;
+    }
+    return print(result, await components(result));
   }
 
   if (action === "auto-update" && parts.length <= 2) {
@@ -108,6 +175,10 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     else if (mode === "off") status = disableAutoUpdate(scheduler);
     else if (mode === "status") status = autoUpdateStatus(scheduler);
     else throw new UsageError(USAGE);
+    // The owner's explicit on/off is also their setting for the three images, so a release check
+    // reports them as held (CTC-6708). Setup's own call (enableRunnerAutoUpdate) never lifts a hold.
+    if (mode === "off" || (mode === "on" && status.state === "on"))
+      for (const id of RELEASE_COMPONENTS) setComponentPolicy(ctx.home, id, mode === "on");
     if (args.json) {
       const state = mode === "status" && dirFlag !== undefined ? readReleaseState(dirFlag) : undefined;
       ctx.stdout(JSON.stringify({ ...status, ...(state ? { release: state } : {}) }));

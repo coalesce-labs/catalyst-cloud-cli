@@ -32,6 +32,7 @@
 //     scripts spawn this CLI constantly, and doubling process startup on every call is a real cost.
 //   • ambient unsupported, no pin -> print the verdict and the ONE command; exit 1, never a raw
 //     module-resolution error.
+import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The one stderr line the deprecated name prints in addition to what the program prints. */
@@ -52,6 +53,7 @@ export const DEPRECATED_NAME_LINE =
 export async function launch(invokedAs, binUrl) {
   const argv = process.argv.slice(2);
   const deprecated = invokedAs === "catalyst-skills";
+  if (argv[0] !== "runtime" && (await runSelectedVersion(invokedAs, binUrl))) return;
   const handled = argv[0] === "runtime" ? false : await preflight(invokedAs, binUrl, argv, deprecated);
   if (handled) return;
   const noticeFirst = deprecated && process.stderr.isTTY === true;
@@ -64,6 +66,32 @@ export async function launch(invokedAs, binUrl) {
       console.error(`${invokedAs}: failed to load: ${err instanceof Error ? err.message : String(err)}`);
       finish(1, noticeLast);
     });
+}
+
+/**
+ * CTC-6708 — a release check installs the approved CLI in its own directory and records it as the
+ * selected version (dist/update-cli.js). This command stays where npm put it, so scheduled jobs and
+ * saved launcher paths keep working: when the selected version is newer than its own, it loads that
+ * version's bin in this same process (no second process, so a pid, a signal and an exit code are the
+ * selected version's own). The selected version's launcher finds nothing newer and runs. Any doubt
+ * (no record, an unreadable one, a directory that does not hold that version) runs this version, as
+ * before. A release check that runs a staged version to check it sets CATALYST_CLI_ACTIVE_RUNTIME
+ * to that bin's path, so that run never selects. Returns true when it already handled the invocation.
+ */
+async function runSelectedVersion(invokedAs, binUrl) {
+  if (process.env.CATALYST_CLI_ACTIVE_RUNTIME === fileURLToPath(binUrl)) return false;
+  const home = process.env.CATALYST_SKILLS_HOME ?? process.env.HOME ?? "/";
+  let bin = null;
+  try {
+    const [updateCli, config] = await Promise.all([import("../dist/update-cli.js"), import("../dist/config.js")]);
+    bin = updateCli.activeRuntimeBin(home, config.readManifest().version, basename(fileURLToPath(binUrl)));
+  } catch {
+    return false;
+  }
+  if (!bin) return false;
+  const { pathToFileURL } = await import("node:url");
+  await import(pathToFileURL(bin).href);
+  return true;
 }
 
 /** Returns true when it already handled (and exited) the invocation. */
