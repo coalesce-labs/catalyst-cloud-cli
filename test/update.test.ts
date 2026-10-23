@@ -1,11 +1,13 @@
 // update.test.ts — one release check for every installed component (CTC-6708), through the
 // coordinator with a fake image engine and real files: one approval read, every component decided
 // on its own, holds that keep only their component, a check that changes nothing, and an apply
-// that moves the images while naming the command for the rest.
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+// that moves the images, the CLI and the replica while naming the command for the skills packs.
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { approvalCachePathFor } from "../src/approved-release";
+import { onboardStatePath } from "../src/onboard";
+import { pendingRestartPathFor } from "../src/replica";
 import { readReleaseState, type RunnerUpdateEngine } from "../src/runner-update";
 import { runUpdate, updateReportJson, updateReportLines, type UpdateOptions } from "../src/update";
 import { setComponentPolicy, setProjectSdkPolicy, updatePolicyPathFor } from "../src/update-policy";
@@ -16,7 +18,10 @@ import {
   CLI_VERSION,
   cloudPack,
   countingEngine,
+  fakeCliApply,
   fakeNpm,
+  fakePackApply,
+  fakeReplicaRestart,
   hostRelease,
   memberFetch,
   NEXT,
@@ -41,8 +46,20 @@ function hostCase(over: { components?: unknown } = {}) {
   });
   const skills = cloudPack(OLD);
   const ctx = makeCtx(home, { env: { CATALYST_SKILLS_OFFLINE: "1", CATALYST_SKILLS_CLAUDE_DIR: skills } });
-  const options = (mode: UpdateOptions["mode"], extra: Partial<UpdateOptions> = {}): UpdateOptions => ({ mode, imagesDir: dir, engine: () => engine, ...extra });
-  return { home, dir, engine, ctx, options };
+  // The CLI move and the replica restart have their own suites; here they only record their calls.
+  const cliCalls: string[] = [];
+  const replicaCalls: string[] = [];
+  const packCalls: string[] = [];
+  const options = (mode: UpdateOptions["mode"], extra: Partial<UpdateOptions> = {}): UpdateOptions => ({
+    mode,
+    imagesDir: dir,
+    engine: () => engine,
+    cliApply: fakeCliApply(cliCalls),
+    replicaRestart: fakeReplicaRestart(replicaCalls),
+    packApply: fakePackApply(packCalls),
+    ...extra,
+  });
+  return { home, dir, engine, ctx, options, cliCalls, replicaCalls, packCalls };
 }
 
 const snapshot = (dir: string) => Object.fromEntries(readdirSync(dir).map((f) => [f, readFileSync(join(dir, f), "utf8")]));
@@ -73,8 +90,6 @@ describe("the release check lists every component against the approved release",
       pad("Dev skills", "-", NEXT, "not installed"),
       pad("Local replica", OLD, NEXT, "restart after CLI update"),
       pad(`SDK ${project}`, OLD, NEXT, "notification only"),
-      `CLI: this CLI does not install ${NEXT} by itself yet. Run: npm install -g @catalyst-cloud/cli@${NEXT}`,
-      `Cloud skills: this CLI does not install ${NEXT} by itself yet. Run: npx skills add https://github.com/coalesce-labs/catalyst-cloud-skills/tree/${"1".repeat(40)} --all -g`,
       `Update this project's SDK: catalyst update sdk --project ${project}`,
       "Checked the approved release; nothing was changed.",
     ]);
@@ -109,9 +124,139 @@ describe("the release check lists every component against the approved release",
   });
 });
 
+describe("one applying release check moves the CLI, the Cloud pack and then the replica on that CLI", () => {
+  it("POSITIVE CONTROL: the images, the CLI, the Cloud pack and a running replica all reach the approved release", async () => {
+    const { home, ctx, options, engine, cliCalls, replicaCalls, packCalls } = hostCase();
+    signIn(home);
+    await seedReplica(home, { heartbeatAgeMs: 0 });
+    seedWriterState(home, { version: OLD });
+    const report = await runUpdate(ctx, options("apply"));
+    const byId = Object.fromEntries(report.components.map((c) => [c.id, c]));
+    expect(byId.runner).toMatchObject({ status: "updated", installed: "generation 89" });
+    expect(byId.cli).toMatchObject({ status: "updated", installed: NEXT, reason: "activated", action: null });
+    expect(byId.replica).toMatchObject({ status: "updated", installed: NEXT, reason: "restarted" });
+    expect(byId["skills-cloud"]).toMatchObject({ status: "updated", installed: NEXT, action: null });
+    expect(report.exitCode).toBe(0);
+    expect(packCalls).toEqual([NEXT]);
+    expect(cliCalls).toEqual([NEXT]);
+    expect(replicaCalls).toEqual([NEXT]);
+    expect(engine.calls.composeUp).toBeGreaterThan(0);
+    const lines = updateReportLines(report);
+    expect(lines.some((l) => l.startsWith("CLI:"))).toBe(false);
+    expect(lines.find((l) => l.startsWith("Local replica"))).toContain("updated");
+  });
+
+  it("a failed CLI move fails the run and leaves the replica on its code, waiting", async () => {
+    const { home, ctx, options, replicaCalls } = hostCase();
+    signIn(home);
+    await seedReplica(home, { heartbeatAgeMs: 0 });
+    seedWriterState(home, { version: OLD });
+    const report = await runUpdate(ctx, options("apply", { cliApply: fakeCliApply([], "failed") }));
+    const byId = Object.fromEntries(report.components.map((c) => [c.id, c]));
+    expect(byId.cli).toMatchObject({ status: "failed", reason: "install_failed", installed: CLI_VERSION });
+    expect(byId.replica).toMatchObject({ status: "pending", reason: "cli_update_failed" });
+    expect(replicaCalls).toEqual([]);
+    expect(report.exitCode).toBe(1);
+  });
+
+  it("a held replica keeps its code while the CLI moves; a check moves neither", async () => {
+    const { home, ctx, options, cliCalls, replicaCalls } = hostCase();
+    setComponentPolicy(home, "replica", false);
+    signIn(home);
+    await seedReplica(home, { heartbeatAgeMs: 0 });
+    seedWriterState(home, { version: OLD });
+    await runUpdate(ctx, options("check"));
+    expect([cliCalls, replicaCalls]).toEqual([[], []]);
+    const report = await runUpdate(ctx, options("apply"));
+    expect(report.components.find((c) => c.id === "cli")).toMatchObject({ status: "updated" });
+    expect(report.components.find((c) => c.id === "replica")).toMatchObject({ status: "held", reason: "owner_setting", installed: OLD });
+    expect(replicaCalls).toEqual([]);
+  });
+
+  it("a replica an unfinished restart stopped is reported and started again; one its owner stopped stays stopped", async () => {
+    const { home, ctx, options, replicaCalls } = hostCase();
+    signIn(home);
+    const dbPath = await seedReplica(home);
+    seedWriterState(home, { version: OLD, pid: 2 ** 22 + 17 });
+    const owners = await runUpdate(ctx, options("apply"));
+    expect(owners.components.find((c) => c.id === "replica")).toMatchObject({ status: "stopped" });
+    expect(replicaCalls).toEqual([]);
+    writeFileSync(pendingRestartPathFor(home), JSON.stringify({ dbPath }));
+    const check = await runUpdate(ctx, options("check"));
+    expect(check.components.find((c) => c.id === "replica")).toMatchObject({ status: "pending", reason: "restart_interrupted" });
+    expect(replicaCalls).toEqual([]);
+    const report = await runUpdate(ctx, options("apply"));
+    expect(report.components.find((c) => c.id === "replica")).toMatchObject({ status: "updated", installed: NEXT });
+    expect(replicaCalls).toEqual([NEXT]);
+  });
+
+  it("a CLI already selected past the approved version is kept, and the replica is expected on the version that runs", async () => {
+    const { home, ctx, options, replicaCalls } = hostCase();
+    signIn(home);
+    await seedReplica(home, { heartbeatAgeMs: 0 });
+    seedWriterState(home, { version: OLD });
+    const newer = `${TRAIN}.99`;
+    const cliApply = () => ({ outcome: "current" as const, detail: "installed_newer", version: newer });
+    const report = await runUpdate(ctx, options("apply", { cliApply }));
+    expect(report.components.find((c) => c.id === "cli")).toMatchObject({ status: "installed_newer", installed: newer });
+    expect(replicaCalls).toEqual([newer]);
+  });
+
+  it("a Cloud pack an installer linked in is reported as owned elsewhere and does not fail the run", async () => {
+    const { ctx, options } = hostCase();
+    const report = await runUpdate(ctx, options("apply", { packApply: () => ({ outcome: "linked", detail: "installation_owner_unknown", version: null }) }));
+    expect(report.components.find((c) => c.id === "skills-cloud")).toMatchObject({ status: "unknown", reason: "installation_owner_unknown" });
+    expect(report.exitCode).toBe(0);
+  });
+
+  it("a replica that did not come back fails the run, so the next check tries again", async () => {
+    const { home, ctx, options } = hostCase();
+    signIn(home);
+    await seedReplica(home, { heartbeatAgeMs: 0 });
+    seedWriterState(home, { version: OLD });
+    const report = await runUpdate(ctx, options("apply", { replicaRestart: fakeReplicaRestart([], "failed") }));
+    expect(report.components.find((c) => c.id === "replica")).toMatchObject({ status: "failed", reason: "stop_timeout", installed: OLD });
+    expect(report.exitCode).toBe(1);
+  });
+});
+
+describe("setup's daily update choice carries over as holds (migration)", () => {
+  const journal = (home: string, dailyUpdate: unknown) => {
+    mkdirSync(join(onboardStatePath(home), ".."), { recursive: true });
+    writeFileSync(
+      onboardStatePath(home),
+      JSON.stringify({ schema: 1, runId: "saved", installer: null, cli: "0.14.0", tenant: "acct_fixture", account: "acct_fixture", membershipId: "m_1", baseUrl: "https://cloud.example.test", exit: null, changes: [], steps: [], dailyUpdate }),
+    );
+  };
+
+  it("an owner who turned the daily update off keeps the CLI and both packs, and the images still move", async () => {
+    const { home, ctx, options, cliCalls, packCalls } = hostCase();
+    journal(home, { state: "off" });
+    const report = await runUpdate(ctx, options("apply"));
+    const byId = Object.fromEntries(report.components.map((c) => [c.id, c]));
+    expect(byId.cli).toMatchObject({ status: "held", reason: "owner_setting", policy: "off", policySource: "migrated" });
+    expect(byId["skills-cloud"]).toMatchObject({ status: "held", policySource: "migrated" });
+    expect(byId.runner).toMatchObject({ status: "updated" });
+    expect([cliCalls, packCalls]).toEqual([[], []]);
+    // Nothing was written for it: the hold is read, never saved.
+    expect(existsSync(updatePolicyPathFor(home))).toBe(false);
+  });
+
+  it("a setting the owner saved wins over it, and a daily update left on holds nothing", async () => {
+    const { home, ctx, options, cliCalls } = hostCase();
+    journal(home, { state: "off" });
+    setComponentPolicy(home, "cli", true);
+    expect((await runUpdate(ctx, options("apply"))).components.find((c) => c.id === "cli")).toMatchObject({ status: "updated", policySource: "owner" });
+    expect(cliCalls).toEqual([NEXT]);
+    const other = hostCase();
+    journal(other.home, { state: "on" });
+    expect((await runUpdate(other.ctx, other.options("check"))).components.find((c) => c.id === "cli")).toMatchObject({ status: "update_available", policySource: "default" });
+  });
+});
+
 describe("an owner's hold keeps only its own component", () => {
-  it("a CLI hold: the CLI row says held, the replica waits for that CLI, images and packs still move", async () => {
-    const { home, ctx, options, engine } = hostCase();
+  it("a CLI hold: the CLI row says held, the replica waits for that CLI, the images and the Cloud pack still move", async () => {
+    const { home, ctx, options, engine, cliCalls, replicaCalls, packCalls } = hostCase();
     setComponentPolicy(home, "cli", false);
     signIn(home);
     await seedReplica(home, { heartbeatAgeMs: 0 });
@@ -121,8 +266,11 @@ describe("an owner's hold keeps only its own component", () => {
     expect(byId.cli).toMatchObject({ installed: CLI_VERSION, approved: NEXT, policy: "off", policySource: "owner", status: "held", reason: "owner_setting", action: null });
     expect(byId.replica).toMatchObject({ status: "waiting_for_cli", reason: "dependency_held" });
     expect(byId.runner).toMatchObject({ status: "updated", installed: "generation 89" });
-    expect(byId["skills-cloud"]).toMatchObject({ status: "update_available", policy: "on" });
+    expect(byId["skills-cloud"]).toMatchObject({ status: "updated", installed: NEXT, policy: "on" });
+    expect(packCalls).toEqual([NEXT]);
     expect(engine.calls.composeUp).toBeGreaterThan(0);
+    expect(cliCalls).toEqual([]);
+    expect(replicaCalls).toEqual([]);
     const lines = updateReportLines(report);
     expect(lines.find((l) => l.startsWith("CLI "))).toContain("held by owner's setting");
     expect(lines.find((l) => l.startsWith("Local replica"))).toContain(`waiting for CLI ${NEXT}`);

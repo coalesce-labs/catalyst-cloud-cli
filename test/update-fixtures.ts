@@ -7,6 +7,9 @@ import { join } from "node:path";
 import { configPathFor, readManifest, type CustomerConfig } from "../src/config";
 import type { DesiredReleaseRead, ReleaseComponent, RunnerUpdateEngine } from "../src/runner-update";
 import type { SdkExec } from "../src/update-sdk";
+import type { CliApplyResult } from "../src/update-cli";
+import type { ReplicaRestartResult } from "../src/update-replica";
+import type { PackApplyResult } from "../src/update-skills";
 
 const hex = (c: string) => c.repeat(64);
 const sha = (c: string) => c.repeat(40);
@@ -210,5 +213,29 @@ export function fakeNpm(calls: string[][], opts: { fail?: boolean } = {}): SdkEx
     writeFileSync(join(cwd, "package.json"), JSON.stringify(manifest, null, 2));
     writeFileSync(join(cwd, "package-lock.json"), JSON.stringify(lock));
     return opts.fail ? { status: 1, stderr: "npm ERR! network" } : { status: 0, stderr: "" };
+  };
+}
+
+/** Stands in for the CLI's own move: records each target and answers `outcome`. */
+export function fakeCliApply(calls: string[], outcome: CliApplyResult["outcome"] = "updated") {
+  return (_home: string, own: string, target: string): CliApplyResult => {
+    calls.push(target);
+    return outcome === "failed" ? { outcome, detail: "install_failed", version: own } : { outcome, detail: "activated", version: target };
+  };
+}
+
+/** Stands in for the replica restart: records each target and answers `outcome`. */
+export function fakeReplicaRestart(calls: string[], outcome: ReplicaRestartResult["outcome"] = "updated") {
+  return async (target: string): Promise<ReplicaRestartResult> => {
+    calls.push(target);
+    return outcome === "failed" ? { outcome, detail: "stop_timeout", version: null } : { outcome, detail: outcome === "updated" ? "restarted" : "stopped", version: outcome === "updated" ? target : null };
+  };
+}
+
+/** Stands in for the Cloud pack refresh: records each target and answers `outcome`. */
+export function fakePackApply(calls: string[], outcome: PackApplyResult["outcome"] = "updated") {
+  return (_home: string, _dir: string, target: string): PackApplyResult => {
+    calls.push(target);
+    return outcome === "failed" ? { outcome, detail: "install_failed", version: null } : { outcome, detail: "refreshed", version: target };
   };
 }

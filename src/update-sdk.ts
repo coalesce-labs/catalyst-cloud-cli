@@ -106,11 +106,22 @@ function installedVersion(dir: string, name: string): string | null {
 
 const quote = (value: string) => (/^[A-Za-z0-9_./@:=-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`);
 
+/** What runs is what node_modules holds; else what the lockfile resolves; else an exact declaration. */
+const currentVersion = (p: SdkPackage): string | null => p.installed ?? p.locked ?? exactVersion(p.declared);
+
+/** A package already past its approved version: an update keeps it where it is, never moves it down. */
+const aheadOfApproved = (p: SdkPackage): boolean => {
+  const current = currentVersion(p);
+  return current !== null && p.approved !== null && compareVersions(current, p.approved) > 0;
+};
+
 /** The exact-version add invocations for the declared packages, one per dependency group, so each
- *  package stays in the group it is already in. Every spec is a known package at an exact version. */
+ *  package stays in the group it is already in. Every spec is a known package at an exact version.
+ *  A package already newer than its approved version is left out. */
 export function sdkUpdateArgv(manager: PackageManager, packages: readonly SdkPackage[]): string[][] {
   const byGroup = new Map<DependencyGroup, string[]>();
-  for (const p of packages) if (p.approved !== null) byGroup.set(p.group, [...(byGroup.get(p.group) ?? []), `${p.name}@${p.approved}`]);
+  for (const p of packages)
+    if (p.approved !== null && !aheadOfApproved(p)) byGroup.set(p.group, [...(byGroup.get(p.group) ?? []), `${p.name}@${p.approved}`]);
   return [...byGroup].map(([group, specs]) => {
     const flags: Record<PackageManager, string[]> = {
       npm: ["install", "--save-exact", ...(group === "devDependencies" ? ["--save-dev"] : group === "optionalDependencies" ? ["--save-optional"] : [])],
@@ -161,11 +172,10 @@ export function inspectSdkProject(dir: string, release: ApprovedRelease | null):
   const project = { ...base, packageManager: detected.manager, packages };
   if (release === null) return { ...project, status: "approval_unavailable", reason: "approval_unavailable" };
   if (detected.manager === null) return { ...project, status: "unknown", reason: detected.reason ?? "package_manager_ambiguous" };
-  // What runs is what node_modules holds; else what the lockfile resolves; else an exact declaration.
   const pairs: { current: string; approved: string }[] = [];
   for (const p of packages) {
     if (p.approved === null) return { ...project, status: "approval_unavailable", reason: "approval_unavailable" };
-    const current = p.installed ?? p.locked ?? exactVersion(p.declared);
+    const current = currentVersion(p);
     if (current === null) return { ...project, status: "unknown", reason: "installed_version_unknown" };
     pairs.push({ current, approved: p.approved });
   }
@@ -259,6 +269,12 @@ export function applySdkUpdate(home: string, dir: string, release: ApprovedRelea
     for (const p of after.packages) {
       const before = project.packages.find((q) => q.name === p.name);
       const now = p.installed ?? p.locked;
+      if (before !== undefined && aheadOfApproved(before)) {
+        // Left out of the install: it must still be where it was.
+        const stays = currentVersion(p);
+        if (stays === null || compareVersions(stays, currentVersion(before) ?? stays) !== 0) return failed("verify_failed");
+        continue;
+      }
       if (now === null || p.approved === null || compareVersions(now, p.approved) !== 0) return failed("verify_failed");
       moved.push({ name: p.name, from: before?.installed ?? before?.locked ?? before?.declared ?? "unknown", to: now });
     }

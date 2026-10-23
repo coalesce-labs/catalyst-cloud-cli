@@ -7,7 +7,21 @@ import { describe, expect, it } from "vitest";
 import { main } from "../src/cli";
 import { readUpdatePolicy, updatePolicyPathFor } from "../src/update-policy";
 import { makeCtx, tempHome } from "./helpers";
-import { answered, approved, CLI_VERSION, countingEngine, fakeNpm, hostRelease, NEXT, OLD, runnerInstall, sdkProject } from "./update-fixtures";
+import {
+  answered,
+  approved,
+  CLI_VERSION,
+  countingEngine,
+  fakeCliApply,
+  fakeNpm,
+  fakePackApply,
+  fakeReplicaRestart,
+  hostRelease,
+  NEXT,
+  OLD,
+  runnerInstall,
+  sdkProject,
+} from "./update-fixtures";
 
 describe("catalyst update policy", () => {
   it("POSITIVE CONTROL: turning the CLI off says so, keeps the others, and saves it", async () => {
@@ -130,14 +144,44 @@ describe("catalyst update sdk --project", () => {
 });
 
 describe("runner update honours the owner's image holds (review fixes)", () => {
-  it("the scheduled --auto run keeps the images while one is held, and never reads the release", async () => {
+  it("the scheduled --auto run keeps the images while one is held, and still moves the other components", async () => {
     const home = tempHome();
     expect(await main(["update", "policy", "supervisor", "off"], makeCtx(home))).toBe(0);
     const engine = countingEngine(answered(hostRelease({ components: approved() })));
     const ctx = makeCtx(home, { now: () => new Date("2026-10-23T15:00:00.000Z") });
-    expect(await main(["runner", "update", "--auto", "--dir", runnerInstall()], ctx, { runner: { engine } })).toBe(0);
-    expect(ctx.out).toEqual(["2026-10-23T15:00:00.000Z retained owner_setting generation=88"]);
-    expect(engine.calls).toEqual({});
+    const cli: string[] = [];
+    const components = { cliApply: fakeCliApply(cli), replicaRestart: fakeReplicaRestart([]), packApply: fakePackApply([]) };
+    expect(await main(["runner", "update", "--auto", "--dir", runnerInstall()], ctx, { runner: { engine, components } })).toBe(0);
+    expect(ctx.out).toEqual([
+      "2026-10-23T15:00:00.000Z retained owner_setting generation=88",
+      "2026-10-23T15:00:00.000Z components cli=updated skills-cloud=not_installed skills-dev=not_installed replica=not_installed",
+    ]);
+    // One release read for the report; the image engine never ran.
+    expect(engine.calls).toEqual({ desiredRelease: 1 });
+    expect(cli).toEqual([NEXT]);
+  });
+
+  it("a scheduled --check applies nothing, and --json stays one JSON result with the components in it", async () => {
+    const engine = countingEngine(answered(hostRelease({ components: approved() })));
+    const cli: string[] = [];
+    const components = { cliApply: fakeCliApply(cli), replicaRestart: fakeReplicaRestart([]), packApply: fakePackApply([]) };
+    const check = makeCtx(tempHome());
+    expect(await main(["runner", "update", "--auto", "--check", "--json", "--dir", runnerInstall()], check, { runner: { engine, components } })).toBe(0);
+    expect(cli).toEqual([]);
+    const json = makeCtx(tempHome());
+    expect(await main(["runner", "update", "--auto", "--json", "--dir", runnerInstall()], json, { runner: { engine, components } })).toBe(0);
+    expect(json.out).toHaveLength(1);
+    const body = JSON.parse(json.out[0] ?? "{}") as { outcome: string; components: { id: string; status: string }[] };
+    expect(body.components.find((c) => c.id === "cli")).toMatchObject({ status: "updated" });
+    expect(cli).toEqual([NEXT]);
+  });
+
+  it("a failed CLI move in the scheduled run exits 1 and names why", async () => {
+    const engine = countingEngine(answered(hostRelease({ components: approved() })));
+    const ctx = makeCtx(tempHome(), { now: () => new Date("2026-10-23T15:00:00.000Z") });
+    const components = { cliApply: fakeCliApply([], "failed"), replicaRestart: fakeReplicaRestart([]), packApply: fakePackApply([]) };
+    expect(await main(["runner", "update", "--auto", "--dir", runnerInstall()], ctx, { runner: { engine, components } })).toBe(1);
+    expect(ctx.out[1]).toContain("cli=failed(install_failed)");
   });
 
   it("unreadable settings keep the images and exit 1; runner update --check still prints its image result", async () => {

@@ -104,6 +104,22 @@ function parsePolicy(input: unknown): UpdatePolicy | null {
   return policy;
 }
 
+/** The components an installer's daily update kept current: the CLI and both skills packs. */
+export const DAILY_UPDATE_COMPONENTS = ["cli", "skills-cloud", "skills-dev"] as const satisfies readonly UpdateComponent[];
+
+/**
+ * An owner who turned the installer's daily update off chose not to have the CLI and the skills
+ * packs moved for them. Until they save a setting of their own for one of those, it reads as held,
+ * with source `migrated`. A saved setting always wins, and nothing is written, so a check stays
+ * read-only and a later `update policy … on` lifts it. A missing record is no evidence: no hold.
+ */
+export function withMigratedHolds(policy: UpdatePolicy, dailyUpdateOff: boolean): UpdatePolicy {
+  if (!dailyUpdateOff) return policy;
+  const components = { ...policy.components };
+  for (const id of DAILY_UPDATE_COMPONENTS) components[id] ??= { enabled: false, source: "migrated" };
+  return { ...policy, components };
+}
+
 export function effectivePolicy(policy: UpdatePolicy, component: UpdateComponent): EffectivePolicy {
   const saved = policy.components[component];
   return saved ? { enabled: saved.enabled, source: saved.source } : { enabled: true, source: "default" };

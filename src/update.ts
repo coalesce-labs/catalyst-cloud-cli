@@ -8,10 +8,14 @@
 // member route. The runner, supervisor and watchdog move through runner-update.ts's engine with that
 // same read, so the image half and the component half can never come from different approvals.
 //
-// This CLI applies the image components itself. For the CLI, the skills packs and the local replica
-// it reports the approved version and the exact command that installs it. A project's SDK is
-// reported with its update command; an applying run changes a project's files only when its owner
-// turned that project's SDK updates on, and a check never does.
+// This CLI applies the image components itself, moves the CLI to the approved version (installed
+// beside the running one and selected through the person's own command: update-cli.ts), and then
+// restarts a running local replica on it with its data (update-replica.ts). The Cloud skills pack
+// moves to its own approved version from that version's package, even while the CLI is held
+// (update-skills.ts). The Dev pack carries no version this CLI can read, so it is reported, never
+// moved. A project's SDK is reported
+// with its update command; an applying run changes a project's files only when its owner turned that
+// project's SDK updates on, and a check never does.
 import {
   compareVersions,
   hostApproval,
@@ -23,13 +27,18 @@ import {
   type ApprovedRead,
   type ApprovedRelease,
 } from "./approved-release.js";
-import type { Ctx } from "./config.js";
+import { loadConfig, type Ctx } from "./config.js";
+import { applyCliUpdate, type CliApplyResult } from "./update-cli.js";
 import { readInventory, type Inventory } from "./update-inventory.js";
+import { restartPending, restartReplica, type ReplicaRestartResult } from "./update-replica.js";
+import { applyCloudPackUpdate, type PackApplyResult } from "./update-skills.js";
+import { onboardStatePath, readOnboardJournal } from "./onboard.js";
 import {
   effectivePolicy,
   projectIdentityHolds,
   readUpdatePolicy,
   UPDATE_COMPONENTS,
+  withMigratedHolds,
   type PolicySource,
   type UpdateComponent,
   type UpdatePolicy,
@@ -116,6 +125,12 @@ export interface UpdateOptions {
   imageResult?: UpdateResult;
   /** Runs a project's package manager; tests pass a fake. */
   sdkExec?: SdkExec;
+  /** Moves the CLI to `target`; tests pass a fake. */
+  cliApply?: (home: string, ownVersion: string, target: string) => CliApplyResult;
+  /** Restarts a running replica on the selected CLI, expecting `target`; tests pass a fake. */
+  replicaRestart?: (target: string) => Promise<ReplicaRestartResult>;
+  /** Refreshes the Cloud skills pack in `skillsDir` to `target`; tests pass a fake. */
+  packApply?: (home: string, skillsDir: string, target: string) => PackApplyResult;
 }
 
 export const COMPONENT_LABELS: Readonly<Record<UpdateComponent, string>> = {
@@ -133,6 +148,20 @@ const SDK_LABELS: Readonly<Record<string, string>> = {
   "@catalyst-cloud/sdk-replica-node": "SDK replica (Node)",
   "@catalyst-cloud/sdk-replica-browser": "SDK replica (browser)",
 };
+
+/** Setup's record says the owner turned the installer's daily update off. Unreadable is no evidence. */
+function dailyUpdateOff(ctx: Ctx): boolean {
+  try {
+    return readOnboardJournal(onboardStatePath(ctx.home, ctx.env))?.dailyUpdate?.state === "off";
+  } catch {
+    return false;
+  }
+}
+
+/** The owner's saved settings, with the holds their setup choices carry (update-policy.ts). */
+export function readEffectivePolicy(ctx: Ctx): UpdatePolicy {
+  return withMigratedHolds(readUpdatePolicy(ctx.home), dailyUpdateOff(ctx));
+}
 
 /** An engine whose desired-release read happens once per pass, however many readers ask. */
 export function sharedReleaseRead(engine: RunnerUpdateEngine): RunnerUpdateEngine & { read(dir: string): Promise<DesiredReleaseRead> } {
@@ -218,13 +247,8 @@ function componentRows(inventory: Inventory, policy: UpdatePolicy, release: Appr
     const installed = inventory.cli.version;
     if (cliTarget === null) return finish(cli, { installed, approved: null, status: "approval_unavailable", reason: unavailable, action: null });
     if (crossTrain) return finish(cli, { installed, approved: cliTarget, status: "cross_train", reason: "cross_train", action: null });
-    const decided = versionStatus(installed, cliTarget, cli.enabled);
-    return finish(cli, {
-      installed,
-      approved: cliTarget,
-      ...decided,
-      action: decided.status === "update_available" ? `npm install -g ${inventory.cli.packageName}@${cliTarget}` : null,
-    });
+    // An applying run moves the CLI itself: no command to hand the owner.
+    return finish(cli, { installed, approved: cliTarget, ...versionStatus(installed, cliTarget, cli.enabled), action: null });
   })();
 
   const packRow = (id: "skills-cloud" | "skills-dev", pack: "cloud" | "dev"): ComponentReport => {
@@ -241,7 +265,8 @@ function componentRows(inventory: Inventory, policy: UpdatePolicy, release: Appr
       installed: found.version,
       approved,
       ...decided,
-      action: decided.status === "update_available" ? `npx skills add https://github.com/${target.repository}/tree/${target.commit} --all -g` : null,
+      // An applying run moves the Cloud pack itself; the Dev pack's command is the owner's to run.
+      action: decided.status === "update_available" && pack === "dev" ? `npx skills add https://github.com/${target.repository}/tree/${target.commit} --all -g` : null,
     });
   };
 
@@ -264,7 +289,7 @@ function componentRows(inventory: Inventory, policy: UpdatePolicy, release: Appr
       return cli.enabled
         ? finish(replica, { ...base, status: "restart_after_cli", reason: "cli_update_pending" })
         : finish(replica, { ...base, status: "waiting_for_cli", reason: "dependency_held" });
-    return finish(replica, { ...base, status: "update_available", reason: "restart_needed", action: "catalyst replica stop && catalyst replica start --detach" });
+    return finish(replica, { ...base, status: "update_available", reason: "restart_needed" });
   })();
 
   return [cliRow, packRow("skills-cloud", "cloud"), packRow("skills-dev", "dev"), replicaRow];
@@ -332,7 +357,7 @@ function aggregateExit(report: Omit<UpdateReport, "exitCode">): number {
 
 /** One release check. Check mode reads only: no lock, no cache, no settings and no install change. */
 export async function runUpdate(ctx: Ctx, options: UpdateOptions): Promise<UpdateReport> {
-  const policy = readUpdatePolicy(ctx.home);
+  const policy = readEffectivePolicy(ctx);
   const inventory = readInventory(ctx, options.imagesDir);
 
   let engine: ReturnType<typeof sharedReleaseRead> | null = null;
@@ -361,12 +386,16 @@ export async function runUpdate(ctx: Ctx, options: UpdateOptions): Promise<Updat
 
   const imageList = imageRows(inventory, policy, crossTrain ? { release: null, reason: "cross_train" } : images);
   const components = [...imageList, ...componentRows(inventory, policy, release, unavailableReason, crossTrain !== null)];
+  // A writer an earlier restart stopped is not one its owner stopped: it is started again.
+  const stoppedRow = components.find((c) => c.id === "replica" && c.status === "stopped");
+  if (stoppedRow && inventory.replica.state === "stopped" && restartPending(ctx.home, inventory.replica.dbPath))
+    Object.assign(stoppedRow, { status: "pending", reason: "restart_interrupted" });
   const projects = projectReports(policy, crossTrain ? null : release, options.project);
 
   let imageResult: UpdateResult | null = options.imageResult ?? null;
   if (options.mode === "apply" && engine !== null && imageResult === null && crossTrain === null) {
     // Re-read the owner's settings just before anything moves: a hold set during the read wins.
-    const current = readUpdatePolicy(ctx.home);
+    const current = readEffectivePolicy(ctx);
     const held = RELEASE_COMPONENTS.filter((id) => !effectivePolicy(current, id).enabled);
     if (held.length === 0) {
       imageResult = await runRunnerUpdate(engine, { dir: options.imagesDir });
@@ -381,6 +410,60 @@ export async function runUpdate(ctx: Ctx, options: UpdateOptions): Promise<Updat
     }
   }
   if (options.mode === "apply" && release !== null && crossTrain === null) {
+    // Re-read the owner's settings just before the CLI and replica move: a hold set during the read wins.
+    const current = readEffectivePolicy(ctx);
+    const cliRow = components.find((c) => c.id === "cli");
+    const replicaRow = components.find((c) => c.id === "replica");
+    if (cliRow && cliRow.status === "update_available" && cliRow.approved !== null) {
+      if (!effectivePolicy(current, "cli").enabled) Object.assign(cliRow, { status: "held", reason: "owner_setting" });
+      else {
+        const moved = (options.cliApply ?? applyCliUpdate)(ctx.home, inventory.cli.version, cliRow.approved);
+        if (moved.outcome === "failed") Object.assign(cliRow, { status: "failed", reason: moved.detail });
+        else if (moved.outcome === "current")
+          // Already selected (or newer): the person's own command runs `moved.version`.
+          Object.assign(cliRow, { status: moved.detail === "installed_newer" ? "installed_newer" : "current", reason: moved.detail, installed: moved.version });
+        else Object.assign(cliRow, { status: "updated", reason: moved.detail, installed: moved.version });
+      }
+    }
+    const packRow = components.find((c) => c.id === "skills-cloud");
+    const pack = inventory.skills.cloud;
+    if (packRow && packRow.status === "update_available" && packRow.approved !== null && pack.state === "installed") {
+      if (!effectivePolicy(current, "skills-cloud").enabled) Object.assign(packRow, { status: "held", reason: "owner_setting" });
+      else {
+        const moved = (options.packApply ?? applyCloudPackUpdate)(ctx.home, pack.dir, packRow.approved);
+        if (moved.outcome === "updated") Object.assign(packRow, { status: "updated", reason: moved.detail, installed: moved.version });
+        else if (moved.outcome === "linked") Object.assign(packRow, { status: "unknown", reason: moved.detail });
+        else Object.assign(packRow, { status: "failed", reason: moved.detail, installed: moved.version ?? packRow.installed });
+      }
+    }
+    if (replicaRow && replicaRow.approved !== null) {
+      const cliRuns = cliRow?.status === "updated" || cliRow?.status === "current" || cliRow?.status === "installed_newer";
+      const due =
+        (replicaRow.status === "restart_after_cli" && cliRuns) ||
+        (replicaRow.status === "update_available" && replicaRow.reason === "restart_needed") ||
+        (replicaRow.status === "pending" && replicaRow.reason === "restart_interrupted");
+      if (replicaRow.status === "restart_after_cli" && cliRow?.status === "failed")
+        Object.assign(replicaRow, { status: "pending", reason: "cli_update_failed" });
+      else if (due && !effectivePolicy(current, "replica").enabled) Object.assign(replicaRow, { status: "held", reason: "owner_setting" });
+      else if (due) {
+        const restart =
+          options.replicaRestart ??
+          (async (target: string): Promise<ReplicaRestartResult> => {
+            const cfg = loadConfig(ctx.home);
+            // The person's own `catalyst`: it loads the selected version itself (bin/launch.js).
+            const launcher = process.argv[1];
+            if (!cfg || launcher === undefined) return { outcome: "failed", detail: "writer_unidentified", version: null };
+            return restartReplica(ctx, cfg, target, { launcher });
+          });
+        // The version the person's own command runs now, which the new writer must report.
+        const target = cliRuns ? (cliRow?.installed ?? replicaRow.approved) : inventory.cli.version;
+        const restarted = await restart(target);
+        if (restarted.outcome === "updated") Object.assign(replicaRow, { status: "updated", reason: restarted.detail, installed: restarted.version });
+        else if (restarted.outcome === "stopped") Object.assign(replicaRow, { status: "stopped", reason: "stopped", installed: null });
+        else Object.assign(replicaRow, { status: "failed", reason: restarted.detail, installed: restarted.version ?? replicaRow.installed });
+      }
+    }
+
     // Only a project whose owner turned its SDK updates on, still the directory they registered.
     for (const project of projects)
       if (project.registered && project.policy === "auto" && project.status === "update_available") {

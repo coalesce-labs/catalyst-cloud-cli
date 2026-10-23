@@ -18,9 +18,10 @@ import {
   runRunnerUpdate,
   updateResultLines,
   type RunnerUpdateEngine,
+  type UpdateResult,
 } from "./runner-update.js";
 import { dockerFleetUpdateEngine, runFleetUpdate, type FleetUpdateEngine } from "./runner-update-fleet.js";
-import { runUpdate, sharedReleaseRead, updateReportJson, updateReportLines } from "./update.js";
+import { runUpdate, sharedReleaseRead, updateReportJson, updateReportLines, type UpdateOptions } from "./update.js";
 import { effectivePolicy, readUpdatePolicy, setComponentPolicy } from "./update-policy.js";
 import { cmdRunnerLifecycle, RUNNER_LIFECYCLE_ACTIONS, type RunnerLifecycleDeps } from "./runner.js";
 
@@ -33,6 +34,8 @@ export interface RunnerCommandDeps extends RunnerLifecycleDeps {
   engine?: RunnerUpdateEngine;
   fleetEngine?: FleetUpdateEngine;
   scheduler?: Partial<AutoUpdateDeps>;
+  /** The scheduled run's component movers; tests pass fakes. */
+  components?: Pick<UpdateOptions, "cliApply" | "replicaRestart" | "packApply" | "sdkExec">;
 }
 
 const USAGE =
@@ -107,14 +110,36 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     if (fleet && dirFlag === undefined) throw new UsageError("--fleet needs --dir, the directory that holds compose.json");
     // One desired-release read serves the image check and the component report (CTC-6708).
     const engine = sharedReleaseRead(deps.engine ?? dockerRunnerUpdateEngine({ env: ctx.env }));
-    // An owner's image hold stops this command too, including the 15-minute schedule (CTC-6708).
+    // The 15-minute schedule runs `runner update --auto`. After the images it carries on with every
+    // other component (the CLI, the Cloud pack, the replica, opted-in SDK projects), on the same
+    // release read, so one schedule keeps the whole install on the approved release (CTC-6708). An
+    // image hold keeps only the images. A check never applies; with --json the components join the
+    // one JSON result, otherwise they get one line, and only when a release was read.
+    const components = async (imageResult: UpdateResult | undefined) => {
+      if (!auto || fleet || check) return null;
+      const report = await runUpdate(ctx, { mode: "apply", imagesDir: dir(), engine: () => engine, ...(imageResult ? { imageResult } : {}), ...deps.components });
+      if (report.approved === null) return null;
+      const rows = report.components.filter((c) => !RELEASE_COMPONENTS.some((id) => id === c.id));
+      return {
+        rows,
+        line: `${ctx.now().toISOString()} components ${rows.map((c) => `${c.id}=${c.status}${c.status === "failed" || c.status === "pending" ? `(${c.reason})` : ""}`).join(" ")}`,
+        exitCode: rows.some((c) => c.status === "failed") || report.projects.some((p) => p.applied?.outcome === "failed") ? 1 : 0,
+      };
+    };
+    const print = (result: UpdateResult, extra: Awaited<ReturnType<typeof components>>) => {
+      if (args.json) ctx.stdout(JSON.stringify(extra ? { ...result, components: extra.rows } : result));
+      else if (auto) {
+        ctx.stdout(`${ctx.now().toISOString()} ${result.outcome} ${result.detail} generation=${result.generation ?? "none"}`);
+        if (extra) ctx.stdout(extra.line);
+      } else for (const line of updateResultLines(result)) ctx.stdout(line);
+      return Math.max(result.exitCode, extra?.exitCode ?? 0);
+    };
+    // An owner's image hold stops this command's image work too, including the schedule's (CTC-6708).
     const hold = check ? null : imageHold(ctx);
     if (hold !== null) {
       const retained = { outcome: "retained" as const, detail: hold, generation: readReleaseState(dir()).generation, exitCode: hold === "owner_setting" ? 0 : 1 };
-      if (args.json) ctx.stdout(JSON.stringify(retained));
-      else if (auto) ctx.stdout(`${ctx.now().toISOString()} ${retained.outcome} ${retained.detail} generation=${retained.generation ?? "none"}`);
-      else for (const line of updateResultLines(retained)) ctx.stdout(line);
-      return retained.exitCode;
+      // Unreadable settings move nothing; a hold leaves the other components to the release check.
+      return print(retained, hold === "owner_setting" ? await components(undefined) : null);
     }
     const result = fleet
       ? await runFleetUpdate(deps.fleetEngine ?? dockerFleetUpdateEngine({ env: ctx.env }), { dir: dir(), check })
@@ -139,10 +164,7 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
       } else for (const line of [...updateResultLines(result), ...updateReportLines(report)]) ctx.stdout(line);
       return result.exitCode;
     }
-    if (args.json) ctx.stdout(JSON.stringify(result));
-    else if (auto) ctx.stdout(`${ctx.now().toISOString()} ${result.outcome} ${result.detail} generation=${result.generation ?? "none"}`);
-    else for (const line of updateResultLines(result)) ctx.stdout(line);
-    return result.exitCode;
+    return print(result, await components(result));
   }
 
   if (action === "auto-update" && parts.length <= 2) {

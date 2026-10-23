@@ -25,7 +25,7 @@ import {
 } from "./config.js";
 import { contractVersionInRange, readContractCache } from "./contract.js";
 import { CliError } from "./errors.js";
-import { latestPublishedVersion, type PublishedLookup } from "./published.js";
+import { newestCliVersion, type PublishedLookup } from "./published.js";
 import {
   replicaStatus,
   writerIsRunning,
@@ -287,7 +287,7 @@ export async function readyReport(
     deps.offline === true || ctx.env.CATALYST_SKILLS_OFFLINE === "1";
   if (!offline) {
     const pub = await (
-      deps.fetchLatestRelease ?? (() => latestPublishedVersion(ctx))
+      deps.fetchLatestRelease ?? (() => newestCliVersion(ctx))
     )();
     if (pub.latest === null) {
       checks.push({
@@ -305,7 +305,11 @@ export async function readyReport(
           id: "cliRelease",
           ok: false,
           note: true,
-          line: `cliRelease: ${installedCli} installed is older than the latest published ${pub.latest} — upgrade: ${upgradeCommand()}`,
+          // CTC-6708 — once this install has read an approved release, that is the answer.
+          line:
+            pub.source === "approved"
+              ? `cliRelease: ${installedCli} installed is older than the approved ${pub.latest} — update: catalyst update`
+              : `cliRelease: ${installedCli} installed is older than the latest published ${pub.latest} — upgrade: ${upgradeCommand()}`,
         });
       }
       // clause 1 — the skill files on disk, read independently of whichever CLI is answering. Both
@@ -315,8 +319,9 @@ export async function readyReport(
       // older than any stamp, which is why the stamped half says "oldest STAMPED" and the unstamped
       // names are always printed rather than hidden behind whichever branch happened to win.
       const found = installedBundleVersion(skillsDir, deps.skillNames);
+      const skillsTarget = pub.source === "approved" ? (pub.skills ?? pub.latest) : pub.latest;
       const stampBehind =
-        found.version !== null && semverOlder(found.version, pub.latest);
+        found.version !== null && semverOlder(found.version, skillsTarget);
       const unstampedBehind =
         found.unstamped.length > 0 &&
         !semverOlder(pub.latest, FIRST_STAMPED_VERSION);
@@ -336,7 +341,10 @@ export async function readyReport(
           id: "skillsRelease",
           ok: false,
           note: true,
-          line: `skillsRelease: in ${skillsDir} ${facts.join(", and ")}, while the published bundle is ${pub.latest} — update: npx skills update -y`,
+          line:
+            pub.source === "approved"
+              ? `skillsRelease: in ${skillsDir} ${facts.join(", and ")}, while the approved bundle is ${skillsTarget} — update: catalyst update`
+              : `skillsRelease: in ${skillsDir} ${facts.join(", and ")}, while the published bundle is ${pub.latest} — update: npx skills update -y`,
         });
       }
     }

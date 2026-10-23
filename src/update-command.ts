@@ -9,7 +9,7 @@ import { flagBool, flagString, positionals, type ParsedArgs } from "./args.js";
 import type { Ctx } from "./config.js";
 import { UsageError } from "./errors.js";
 import { dockerRunnerUpdateEngine, runnerDir, type RunnerUpdateEngine } from "./runner-update.js";
-import { policyLines, runUpdate, updateReportJson, updateReportLines } from "./update.js";
+import { policyLines, readEffectivePolicy, runUpdate, updateReportJson, updateReportLines, type UpdateOptions } from "./update.js";
 import { applySdkUpdate, type SdkExec } from "./update-sdk.js";
 import {
   canonicalProject,
@@ -25,6 +25,9 @@ import {
 export interface UpdateCommandDeps {
   engine?: RunnerUpdateEngine;
   sdkExec?: SdkExec;
+  cliApply?: UpdateOptions["cliApply"];
+  replicaRestart?: UpdateOptions["replicaRestart"];
+  packApply?: UpdateOptions["packApply"];
 }
 
 const USAGE =
@@ -52,7 +55,7 @@ function cmdPolicy(parts: string[], args: ParsedArgs, ctx: Ctx): number {
   if (flagBool(args, "check") || args.flags.dir !== undefined) throw new UsageError("--check and --dir are not valid with update policy");
   if (parts.length === 1) {
     if (project !== undefined) throw new UsageError("update policy lists every setting; --project goes with update policy sdk on|off");
-    const policy = readUpdatePolicy(ctx.home);
+    const policy = readEffectivePolicy(ctx);
     if (args.json)
       ctx.stdout(
         JSON.stringify({
@@ -136,6 +139,9 @@ export async function cmdUpdate(args: ParsedArgs, ctx: Ctx, deps: UpdateCommandD
     ...(project !== undefined ? { project: canonicalProject(project).path } : {}),
     engine: () => deps.engine ?? dockerRunnerUpdateEngine({ env: ctx.env }),
     ...(deps.sdkExec ? { sdkExec: deps.sdkExec } : {}),
+    ...(deps.cliApply ? { cliApply: deps.cliApply } : {}),
+    ...(deps.replicaRestart ? { replicaRestart: deps.replicaRestart } : {}),
+    ...(deps.packApply ? { packApply: deps.packApply } : {}),
   });
   if (args.json) ctx.stdout(JSON.stringify(updateReportJson(report)));
   else for (const line of updateReportLines(report)) ctx.stdout(line);

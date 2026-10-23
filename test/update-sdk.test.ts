@@ -116,6 +116,18 @@ describe("applySdkUpdate: the owner's explicit update of one project", () => {
     expect(applySdkUpdate(tempHome(), dir, release(), noop)).toMatchObject({ outcome: "failed", detail: "verify_failed" });
   });
 
+  it("a package already newer than approved is kept when another is behind: it is never moved down", () => {
+    const dir = sdkProject(OLD, { replicaNode: `${TRAIN}.30` });
+    expect(inspectSdkProject(dir, release()).packageManagerCommand).toBe(`cd ${dir} && npm install --save-exact @catalyst-cloud/sdk@${NEXT}`);
+    const calls: string[][] = [];
+    const result = applySdkUpdate(tempHome(), dir, release(), fakeNpm(calls));
+    expect(calls).toEqual([["npm", "install", "--save-exact", `@catalyst-cloud/sdk@${NEXT}`]]);
+    expect(result).toMatchObject({ outcome: "updated", moved: [{ name: "@catalyst-cloud/sdk", from: OLD, to: NEXT }] });
+    expect(result.moved).toHaveLength(1);
+    const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { dependencies: Record<string, string> };
+    expect(manifest.dependencies["@catalyst-cloud/sdk-replica-node"]).toBe(`${TRAIN}.30`);
+  });
+
   it("an ambiguous project is refused and its manager never runs", () => {
     const dir = sdkProject(OLD, { lockfiles: ["package-lock.json", "yarn.lock"] });
     const calls: string[][] = [];
