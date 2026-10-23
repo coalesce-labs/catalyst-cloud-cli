@@ -2,16 +2,17 @@
 // The self-hosted runner's Compose file, copied byte for byte from catalyst-cloud's deploy/self-host
 // at a pinned commit. That repository is private, so a customer's `catalyst onboard` cannot fetch it.
 // Never edit vendor/self-host/compose.yaml by hand: move `commit` and regenerate.
+// The Mac host-disk sampler and its LaunchAgent template ride the same commit (CTC-5929).
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const commit = "ee729b12ea821310c48de7bbc753a59d60cc45d6";
+const commit = "b304efd232e298c01cba433f5f916c784cbe1165";
 const files = ["deploy/self-host/compose.yaml", "deploy/self-host/compose.darwin-thoughts.yaml", ...["producer.mjs", "verifier.mjs", "verifier.d.mts", "watchdog.mjs", "watchdog-deadline.mjs", "service.plist.in", "manifest.json"].map(name => "deploy/self-host/darwin-thoughts-custody/"+name), ...[
   "session-egress.py", "catalyst-session-egress.service", "catalyst-session-egress-attest.service", "catalyst-session-egress-attest.timer",
-].map(name => "deploy/self-host/linux-session-egress/"+name)];
+].map(name => "deploy/self-host/linux-session-egress/"+name), "deploy/self-host/host-disk-sample.py", "deploy/self-host/launchd/dev.catalystcloud.host-disk.plist"];
 const target = join(root, "vendor/self-host");
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const sourceRepo = process.env.CATALYST_SELF_HOST_SOURCE;

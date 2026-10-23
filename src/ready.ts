@@ -49,7 +49,9 @@ import {
 } from "./onboard-ready.js";
 import { selectedOnboardTeam } from "./onboard-existing.js";
 import { dispatchGateCopy, teamCheckCopy, valuesFix, whoFixes } from "./ready-copy.js";
-import { onboardStatePath, readOnboardJournal } from "./onboard.js";
+import { onboardStatePath, onboardStateRoot, readOnboardJournal } from "./onboard.js";
+import { dockerRunnerEngine, readEnvFile, RUNNER_HOST_IMAGES, type RunnerEngine } from "./onboard-runner.js";
+import { dockerRootAvailableBytes, runnerDiskCopy, runnerDiskVerdict, type RunnerDiskVerdict } from "./onboard-runner-disk.js";
 
 export { semverOlder };
 
@@ -186,6 +188,35 @@ export interface ReadyDeps {
   fetchLatestRelease?: () => Promise<PublishedLookup>;
   /** Skip the published-release lookup entirely (--offline / CATALYST_SKILLS_OFFLINE=1). */
   offline?: boolean;
+  /** Test seam for the runner's disk verdict; null when this machine has no setup-installed runner. */
+  runnerDisk?: () => Promise<RunnerDiskReady>;
+  /** Test seam for finding the installed runner; defaults to the docker CLI. */
+  runnerEngine?: Pick<RunnerEngine, "projectContainers" | "installation">;
+}
+
+type RunnerDiskReady = { verdict: RunnerDiskVerdict; vm: boolean } | { unverified: true } | null;
+
+/** CTC-5929: the disk admission the supervisor applies, read from the runner installed here. The
+ * running catalyst-host project names its own directory, so a moved state root is still found; the
+ * state root is only the fallback when Docker shows no such project or cannot be listed.
+ * A Mac runs the engine in a VM, so only the native sample counts; Linux measures Docker's data root. */
+async function localRunnerDisk(ctx: Ctx, engine: Pick<RunnerEngine, "projectContainers" | "installation">): Promise<RunnerDiskReady> {
+  let dir: string | null = null;
+  const containers = await engine.projectContainers?.().catch(() => null);
+  if (containers?.some(row => row.service === "supervisor")) {
+    const installed = await engine.installation?.(ctx.home, ctx.env.CATALYST_SUPERVISOR_IMAGE ?? RUNNER_HOST_IMAGES.supervisor)
+      .catch(() => "unverified" as const);
+    if (!installed || typeof installed === "string") return { unverified: true };
+    dir = installed.dir;
+  } else {
+    try { dir = join(onboardStateRoot(ctx.home, ctx.env), "runner"); }
+    catch { return null; }
+  }
+  const saved = readEnvFile(join(dir, ".env"));
+  if (!saved?.CATALYST_SUPERVISOR_IMAGE) return containers?.length ? { unverified: true } : null;
+  const vm = process.platform === "darwin";
+  return { vm, verdict: runnerDiskVerdict({ dir, saved, vm, nowMs: ctx.now().getTime(),
+    nativeAvailableBytes: () => dockerRootAvailableBytes(ctx.env) }) };
 }
 
 export async function readyReport(
@@ -404,6 +435,21 @@ export async function readyReport(
       fix: `${verdict.fix ?? FIX_COMMAND} — supported: ${supportedRangeText(readManifest().enginesNode)}; every read still works through the API meanwhile`,
       who: "you",
     });
+  }
+
+  const disk = await (deps.runnerDisk ?? (() => localRunnerDisk(ctx, deps.runnerEngine ?? dockerRunnerEngine({ env: ctx.env }))))();
+  if (disk && "unverified" in disk) {
+    checks.push({ id: "runner:disk", ok: false, note: true,
+      line: "runner disk: a catalyst-host runner is installed here, but ready could not verify its installation to read its disk measurement",
+      fix: "run catalyst setup --runner, which checks the installation and names what is wrong" });
+  } else if (disk) {
+    if (disk.verdict.state === "measured")
+      checks.push({ id: "runner:disk", ok: true,
+        line: `runner disk: ${disk.verdict.availableGiB} GiB free, at least ${disk.verdict.floorGiB} GiB needed` });
+    else {
+      const copy = runnerDiskCopy(disk.verdict, disk.vm);
+      checks.push({ id: "runner:disk", ok: false, line: `runner disk: ${copy.line}`, fix: copy.fix, who: "you" });
+    }
   }
 
   const replica = replicaStatus(ctx, cfg);

@@ -766,6 +766,22 @@ describe("the install page (README) states what a customer needs, in the order t
       );
     }
   });
+
+  test("the readiness guide documents the runner disk check and its fix", () => {
+    const text = readFileSync(
+      join(skillsRoot, "catalyst-onboard", "references", "reading-ready.md"),
+      "utf8",
+    );
+    const section = text.slice(text.indexOf("## The machine checks the CLI adds"));
+    const row = section.split("\n").find((line) => line.startsWith("| `runner:disk` |"));
+    expect(row, "a runner:disk row under the machine checks").toBeDefined();
+    expect(row).toContain("catalyst setup --runner");
+    expect(row).toContain("25 GiB");
+    expect(row).toContain("CATALYST_HOST_FREE_FLOOR_GIB");
+    // Between sdk and replica, the order ready emits them.
+    expect(section.indexOf("| `sdk` |")).toBeLessThan(section.indexOf("| `runner:disk` |"));
+    expect(section.indexOf("| `runner:disk` |")).toBeLessThan(section.indexOf("| `replica` |"));
+  });
 });
 
 test("onboarding inventories teams without running every team's readiness check", () => {
