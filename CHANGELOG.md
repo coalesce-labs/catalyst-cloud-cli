@@ -2,7 +2,7 @@
 
 ## 0.16.29
 
-The CLI now tells Catalyst Cloud which release you have installed: each request to Catalyst Cloud carries the installed version, and so does `catalyst watch` when it connects. Catalyst Cloud can then tell an out-of-date CLI from a current one. Nothing about your requests changes otherwise. On a Mac self-hosted machine, an updated disk sampler now takes effect straight away: setup reloads the running disk agent whenever the sampler script changes, not only when its schedule file does.
+The CLI now tells Catalyst Cloud which release you have installed: each request to Catalyst Cloud carries the installed version, and so does `catalyst watch` when it connects. Catalyst Cloud can then tell an out-of-date CLI from a current one. Nothing about your requests changes otherwise. On a Mac self-hosted machine, setup now installs a small agent that measures the Mac's disk, so the machine can take work instead of showing zero free slots. When a machine still shows zero free slots, setup and `catalyst ready` now say why: its disk has not been measured yet, or its free space is below the floor (25 GiB by default), with the numbers and the fix. An updated disk sampler also takes effect straight away: setup reloads the running disk agent whenever the sampler script changes, not only when its schedule file does.
 
 ## 0.16.28
 
