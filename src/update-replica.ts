@@ -12,9 +12,9 @@
 // instead of being taken for one its owner stopped. A replica that was stopped stays stopped.
 // Success is read back from the new writer's own record of the CLI version it runs.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { configDirFor, type Ctx, type CustomerConfig } from "./config.js";
-import { pendingRestartPathFor, pidAlive, pidfilePath, replicaStatus, writerIsRunning, type ReplicaStatus } from "./replica.js";
+import { pendingRestart, pendingRestartPathFor, pidAlive, pidfilePath, replicaStatus, writerIsRunning, type ReplicaStatus } from "./replica.js";
 import { ACTIVE_RUNTIME_ENV } from "./update-cli.js";
 
 export interface ReplicaRestartResult {
@@ -43,12 +43,7 @@ export interface ReplicaRestartDeps {
 
 /** Whether a restart this CLI began for `dbPath` has not finished: the writer was stopped by it. */
 export function restartPending(home: string, dbPath: string): boolean {
-  try {
-    const raw: unknown = JSON.parse(readFileSync(pendingRestartPathFor(home), "utf8"));
-    return typeof raw === "object" && raw !== null && (raw as { dbPath?: unknown }).dbPath === dbPath;
-  } catch {
-    return false;
-  }
+  return pendingRestart(home, dbPath) !== null;
 }
 
 /** A writer's command line runs `replica start` (bin/launch.js keeps it in one process). */
@@ -109,7 +104,7 @@ export async function restartReplica(ctx: Ctx, cfg: CustomerConfig, target: stri
       return { outcome: "failed", detail: "writer_unidentified", version: before.writer?.version ?? null };
     try {
       mkdirSync(configDirFor(ctx.home), { recursive: true, mode: 0o700 });
-      writeFileSync(pendingRestartPathFor(ctx.home), `${JSON.stringify({ dbPath })}\n`, { mode: 0o600 });
+      writeFileSync(pendingRestartPathFor(ctx.home), `${JSON.stringify({ dbPath, target })}\n`, { mode: 0o600 });
     } catch {
       // Without the record a late exit would read as an owner's stop: do not stop the writer.
       return { outcome: "failed", detail: "start_failed", version: before.writer?.version ?? null };

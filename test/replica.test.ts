@@ -4,7 +4,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { main } from "../src/cli";
-import { defaultReplicaDbFor } from "../src/config";
+import { defaultReplicaDbFor, readManifest } from "../src/config";
 import {
   assertSingleSelect,
   backoffDelayMs,
@@ -363,9 +363,12 @@ describe("replica start backs off and stops after repeated snapshot failures", (
     });
     const { waitFor } = await import("./helpers");
     await waitFor(() => sockets.length === 1, 10_000);
+    // CTC-6743: owned, with this CLI's version, before the socket is even open.
+    expect(readWriterState(dbPath)).toMatchObject({ stopped: null, version: readManifest().version });
     sockets[0]!.onopen?.({});
     await waitFor(() => ctx.out.some((l) => l.startsWith("replica live at")), 10_000);
-    expect(readWriterState(dbPath)).toBeNull();
+    // CTC-6743: the stale verdict is gone, replaced by this writer's own healthy record and version.
+    expect(readWriterState(dbPath)).toMatchObject({ consecutiveFailures: 0, lastError: null, stopped: null, version: readManifest().version });
     stop();
     expect(await run).toBe(0);
     expect(readWriterState(dbPath)).toBeNull();
