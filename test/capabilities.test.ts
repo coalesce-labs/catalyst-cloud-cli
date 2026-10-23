@@ -76,6 +76,11 @@ describe("the table itself", () => {
     expect(needs["repo agents-block"]).toBe("member");
     expect(needs["repo agent-setup"]).toBe("member");
   });
+  test("the update verbs name 0.16.31, the first published release that carries them (0.16.30 shipped before them)", () => {
+    for (const verb of ["update", "update sdk", "update policy"]) {
+      expect(CAPABILITIES.find((row) => row.verb === verb)?.since).toBe("0.16.31");
+    }
+  });
 });
 
 describe("availability against a contract", () => {
