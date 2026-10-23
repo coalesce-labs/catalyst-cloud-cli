@@ -12,6 +12,7 @@ import { existsSync, openSync, closeSync } from "node:fs";
 import { ReadStream as TerminalInput } from "node:tty";
 import { Writable } from "node:stream";
 import { parseArgs, positionals, verbHelp, type ParsedArgs } from "./args.js";
+import { reportCliVersion } from "./cli-version.js";
 import {
   CONFIG_MODE,
   DEFAULT_BASE_URL,
@@ -461,6 +462,20 @@ export async function main(
     command: args.command,
     version: manifest.version,
   });
+  ctx = {
+    ...ctx,
+    fetch: reportCliVersion(ctx.fetch, manifest.version, () => {
+      let configured: string | undefined;
+      try {
+        configured = loadConfig(ctx.home)?.baseUrl;
+      } catch {
+        // The command reports its existing config error.
+      }
+      return [args.baseUrl, ctx.env.CATALYST_CLOUD_BASE_URL, configured, DEFAULT_BASE_URL].filter(
+        (origin): origin is string => typeof origin === "string",
+      );
+    }),
+  };
   try {
     if (args.command !== "onboard") {
       migrateLegacyCliPath(ctx);
