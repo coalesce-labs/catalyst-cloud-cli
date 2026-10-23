@@ -78,6 +78,14 @@ class CustodyInstallError extends Error {
 export function darwinThoughtsInstallRefusal(error: unknown): string | undefined {
   return error instanceof CustodyInstallError ? error.reason : undefined;
 }
+/** What a person changes for a create refusal that names its cause; other refusals have no advice. */
+const CREATE_REFUSAL_ADVICE: Readonly<Record<string, string>> = {
+  bootstrap_create_mount_refused: "Docker Desktop refused to share a storage folder with the check container. In Docker Desktop, open Settings, then Resources, then File sharing, make sure your home folder is listed, apply, and run setup again.",
+};
+export function darwinThoughtsInstallAdvice(error: unknown): string | undefined {
+  const reason = darwinThoughtsInstallRefusal(error);
+  return reason === undefined ? undefined : CREATE_REFUSAL_ADVICE[reason];
+}
 /** Unknown exception text can contain credentials. Keep its class, and explicitly redact it. */
 export function darwinThoughtsInstallException(error: unknown): { custodyErrorClass: string; custodyErrorMessage: string; custodyErrorMessageRedacted: boolean } {
   const known = error instanceof CustodyInstallError;
@@ -538,6 +546,7 @@ async function actualBootstrap(input: BootstrapInput): Promise<BootstrapReceipt>
   let id: string | undefined;
   let cachedImage: string | undefined;
   let createAttempted = false;
+  let createRefused = false;
   const receiveIdentity = (received: CommandResult, acknowledgedId?: string) => {
     if (received.code !== 0) fail("bootstrap_cleanup_unproved");
     let parsed: unknown;
@@ -588,8 +597,10 @@ async function actualBootstrap(input: BootstrapInput): Promise<BootstrapReceipt>
       "PATH=/usr/bin:/bin", "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0", "/usr/local/bin/bun", "--config=/dev/null", "--no-env-file", "--cwd=/",
       "-e", program, canonicalDarwinThoughtsJson({ authority, deadlineMs: input.deadlineMs })]);
     // Docker's own refusal of a mount source is matched, never forwarded: stderr can carry secrets.
-    if (created.code !== 0 && /bind source path does not exist|[Mm]ounts denied/.test(created.stderr))
+    if (created.code !== 0 && /bind source path does not exist|[Mm]ounts denied/.test(created.stderr)) {
+      createRefused = true;
       fail("bootstrap_create_mount_refused");
+    }
     if (created.code !== 0 || !/^[a-f0-9]{64}$/.test(created.stdout)) fail("bootstrap_create_unreceived");
     id = created.stdout;
     const beforeStartDaemon = await docker(["info", "--format", "{{.ID}}"]);
@@ -625,21 +636,32 @@ async function actualBootstrap(input: BootstrapInput): Promise<BootstrapReceipt>
       if (daemon.code !== 0 || daemon.stdout !== authority.daemonId || image.code !== 0 ||
           image.stdout !== cachedImage) fail("bootstrap_cleanup_unproved");
       let received: CommandResult | undefined;
-      for (let attempt = 0; attempt < 32; attempt++) {
+      // A refused create persists nothing; prove that by our random token label, and only
+      // fall back to recovering the exact helper when the Engine lists one anyway.
+      let refusedAbsent = false;
+      if (createRefused && id === undefined) {
+        const persisted = await cleanupDocker(["ps", "--all", "--no-trunc", "--quiet",
+          "--filter", "label=dev.catalystcloud.custody-token=" + token]);
+        if (persisted.code !== 0) fail("bootstrap_cleanup_unproved");
+        refusedAbsent = persisted.stdout === "";
+      }
+      for (let attempt = 0; !refusedAbsent && attempt < 32; attempt++) {
         const current = await cleanupDocker(["inspect", name]);
         if (current.code === 0) { received = current; break; }
         if (id !== undefined || performance.now() - cleanupStarted >= 1900) fail("bootstrap_cleanup_unproved");
         await new Promise<void>(resolve => setTimeout(resolve, 25));
       }
-      if (received === undefined) fail("bootstrap_cleanup_unproved");
-      id = receiveIdentity(received, id);
-      const list = ["ps", "--all", "--no-trunc", "--quiet", "--filter", "id=" + id];
-      const present = await cleanupDocker(list);
-      if (present.code !== 0 || present.stdout !== id) fail("bootstrap_cleanup_unproved");
-      const removed = await cleanupDocker(["rm", "--force", id]);
-      if (removed.code !== 0) fail("bootstrap_cleanup_unproved");
-      const absent = await cleanupDocker(list);
-      if (absent.code !== 0 || absent.stdout !== "") fail("bootstrap_cleanup_unproved");
+      if (!refusedAbsent) {
+        if (received === undefined) fail("bootstrap_cleanup_unproved");
+        id = receiveIdentity(received, id);
+        const list = ["ps", "--all", "--no-trunc", "--quiet", "--filter", "id=" + id];
+        const present = await cleanupDocker(list);
+        if (present.code !== 0 || present.stdout !== id) fail("bootstrap_cleanup_unproved");
+        const removed = await cleanupDocker(["rm", "--force", id]);
+        if (removed.code !== 0) fail("bootstrap_cleanup_unproved");
+        const absent = await cleanupDocker(list);
+        if (absent.code !== 0 || absent.stdout !== "") fail("bootstrap_cleanup_unproved");
+      }
     } catch {
       // Keep the refusal that started cleanup; without it every create failure reads as cleanup.
       const cause = "error" in result ? darwinThoughtsInstallRefusal(result.error) : undefined;
