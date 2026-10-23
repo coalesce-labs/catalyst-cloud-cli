@@ -648,6 +648,9 @@ export function updateReportJson(report: UpdateReport): Record<string, unknown> 
     release: report.release,
     unavailable: report.unavailable,
     crossTrain: report.crossTrain,
+    // CTC-6792: the commit each skills pack was approved at, so the installer's daily job installs
+    // exactly that commit. Null when no release was read, or when it is on another train.
+    approvedSkills: report.approved !== null && report.crossTrain === null ? report.approved.skills : null,
     components: report.components,
     projects: report.projects.map((p) => ({
       path: p.path,
