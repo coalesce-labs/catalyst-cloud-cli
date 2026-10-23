@@ -6,7 +6,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { flagBool, flagInt, flagString, positionals, type ParsedArgs } from "./args.js";
-import { apiBase, loadConfig, replicaDbPath, replicaOptedIn, type Ctx, type CustomerConfig } from "./config.js";
+import { apiBase, loadConfig, readManifest, replicaDbPath, replicaOptedIn, type Ctx, type CustomerConfig } from "./config.js";
 import { detachSelf } from "./detach.js";
 import { CliError, UsageError } from "./errors.js";
 import { apiClient } from "./transport.js";
@@ -71,6 +71,9 @@ export interface ReplicaWriterState {
   lastFailureAt: number | null;
   /** set only once the writer gave up; null while it is still retrying */
   stopped: { at: number; reason: string; restartWith: string } | null;
+  /** The CLI version the writer runs, so a release check can tell an old detached writer from a
+   *  current one (CTC-6708). Absent on a record written before it was kept. */
+  version?: string;
 }
 
 export interface ReplicaStatus {
@@ -120,7 +123,8 @@ export function readWriterState(dbPath: string): ReplicaWriterState | null {
       typeof rec.consecutiveFailures !== "number" ||
       !(rec.lastError === null || typeof rec.lastError === "string") ||
       !(rec.lastFailureAt === null || typeof rec.lastFailureAt === "number") ||
-      !stoppedOk
+      !stoppedOk ||
+      !(rec.version === undefined || typeof rec.version === "string")
     ) {
       return null;
     }
@@ -130,8 +134,8 @@ export function readWriterState(dbPath: string): ReplicaWriterState | null {
   }
 }
 
-export function writeWriterState(dbPath: string, s: Omit<ReplicaWriterState, "updatedAt">, nowMs: number): void {
-  writeFileSync(writerStatePath(dbPath), JSON.stringify({ ...s, updatedAt: nowMs }));
+export function writeWriterState(dbPath: string, s: Omit<ReplicaWriterState, "updatedAt" | "version">, nowMs: number): void {
+  writeFileSync(writerStatePath(dbPath), JSON.stringify({ ...s, version: readManifest().version, updatedAt: nowMs }));
 }
 
 /** Remove the writer state sidecar; a no-op (never throws) when it is already gone. */

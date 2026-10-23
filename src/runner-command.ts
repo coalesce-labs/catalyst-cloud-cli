@@ -13,12 +13,15 @@ import {
 import {
   dockerRunnerUpdateEngine,
   readReleaseState,
+  RELEASE_COMPONENTS,
   runnerDir,
   runRunnerUpdate,
   updateResultLines,
   type RunnerUpdateEngine,
 } from "./runner-update.js";
 import { dockerFleetUpdateEngine, runFleetUpdate, type FleetUpdateEngine } from "./runner-update-fleet.js";
+import { runUpdate, sharedReleaseRead, updateReportJson, updateReportLines } from "./update.js";
+import { setComponentPolicy } from "./update-policy.js";
 import { cmdRunnerLifecycle, RUNNER_LIFECYCLE_ACTIONS, type RunnerLifecycleDeps } from "./runner.js";
 
 // `catalyst runner update [--check] [--auto] [--dir <dir>] [--fleet]` and
@@ -91,9 +94,21 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     const auto = flagBool(args, "auto");
     const fleet = flagBool(args, "fleet");
     if (fleet && dirFlag === undefined) throw new UsageError("--fleet needs --dir, the directory that holds compose.json");
+    // One desired-release read serves the image check and the component report (CTC-6708).
+    const engine = sharedReleaseRead(deps.engine ?? dockerRunnerUpdateEngine({ env: ctx.env }));
     const result = fleet
       ? await runFleetUpdate(deps.fleetEngine ?? dockerFleetUpdateEngine({ env: ctx.env }), { dir: dir(), check })
-      : await runRunnerUpdate(deps.engine ?? dockerRunnerUpdateEngine({ env: ctx.env }), { dir: dir(), check });
+      : await runRunnerUpdate(engine, { dir: dir(), check });
+    // `runner update --check` also lists every installed component against the approved release, as
+    // `catalyst update --check` does. The image fields stay where scripts already read them.
+    if (check && !fleet && !auto) {
+      const report = await runUpdate(ctx, { mode: "check", imagesDir: dir(), engine: () => engine, imageResult: result });
+      if (args.json) {
+        const { schemaVersion, release, components, projects } = updateReportJson(report);
+        ctx.stdout(JSON.stringify({ ...result, schemaVersion, release, components, projects }));
+      } else for (const line of [...updateResultLines(result), ...updateReportLines(report)]) ctx.stdout(line);
+      return result.exitCode;
+    }
     if (args.json) ctx.stdout(JSON.stringify(result));
     else if (auto) ctx.stdout(`${ctx.now().toISOString()} ${result.outcome} ${result.detail} generation=${result.generation ?? "none"}`);
     else for (const line of updateResultLines(result)) ctx.stdout(line);
@@ -108,6 +123,10 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     else if (mode === "off") status = disableAutoUpdate(scheduler);
     else if (mode === "status") status = autoUpdateStatus(scheduler);
     else throw new UsageError(USAGE);
+    // The owner's explicit on/off is also their setting for the three images, so a release check
+    // reports them as held (CTC-6708). Setup's own call (enableRunnerAutoUpdate) never lifts a hold.
+    if (mode === "off" || (mode === "on" && status.state === "on"))
+      for (const id of RELEASE_COMPONENTS) setComponentPolicy(ctx.home, id, mode === "on");
     if (args.json) {
       const state = mode === "status" && dirFlag !== undefined ? readReleaseState(dirFlag) : undefined;
       ctx.stdout(JSON.stringify({ ...status, ...(state ? { release: state } : {}) }));

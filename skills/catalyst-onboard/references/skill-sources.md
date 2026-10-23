@@ -15,6 +15,14 @@ Global (`-g`) installs go to `~/.agents/skills/`, linked from `~/.claude/skills/
 
 `npx skills add --all` replaces same-named directories and links. Before running it on an existing machine, inspect every same-named destination and proceed only when each is absent or a verified, unmodified copy of the intended pack (a lock entry verifies nothing on disk). Resolve any other copy first. Schedule only the installer, never raw add commands.
 
+## Keeping each pack current
+
+Check installed components with `catalyst update --check --json`. Read each component's installed version, approved version, status and reason.
+Apply enabled updates with `catalyst update` when the person asks you to update. For a component it does not install itself, it prints the exact command; offer that command the same way.
+Keep every saved component hold. Do not turn a hold off without the person's instruction.
+For a project's SDK, run `catalyst update --check --project <absolute project path>` and show the command it names. Run that command only when the person asks to update that project.
+After a plugin update, start a new agent session to load the installed version.
+
 ## Is each pack there
 
 `catalyst ready` checks the Cloud pack only. Look for `catalyst-onboard/SKILL.md` (Cloud) and `research-codebase/SKILL.md` (development) in the intended directory.
