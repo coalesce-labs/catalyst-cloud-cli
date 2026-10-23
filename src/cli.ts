@@ -229,6 +229,8 @@ export function usageText(): string {
     "  catalyst project list [--json]   (all workspace projects, including those with no stage mapping)",
     "  catalyst stage <start|renew|done|fail> <ticket> <phase>   (a cloud-claimed local phase)",
     "  catalyst project wip-limit <get|set <n>|set default> [--team K]   (a project's new-start WIP limit; members read, owners and admins set)",
+    "  catalyst repo pause <owner/name> --reason <text> | repo resume <owner/name> [--reason <text>]   (owner or admin; reason: 1 to 500 trimmed characters)",
+    "  catalyst repo status [--json]   (visible workspace repositories and their paused state; needs login)",
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
     "  catalyst identity linear <status|options|set> [<linearUserId>] [--json]",
