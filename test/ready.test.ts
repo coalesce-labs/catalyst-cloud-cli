@@ -10,7 +10,7 @@ import {
   test,
   vi,
 } from "vitest";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CUSTOMER_SKILLS, main } from "../src/cli";
 import {
@@ -155,6 +155,50 @@ describe("ready", () => {
       /^note {2}team ENG: Catalyst hasn't checked events from Linear and GitHub for this team yet\./m,
     );
     expect(text).toMatch(/^note {2}team OPS: Catalyst hasn't checked this team yet/m);
+  });
+  test("CTC-5929: a runner with no disk measurement is not ready for work, and says why", async () => {
+    await seedJoined(home, server);
+    installSkills(defaultSkillsDirFor(home), {});
+    const unmeasured = await readyReport(ctx, { skillNames: CUSTOMER_SKILLS, offline: true,
+      runnerDisk: async () => ({ vm: true, verdict: { state: "unmeasured", detail: "physical_host_disk_sample_required", floorGiB: 25 } }) });
+    expect(unmeasured.ready).toBe(false);
+    expect(unmeasured.checks.find((check) => check.id === "runner:disk")).toMatchObject({
+      ok: false, who: "you",
+      line: expect.stringContaining("no fresh measurement of this Mac's disk"),
+      fix: expect.stringContaining("catalyst setup --runner"),
+    });
+    const low = await readyReport(ctx, { skillNames: CUSTOMER_SKILLS, offline: true,
+      runnerDisk: async () => ({ vm: false, verdict: { state: "below_floor", availableGiB: 15.62, floorGiB: 25 } }) });
+    expect(low.ready).toBe(false);
+    expect(low.checks.find((check) => check.id === "runner:disk")?.line).toContain("15.62 GiB of disk is free and it needs 25 GiB");
+    const measured = await readyReport(ctx, { skillNames: CUSTOMER_SKILLS, offline: true,
+      runnerDisk: async () => ({ vm: true, verdict: { state: "measured", availableGiB: 80, floorGiB: 25 } }) });
+    expect(measured.checks.find((check) => check.id === "runner:disk")).toMatchObject({ ok: true });
+    const none = await readyReport(ctx, { skillNames: CUSTOMER_SKILLS, offline: true, runnerDisk: async () => null });
+    expect(none.checks.some((check) => check.id === "runner:disk")).toBe(false);
+  });
+  test("CTC-5929: ready finds the installed runner outside the current state root", async () => {
+    await seedJoined(home, server);
+    installSkills(defaultSkillsDirFor(home), {});
+    const moved = join(home, "elsewhere", "runner");
+    mkdirSync(moved, { recursive: true });
+    writeFileSync(join(moved, ".env"), [
+      `CATALYST_SUPERVISOR_IMAGE=ghcr.io/coalesce-labs/catalyst-supervisor@sha256:${"a".repeat(64)}`,
+      "CATALYST_HOST_DISK_SAMPLE_FILE=/var/lib/catalyst/host-disk/space.json", ""].join("\n"));
+    const engine = {
+      projectContainers: async () => [{ service: "supervisor", state: "running" }],
+      installation: async () => ({ dir: moved, hostName: "mac", baseUrl: "https://cloud.example.test" }),
+    };
+    const found = await readyReport(ctx, { skillNames: CUSTOMER_SKILLS, offline: true, runnerEngine: engine });
+    expect(found.ready).toBe(false);
+    expect(found.checks.find((check) => check.id === "runner:disk")?.line).toContain("the disk sample file is missing");
+    const unverified = await readyReport(ctx, { skillNames: CUSTOMER_SKILLS, offline: true,
+      runnerEngine: { ...engine, installation: async () => "unverified" as const } });
+    expect(unverified.checks.find((check) => check.id === "runner:disk")).toMatchObject({ note: true,
+      line: expect.stringContaining("could not verify its installation") });
+    const noDocker = await readyReport(ctx, { skillNames: CUSTOMER_SKILLS, offline: true,
+      runnerEngine: { projectContainers: async () => null, installation: async () => "missing" as const } });
+    expect(noDocker.checks.some((check) => check.id === "runner:disk")).toBe(false);
   });
   test("a fresh replica reads ok", async () => {
     await seedJoined(home, server);

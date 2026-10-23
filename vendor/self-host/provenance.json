@@ -1,6 +1,6 @@
 {
   "repository": "coalesce-labs/catalyst-cloud",
-  "commit": "ee729b12ea821310c48de7bbc753a59d60cc45d6",
+  "commit": "b304efd232e298c01cba433f5f916c784cbe1165",
   "sha256": {
     "deploy/self-host/compose.yaml": "0ffb7671c7ea49d8490d6e97093ada0afcb31da3b00092a8768150b090cca0bc",
     "deploy/self-host/compose.darwin-thoughts.yaml": "6269d66d6f487175ab8560d0648e65c8a0eccb86f69a8dc24daf41d8ae1dcf02",
@@ -14,6 +14,8 @@
     "deploy/self-host/linux-session-egress/session-egress.py": "a20cedfa1e883127ec461e4b7f9588d379fe1633b8244ecd703c81f589d3f142",
     "deploy/self-host/linux-session-egress/catalyst-session-egress.service": "703c150ab23ec87aea47cfc394f63e061b66c4b8c1454a88a9be879c161ce2a5",
     "deploy/self-host/linux-session-egress/catalyst-session-egress-attest.service": "94fa75ea0616f6a1172fc20ca637a5727c36456357e4a977d5bdd65f2fad2e8d",
-    "deploy/self-host/linux-session-egress/catalyst-session-egress-attest.timer": "176622c11c835601b95f36e375ba3c2e993136976c67e5d49559f13a3454fef9"
+    "deploy/self-host/linux-session-egress/catalyst-session-egress-attest.timer": "176622c11c835601b95f36e375ba3c2e993136976c67e5d49559f13a3454fef9",
+    "deploy/self-host/host-disk-sample.py": "8ebb1c6b74c0d15f7758c1dfb47be8594c8db161db74b29556365644965f71a7",
+    "deploy/self-host/launchd/dev.catalystcloud.host-disk.plist": "dc9da55e2f85c026e276ab5cf2b130a719c74127a53e0a1b26cc72de0faacb01"
   }
 }

@@ -2654,3 +2654,166 @@ describe("installing over an existing catalyst-host project", () => {
     secretsNowhere(f);
   });
 });
+
+describe("CTC-5929: the Mac's physical disk sample and a zero-slot reason", () => {
+  function withOrgKey(f: ReturnType<typeof fixture>) {
+    const file = join(f.home, "org-key");
+    writeFileSync(file, `${ORG_KEY}\n`, { mode: 0o600 });
+    f.ctx.env.CATALYST_RUNNER_ORG_KEY_FILE = file;
+  }
+  function withSampler(f: ReturnType<typeof fixture>, result: "ready" | "runner_host_disk_sampler_python_missing" = "ready") {
+    let installed = false;
+    f.engine.installHostDiskSampler = async (dir) => {
+      f.engine.calls.push(`installHostDiskSampler ${dir}`);
+      installed = result === "ready";
+      return result;
+    };
+    f.engine.hostDiskSamplerStatus = async () => (installed ? "installed" : "missing");
+  }
+  const envOf = (f: ReturnType<typeof fixture>) => readFileSync(join(f.dir, ".env"), "utf8");
+
+  test("setup installs the sampler before Compose and points the supervisor at its sample", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    withSampler(f);
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { capacity: 2 } });
+    const calls = f.engine.calls;
+    expect(calls.indexOf(`installHostDiskSampler ${f.dir}`)).toBeGreaterThan(-1);
+    expect(calls.indexOf(`installHostDiskSampler ${f.dir}`)).toBeLessThan(calls.indexOf("composeUp"));
+    expect(envOf(f)).toContain("CATALYST_HOST_DISK_SAMPLE_FILE=/var/lib/catalyst/host-disk/space.json\n");
+  });
+
+  test("a sampler that cannot be installed stops setup before the runner starts", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    withSampler(f, "runner_host_disk_sampler_python_missing");
+    const result = await run(f);
+    expect(result).toMatchObject({ state: "waiting", reason: "runner_host_disk_sampler_python_missing" });
+    expect(f.engine.calls).not.toContain("composeUp");
+    expect(onboardReasonText({ id: "runner", state: "waiting", reason: result.reason })).toContain("xcode-select --install");
+  });
+
+  test("a conflicting agent's recovery names both sample settings with its real values", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    f.engine.installHostDiskSampler = async () => "runner_host_disk_sampler_conflict";
+    f.engine.hostDiskSamplerStatus = async () => "missing";
+    mkdirSync(join(f.home, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(join(f.home, "Library", "LaunchAgents", "dev.catalystcloud.host-disk.plist"),
+      "<array><string>--output</string><string>/Users/a/.local/share/catalyst/host-disk/space.json</string></array>");
+    const result = await run(f);
+    expect(result).toMatchObject({ state: "waiting", reason: "runner_host_disk_sampler_conflict",
+      evidence: { sampleDir: "/Users/a/.local/share/catalyst/host-disk", sampleFile: "/var/lib/catalyst/host-disk/space.json" } });
+    const text = onboardReasonText({ id: "runner", state: "waiting", reason: result.reason, evidence: result.evidence });
+    expect(text).toContain("CATALYST_HOST_DISK_SAMPLE_DIR=/Users/a/.local/share/catalyst/host-disk");
+    expect(text).toContain("CATALYST_HOST_DISK_SAMPLE_FILE=/var/lib/catalyst/host-disk/space.json");
+    const bare = onboardReasonText({ id: "runner", state: "waiting", reason: "runner_host_disk_sampler_conflict" });
+    expect(bare).toContain("CATALYST_HOST_DISK_SAMPLE_DIR=");
+    expect(bare).toContain("CATALYST_HOST_DISK_SAMPLE_FILE=/var/lib/catalyst/host-disk/");
+    expect(f.engine.calls).not.toContain("composeUp");
+  });
+
+  test("an engine disk setup cannot locate asks for CATALYST_HOST_DISK_PATH, which unattended checks reuse", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    const seen: Array<string | undefined> = [];
+    f.engine.installHostDiskSampler = async (_dir, options) => {
+      seen.push(options.explicitPath);
+      return options.explicitPath ? "ready" : "runner_host_disk_location_unverified";
+    };
+    f.engine.hostDiskSamplerStatus = async (_dir, options) => { seen.push(options.explicitPath); return options.explicitPath ? "installed" : "missing"; };
+    const refused = await run(f);
+    expect(refused).toMatchObject({ state: "waiting", reason: "runner_host_disk_location_unverified" });
+    expect(onboardReasonText({ id: "runner", state: "waiting", reason: refused.reason })).toContain("CATALYST_HOST_DISK_PATH");
+    const named = fixture({ selected: true });
+    withOrgKey(named);
+    named.engine.installHostDiskSampler = f.engine.installHostDiskSampler;
+    named.engine.hostDiskSamplerStatus = f.engine.hostDiskSamplerStatus;
+    named.ctx.env.CATALYST_HOST_DISK_PATH = "/Volumes/VMs";
+    expect(await run(named)).toMatchObject({ state: "done" });
+    expect(readFileSync(join(named.dir, ".env"), "utf8")).toContain("CATALYST_HOST_DISK_PATH=/Volumes/VMs\n");
+    delete named.ctx.env.CATALYST_HOST_DISK_PATH;
+    seen.length = 0;
+    const unattended = onboardRunnerAdapter({ engine: named.engine, sleep: async () => {}, waitMs: 20, pollMs: 10 });
+    named.journal.steps = [...named.journal.steps.filter(step => step.id !== "runner"),
+      { id: "runner", state: "done", evidence: { selected: true } }] as OnboardJournal["steps"];
+    await unattended.check(named.ctx, named.journal);
+    expect(seen).toEqual(["/Volumes/VMs"]);
+  });
+
+  test("an operator's own sample directory is left to its publisher", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    withSampler(f);
+    f.ctx.env.CATALYST_HOST_DISK_SAMPLE_DIR = join(f.home, "operator-samples");
+    f.ctx.env.CATALYST_HOST_DISK_SAMPLE_FILE = "/var/lib/catalyst/host-disk/space.json";
+    expect(await run(f)).toMatchObject({ state: "done" });
+    expect(f.engine.calls.some(call => call.startsWith("installHostDiskSampler"))).toBe(false);
+    expect(envOf(f)).toContain(`CATALYST_HOST_DISK_SAMPLE_DIR=${join(f.home, "operator-samples")}\n`);
+  });
+
+  test("an unattended check reports a missing sampler instead of repairing it", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    withSampler(f);
+    expect(await run(f)).toMatchObject({ state: "done" });
+    f.engine.hostDiskSamplerStatus = async () => "missing";
+    const unattended = onboardRunnerAdapter({ engine: f.engine, sleep: async () => {}, waitMs: 20, pollMs: 10 });
+    f.journal.steps = [...f.journal.steps.filter(step => step.id !== "runner"),
+      { id: "runner", state: "done", evidence: { selected: true } }] as OnboardJournal["steps"];
+    expect(await unattended.check(f.ctx, f.journal)).toMatchObject({ state: "waiting", reason: "runner_needs_runner_flag" });
+  });
+
+  test.each([
+    [{ state: "unmeasured" as const, detail: "physical_host_disk_sample_required" as const, floorGiB: 25 },
+      "runner_host_disk_unmeasured", ["no fresh measurement of this Mac's disk", "dev.catalystcloud.host-disk"]],
+    [{ state: "below_floor" as const, availableGiB: 15.62, floorGiB: 25 },
+      "runner_host_disk_below_floor", ["15.62 GiB of disk is free and it needs 25 GiB", "Free at least 10 GiB"]],
+  ])("zero free slots name the disk reason: %o", async (verdict, reason, words) => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    f.state.capability!.placeableCapacity = 0;
+    f.engine.hostDisk = async () => verdict;
+    const result = await run(f);
+    expect(result).toMatchObject({ state: "waiting", reason, evidence: { capacity: 0, floorGiB: 25 } });
+    const text = onboardReasonText({ id: "runner", state: "waiting", reason: result.reason, evidence: result.evidence });
+    for (const word of words) expect(text).toContain(word);
+    expect(text).not.toContain(reason);
+    expect(text).not.toContain("—");
+  });
+
+  // CTC-5929 Lima arm64: ready said 34.51 GiB against 60 GiB, but setup printed "no disk sampler",
+  // because the saved setup record dropped the disk evidence and setup prints from that record.
+  test("the saved setup record keeps a Linux below-floor reason with its numbers", async () => {
+    const engine = fakeEngine({ arch: "amd64", vm: false });
+    for (const ref of [SUPERVISOR, WATCHDOG, RUNNER]) engine.images.set(ref, "amd64");
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    f.state.capability!.placeableCapacity = 0;
+    f.engine.hostDisk = async () => ({ state: "below_floor", availableGiB: 34.51, floorGiB: 60 });
+    const result = await run(f);
+    const path = join(f.home, "saved-run.json");
+    writeOnboardJournal(path, { schema: 1, steps: [{ id: "runner", state: "waiting", reason: result.reason, evidence: result.evidence }] } as OnboardJournal);
+    const saved = readOnboardJournal(path)!.steps[0]!;
+    expect(saved.evidence).toMatchObject({ availableGiB: 34.51, floorGiB: 60, vm: false });
+    const text = onboardReasonText(saved);
+    expect(text).toContain("34.51 GiB of disk is free and it needs 60 GiB");
+    expect(text).toContain("the disk that holds Docker's data");
+    expect(text).not.toContain("no disk sampler");
+    expect(text).not.toContain("Mac");
+  });
+
+  test("a below-floor reason without its numbers never claims a missing sampler", () => {
+    const text = onboardReasonText({ id: "runner", state: "waiting", reason: "runner_host_disk_below_floor", evidence: { floorGiB: 60 } });
+    expect(text).toContain("less than 60 GiB free");
+    expect(text).not.toContain("sampler");
+  });
+
+  test("zero free slots with a measured disk keep the readiness reason", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    f.state.capability!.placeableCapacity = 0;
+    f.engine.hostDisk = async () => ({ state: "measured", availableGiB: 120, floorGiB: 25 });
+    expect(await run(f)).toMatchObject({ state: "waiting", reason: "runner_host_not_ready", evidence: { capacity: 0 } });
+  });
+});
