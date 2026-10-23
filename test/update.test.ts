@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { approvalCachePathFor } from "../src/approved-release";
 import { readReleaseState, type RunnerUpdateEngine } from "../src/runner-update";
 import { runUpdate, updateReportJson, updateReportLines, type UpdateOptions } from "../src/update";
-import { setComponentPolicy, updatePolicyPathFor } from "../src/update-policy";
+import { setComponentPolicy, setProjectSdkPolicy, updatePolicyPathFor } from "../src/update-policy";
 import { makeCtx, seedReplica, seedWriterState, tempHome } from "./helpers";
 import {
   answered,
@@ -16,6 +16,7 @@ import {
   CLI_VERSION,
   cloudPack,
   countingEngine,
+  fakeNpm,
   hostRelease,
   memberFetch,
   NEXT,
@@ -74,7 +75,7 @@ describe("the release check lists every component against the approved release",
       pad(`SDK ${project}`, OLD, NEXT, "notification only"),
       `CLI: this CLI does not install ${NEXT} by itself yet. Run: npm install -g @catalyst-cloud/cli@${NEXT}`,
       `Cloud skills: this CLI does not install ${NEXT} by itself yet. Run: npx skills add https://github.com/coalesce-labs/catalyst-cloud-skills/tree/${"1".repeat(40)} --all -g`,
-      `Update this project's SDK: cd ${project} && npm install --save-exact @catalyst-cloud/sdk@${NEXT}`,
+      `Update this project's SDK: catalyst update sdk --project ${project}`,
       "Checked the approved release; nothing was changed.",
     ]);
     expect(report.exitCode).toBe(0);
@@ -210,5 +211,37 @@ describe("when the approval cannot be used, nothing moves", () => {
     const { ctx, options } = hostCase({ components: older });
     const report = await runUpdate(ctx, options("check"));
     expect(report.components.find((c) => c.id === "cli")).toMatchObject({ status: "installed_newer", action: null });
+  });
+});
+
+describe("a project's SDK changes only with its owner's say-so", () => {
+  it("POSITIVE CONTROL: an applying run leaves a notify-only project's bytes alone and updates an opted-in one", async () => {
+    const { home, ctx, options } = hostCase();
+    const notify = sdkProject(OLD);
+    const auto = sdkProject(OLD);
+    setProjectSdkPolicy(home, notify, "notify");
+    const registered = setProjectSdkPolicy(home, auto, "auto");
+    const before = snapshot(notify);
+    const calls: string[][] = [];
+
+    const report = await runUpdate(ctx, options("apply", { sdkExec: fakeNpm(calls) }));
+
+    expect(snapshot(notify)).toEqual(before);
+    expect(calls).toEqual([["npm", "install", "--save-exact", `@catalyst-cloud/sdk@${NEXT}`]]);
+    const byPath = Object.fromEntries(report.projects.map((p) => [p.path, p]));
+    expect(byPath[registered.path]).toMatchObject({ status: "current", applied: { outcome: "updated", moved: [{ from: OLD, to: NEXT }] } });
+    const lines = updateReportLines(report);
+    expect(lines.filter((l) => l.startsWith("Update this project's SDK:"))).toHaveLength(1);
+    expect(lines.find((l) => l.startsWith(`SDK ${registered.path}`))).toContain("updated");
+  });
+
+  it("a check never runs the package manager, even for an opted-in project", async () => {
+    const { home, ctx, options } = hostCase();
+    const auto = sdkProject(OLD);
+    setProjectSdkPolicy(home, auto, "auto");
+    const calls: string[][] = [];
+    const report = await runUpdate(ctx, options("check", { sdkExec: fakeNpm(calls) }));
+    expect(calls).toEqual([]);
+    expect(report.projects[0]).toMatchObject({ status: "update_available", applied: null });
   });
 });

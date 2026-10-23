@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { main } from "../src/cli";
 import { readUpdatePolicy, updatePolicyPathFor } from "../src/update-policy";
 import { makeCtx, tempHome } from "./helpers";
-import { answered, approved, CLI_VERSION, countingEngine, hostRelease, NEXT, runnerInstall, sdkProject } from "./update-fixtures";
+import { answered, approved, CLI_VERSION, countingEngine, fakeNpm, hostRelease, NEXT, OLD, runnerInstall, sdkProject } from "./update-fixtures";
 
 describe("catalyst update policy", () => {
   it("POSITIVE CONTROL: turning the CLI off says so, keeps the others, and saves it", async () => {
@@ -88,5 +88,42 @@ describe("catalyst runner update --check names every component", () => {
     // The fields scripts already read stay at the top, beside the new component list.
     expect(body).toMatchObject({ outcome: "planned", generation: 89, exitCode: 0, schemaVersion: 1 });
     expect((body.components as { id: string; status: string }[]).find((c) => c.id === "cli")).toMatchObject({ status: "held", reason: "owner_setting" });
+  });
+});
+
+describe("catalyst update sdk --project", () => {
+  it("POSITIVE CONTROL: one explicit update of one project, which leaves its automatic setting off", async () => {
+    const home = tempHome();
+    const dir = runnerInstall();
+    const project = sdkProject(OLD);
+    const engine = countingEngine(answered(hostRelease({ components: approved() })));
+    const calls: string[][] = [];
+    const ctx = makeCtx(home);
+    expect(await main(["update", "sdk", "--project", project, "--dir", dir], ctx, { update: { engine, sdkExec: fakeNpm(calls) } })).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(ctx.out).toEqual([
+      `@catalyst-cloud/sdk in ${project}: updated from ${OLD} to ${NEXT} with npm.`,
+      `Automatic SDK updates remain off for ${project}.`,
+    ]);
+    // The explicit update registers nothing and changes no setting.
+    expect(readUpdatePolicy(home).projects).toEqual([]);
+  });
+
+  it("with no usable approval it changes nothing and exits 1", async () => {
+    const home = tempHome();
+    const project = sdkProject(OLD);
+    const calls: string[][] = [];
+    const ctx = makeCtx(home);
+    expect(await main(["update", "sdk", "--project", project, "--dir", "/nonexistent-runner"], ctx, { update: { sdkExec: fakeNpm(calls) } })).toBe(1);
+    expect(ctx.out).toEqual(["Approved release unavailable: sign in with catalyst login.", "Nothing was changed."]);
+    expect(calls).toEqual([]);
+  });
+
+  it("turning a project's SDK updates on says release checks may update its package files", async () => {
+    const home = tempHome();
+    const project = sdkProject(OLD);
+    const ctx = makeCtx(home);
+    expect(await main(["update", "policy", "sdk", "on", "--project", project], ctx)).toBe(0);
+    expect(ctx.out[0]).toMatch(/^Automatic SDK updates are on for .+\. Release checks may update its package files\.$/);
   });
 });

@@ -9,8 +9,9 @@
 // same read, so the image half and the component half can never come from different approvals.
 //
 // This CLI applies the image components itself. For the CLI, the skills packs and the local replica
-// it reports the approved version and the exact command that installs it; a project's SDK is only
-// ever reported with its update command, and its files are never touched by a check.
+// it reports the approved version and the exact command that installs it. A project's SDK is
+// reported with its update command; an applying run changes a project's files only when its owner
+// turned that project's SDK updates on, and a check never does.
 import {
   compareVersions,
   hostApproval,
@@ -33,7 +34,7 @@ import {
   type UpdateComponent,
   type UpdatePolicy,
 } from "./update-policy.js";
-import { inspectSdkProject, type SdkProject } from "./update-sdk.js";
+import { applySdkUpdate, inspectSdkProject, type SdkApplyResult, type SdkExec, type SdkProject } from "./update-sdk.js";
 import {
   decideRelease,
   isRecord,
@@ -82,6 +83,8 @@ export interface ProjectReport extends SdkProject {
   registered: boolean;
   /** `notify` unless the owner turned this project's SDK updates on. */
   policy: "notify" | "auto";
+  /** What an applying run did to an opted-in project; null when it did nothing. */
+  applied: Pick<SdkApplyResult, "outcome" | "detail" | "moved"> | null;
 }
 
 export interface UpdateReport {
@@ -96,6 +99,8 @@ export interface UpdateReport {
   projects: ProjectReport[];
   /** The image engine's own result, when a runner is installed. */
   images: UpdateResult | null;
+  /** The parsed approval this report was decided against (internal; not printed). */
+  approved: ApprovedRelease | null;
   exitCode: number;
 }
 
@@ -109,6 +114,8 @@ export interface UpdateOptions {
   engine: () => RunnerUpdateEngine;
   /** The image result `runner update` already computed with the same engine, so it is not run twice. */
   imageResult?: UpdateResult;
+  /** Runs a project's package manager; tests pass a fake. */
+  sdkExec?: SdkExec;
 }
 
 export const COMPONENT_LABELS: Readonly<Record<UpdateComponent, string>> = {
@@ -262,13 +269,24 @@ function projectReports(policy: UpdatePolicy, release: ApprovedRelease | null, e
   const reports: ProjectReport[] = [];
   for (const project of policy.projects) {
     if (!projectIdentityHolds(project)) {
-      reports.push({ path: project.path, packageManager: null, packages: [], status: "unknown", reason: "project_identity_changed", command: null, registered: true, policy: project.sdk });
+      reports.push({
+        path: project.path,
+        packageManager: null,
+        packages: [],
+        status: "unknown",
+        reason: "project_identity_changed",
+        command: null,
+        packageManagerCommand: null,
+        registered: true,
+        policy: project.sdk,
+        applied: null,
+      });
       continue;
     }
-    reports.push({ ...inspectSdkProject(project.path, release), registered: true, policy: project.sdk });
+    reports.push({ ...inspectSdkProject(project.path, release), registered: true, policy: project.sdk, applied: null });
   }
   if (extra !== undefined && !reports.some((r) => r.path === extra))
-    reports.push({ ...inspectSdkProject(extra, release), registered: false, policy: "notify" });
+    reports.push({ ...inspectSdkProject(extra, release), registered: false, policy: "notify", applied: null });
   return reports;
 }
 
@@ -297,6 +315,7 @@ function applyImageResult(rows: ComponentReport[], result: UpdateResult): void {
 
 function aggregateExit(report: Omit<UpdateReport, "exitCode">): number {
   if (report.components.some((c) => c.status === "failed")) return 1;
+  if (report.projects.some((p) => p.applied?.outcome === "failed")) return 1;
   if (report.images && report.images.exitCode !== 0) return 1;
   // No usable approval for anything: the check could not answer.
   const imagesAnswered = report.components.some((c) => RELEASE_COMPONENTS.some((id) => id === c.id) && c.approved !== null);
@@ -350,6 +369,14 @@ export async function runUpdate(ctx: Ctx, options: UpdateOptions): Promise<Updat
         }
     }
   }
+  if (options.mode === "apply" && release !== null && crossTrain === null) {
+    // Only a project whose owner turned its SDK updates on, still the directory they registered.
+    for (const project of projects)
+      if (project.registered && project.policy === "auto" && project.status === "update_available") {
+        const result = applySdkUpdate(ctx.home, project.path, release, options.sdkExec);
+        Object.assign(project, result.project, { applied: { outcome: result.outcome, detail: result.detail, moved: result.moved } });
+      }
+  }
   if (options.mode === "apply" && release !== null) writeApprovalCache(ctx.home, { observedAtMs: ctx.now().getTime(), release });
 
   const report: Omit<UpdateReport, "exitCode"> = {
@@ -367,6 +394,7 @@ export async function runUpdate(ctx: Ctx, options: UpdateOptions): Promise<Updat
     components,
     projects,
     images: imageResult,
+    approved: release,
   };
   return { ...report, exitCode: aggregateExit(report) };
 }
@@ -402,8 +430,13 @@ const cell = (text: string, width: number) => (text.length >= width ? `${text} `
 function sdkRows(project: ProjectReport): { label: string; installed: string; approved: string; status: string }[] {
   if (project.packages.length === 0)
     return [{ label: `SDK ${project.path}`, installed: "-", approved: "-", status: project.status === "no_sdk" ? "no SDK declared" : `unknown (${project.reason})` }];
-  const status =
-    project.status === "update_available"
+  const status = project.applied
+    ? project.applied.outcome === "updated"
+      ? "updated"
+      : project.applied.outcome === "failed"
+        ? `failed (${project.applied.detail}); package files put back`
+        : `not changed (${project.applied.detail})`
+    : project.status === "update_available"
       ? project.policy === "notify"
         ? "notification only"
         : "update available"
@@ -452,7 +485,7 @@ export function updateReportLines(report: UpdateReport): string[] {
     if (c.action !== null && (c.status === "update_available" || c.status === "pending"))
       lines.push(`${COMPONENT_LABELS[c.id]}: this CLI does not install ${c.approved ?? "it"} by itself yet. Run: ${c.action}`);
   for (const project of report.projects)
-    if (project.command !== null) lines.push(`Update this project's SDK: ${project.command}`);
+    if (project.command !== null && project.applied?.outcome !== "updated") lines.push(`Update this project's SDK: ${project.command}`);
 
   if (unchanged) lines.push("Checked the approved release; nothing was changed.");
   else {
@@ -486,6 +519,8 @@ export function updateReportJson(report: UpdateReport): Record<string, unknown> 
       status: p.status,
       reason: p.reason,
       command: p.command,
+      packageManagerCommand: p.packageManagerCommand,
+      applied: p.applied,
     })),
     exitCode: report.exitCode,
   };

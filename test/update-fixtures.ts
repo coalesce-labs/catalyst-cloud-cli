@@ -1,11 +1,12 @@
 // update-fixtures.ts — shared builders for the CTC-6708 release-check tests: an approved component
 // record, the host desired-release answer that carries it, a fake image engine that counts its calls,
 // a runner installation, a signed-in config, an installed Cloud skills pack and an SDK project.
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { configPathFor, defaultReplicaDbFor, readManifest, type CustomerConfig } from "../src/config";
+import { configPathFor, readManifest, type CustomerConfig } from "../src/config";
 import type { DesiredReleaseRead, ReleaseComponent, RunnerUpdateEngine } from "../src/runner-update";
+import type { SdkExec } from "../src/update-sdk";
 
 const hex = (c: string) => c.repeat(64);
 const sha = (c: string) => c.repeat(40);
@@ -188,4 +189,26 @@ export function sdkProject(sdk: string, opts: { replicaNode?: string; dev?: bool
   return dir;
 }
 
-export const replicaDb = (home: string) => defaultReplicaDbFor(home);
+
+/** Stands in for npm: records each argv, and writes the versions it was asked for into package.json,
+ *  the lockfile and node_modules the way a real install would. */
+export function fakeNpm(calls: string[][], opts: { fail?: boolean } = {}): SdkExec {
+  return (argv, cwd) => {
+    calls.push([...argv]);
+    const manifest = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")) as Record<string, Record<string, string>>;
+    const lock = JSON.parse(readFileSync(join(cwd, "package-lock.json"), "utf8")) as { packages: Record<string, { version: string }> };
+    for (const spec of argv.filter((a) => a.startsWith("@catalyst-cloud/"))) {
+      const at = spec.lastIndexOf("@");
+      const name = spec.slice(0, at);
+      const version = spec.slice(at + 1);
+      const group = argv.includes("--save-dev") ? "devDependencies" : "dependencies";
+      manifest[group] = { ...manifest[group], [name]: version };
+      lock.packages[`node_modules/${name}`] = { version };
+      mkdirSync(join(cwd, "node_modules", ...name.split("/")), { recursive: true });
+      writeFileSync(join(cwd, "node_modules", ...name.split("/"), "package.json"), JSON.stringify({ name, version }));
+    }
+    writeFileSync(join(cwd, "package.json"), JSON.stringify(manifest, null, 2));
+    writeFileSync(join(cwd, "package-lock.json"), JSON.stringify(lock));
+    return opts.fail ? { status: 1, stderr: "npm ERR! network" } : { status: 0, stderr: "" };
+  };
+}

@@ -2,13 +2,22 @@
 // dependency in the customer's own project, pinned by their lockfile, so a release check only
 // reads it: the declared range, the lockfile's resolution and the installed package are read
 // separately (a manifest range is never reported as the installed version), and the owner is given
-// the one package-manager command that moves the project to the approved versions. This module
-// writes nothing; every file it opens is read-only.
+// the one command that moves the project to the approved versions. Reading writes nothing.
+//
+// The project's files change only through `applySdkUpdate`: when its owner runs
+// `catalyst update sdk --project <path>`, or has turned automatic SDK updates on for that project.
+// It runs the project's own package manager by argv (never a shell, never a full upgrade) with
+// exact versions in the dependency group each package already sits in, holds a per-project lock,
+// keeps the package files' bytes, puts them back if the install fails, and reads the result back
+// before calling it updated.
 //
 // Only train members the project already declares are named. Each uses its own approved version:
 // the SDK and its replica modules may sit on different patches of one train.
-import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { configDirFor } from "./config.js";
 import { compareVersions, exactVersion, type ApprovedRelease, type ReleaseMember } from "./approved-release.js";
 import { isRecord } from "./runner-update.js";
 
@@ -51,6 +60,8 @@ export interface SdkProject {
   reason: string;
   /** The one command that moves the project to the approved versions, or null. */
   command: string | null;
+  /** The package manager invocation that command runs, for a person who prefers to run it directly. */
+  packageManagerCommand: string | null;
 }
 
 function readJson(path: string): unknown {
@@ -95,27 +106,37 @@ function installedVersion(dir: string, name: string): string | null {
 
 const quote = (value: string) => (/^[A-Za-z0-9_./@:=-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`);
 
-/** The exact-version add command for the declared packages, keeping each package's dependency group. */
-export function sdkUpdateCommand(dir: string, manager: PackageManager, packages: readonly SdkPackage[]): string | null {
-  const moves = packages.filter((p) => p.approved !== null);
-  if (moves.length === 0) return null;
+/** The exact-version add invocations for the declared packages, one per dependency group, so each
+ *  package stays in the group it is already in. Every spec is a known package at an exact version. */
+export function sdkUpdateArgv(manager: PackageManager, packages: readonly SdkPackage[]): string[][] {
   const byGroup = new Map<DependencyGroup, string[]>();
-  for (const p of moves) byGroup.set(p.group, [...(byGroup.get(p.group) ?? []), `${p.name}@${p.approved}`]);
-  const commands = [...byGroup].map(([group, specs]) => {
+  for (const p of packages) if (p.approved !== null) byGroup.set(p.group, [...(byGroup.get(p.group) ?? []), `${p.name}@${p.approved}`]);
+  return [...byGroup].map(([group, specs]) => {
     const flags: Record<PackageManager, string[]> = {
       npm: ["install", "--save-exact", ...(group === "devDependencies" ? ["--save-dev"] : group === "optionalDependencies" ? ["--save-optional"] : [])],
       pnpm: ["add", "--save-exact", ...(group === "devDependencies" ? ["--save-dev"] : group === "optionalDependencies" ? ["--save-optional"] : [])],
       bun: ["add", "--exact", ...(group === "devDependencies" ? ["--dev"] : group === "optionalDependencies" ? ["--optional"] : [])],
       yarn: ["add", "--exact", ...(group === "devDependencies" ? ["--dev"] : group === "optionalDependencies" ? ["--optional"] : [])],
     };
-    return [manager, ...flags[manager], ...specs].join(" ");
+    return [manager, ...flags[manager], ...specs];
   });
-  return `cd ${quote(dir)} && ${commands.join(" && ")}`;
+}
+
+/** The same move as one command a person can paste. */
+export function sdkUpdateCommand(dir: string, manager: PackageManager, packages: readonly SdkPackage[]): string | null {
+  const argv = sdkUpdateArgv(manager, packages);
+  if (argv.length === 0) return null;
+  return `cd ${quote(dir)} && ${argv.map((a) => a.map(quote).join(" ")).join(" && ")}`;
+}
+
+/** What `catalyst update sdk` tells the owner to run: this CLI's own explicit, one-project update. */
+export function catalystSdkCommand(dir: string): string {
+  return `catalyst update sdk --project ${quote(dir)}`;
 }
 
 /** Read one project's SDK packages against `release` (null when no approved record is usable). */
 export function inspectSdkProject(dir: string, release: ApprovedRelease | null): SdkProject {
-  const base = { path: dir, packageManager: null, packages: [], command: null } satisfies Partial<SdkProject>;
+  const base = { path: dir, packageManager: null, packages: [], command: null, packageManagerCommand: null } satisfies Partial<SdkProject>;
   const manifest = readJson(join(dir, "package.json"));
   if (!isRecord(manifest)) return { ...base, status: "unknown", reason: "package_json_unreadable" };
   const packages: SdkPackage[] = [];
@@ -149,7 +170,91 @@ export function inspectSdkProject(dir: string, release: ApprovedRelease | null):
     pairs.push({ current, approved: p.approved });
   }
   if (pairs.some((v) => compareVersions(v.current, v.approved) < 0))
-    return { ...project, status: "update_available", reason: "behind_approved", command: sdkUpdateCommand(dir, detected.manager, packages) };
+    return {
+      ...project,
+      status: "update_available",
+      reason: "behind_approved",
+      command: catalystSdkCommand(dir),
+      packageManagerCommand: sdkUpdateCommand(dir, detected.manager, packages),
+    };
   if (pairs.some((v) => compareVersions(v.current, v.approved) > 0)) return { ...project, status: "installed_newer", reason: "installed_newer" };
   return { ...project, status: "current", reason: "current" };
+}
+
+/** Runs one package-manager invocation in `cwd`, by argv. Tests pass a fake. */
+export type SdkExec = (argv: readonly string[], cwd: string) => { status: number | null; stderr: string };
+
+export const spawnPackageManager: SdkExec = (argv, cwd) => {
+  const [cmd, ...args] = argv;
+  if (cmd === undefined) return { status: 1, stderr: "no command" };
+  const run = spawnSync(cmd, args, { cwd, stdio: ["ignore", "ignore", "pipe"], encoding: "utf8", timeout: 10 * 60_000 });
+  return { status: run.error ? 1 : run.status, stderr: run.error ? run.error.message : (run.stderr ?? "") };
+};
+
+export interface SdkApplyResult {
+  outcome: "updated" | "current" | "refused" | "failed";
+  /** A reason code: why it was refused or failed, or what it did. */
+  detail: string;
+  /** Each moved package's version before and after. */
+  moved: { name: string; from: string; to: string }[];
+  project: SdkProject;
+}
+
+/** The package files a manager rewrites: the manifest and every lockfile present. */
+function packageFiles(dir: string): string[] {
+  return ["package.json", ...Object.values(LOCKFILES).flat()].filter((f) => existsSync(join(dir, f)));
+}
+
+function takeProjectLock(home: string, dir: string): string | null {
+  const locks = join(configDirFor(home), "sdk-update-locks");
+  mkdirSync(locks, { recursive: true, mode: 0o700 });
+  const path = join(locks, `${createHash("sha256").update(dir).digest("hex").slice(0, 32)}.lock`);
+  try {
+    closeSync(openSync(path, "wx", 0o600));
+    return path;
+  } catch {
+    return null;
+  }
+}
+
+/** Move one project's declared SDK packages to their approved versions with its own manager. */
+export function applySdkUpdate(home: string, dir: string, release: ApprovedRelease, exec: SdkExec = spawnPackageManager): SdkApplyResult {
+  const project = inspectSdkProject(dir, release);
+  if (project.status === "current") return { outcome: "current", detail: "current", moved: [], project };
+  if (project.status !== "update_available" || project.packageManager === null)
+    return { outcome: "refused", detail: project.reason, moved: [], project };
+  const manager = project.packageManager;
+  const lock = takeProjectLock(home, dir);
+  if (lock === null) return { outcome: "refused", detail: "update_running", moved: [], project };
+  try {
+    const kept = new Map(packageFiles(dir).map((f) => [f, readFileSync(join(dir, f))]));
+    const failed = (detail: string): SdkApplyResult => {
+      // Put back only files that still differ from what this run kept; nothing else is touched.
+      for (const [file, bytes] of kept) {
+        const path = join(dir, file);
+        const now = existsSync(path) ? readFileSync(path) : null;
+        if (now === null || !now.equals(bytes)) writeFileSync(path, bytes);
+      }
+      return { outcome: "failed", detail, moved: [], project: inspectSdkProject(dir, release) };
+    };
+    for (const argv of sdkUpdateArgv(manager, project.packages)) {
+      const run = exec(argv, dir);
+      if (run.status !== 0) return failed("package_manager_failed");
+    }
+    const after = inspectSdkProject(dir, release);
+    const moved: SdkApplyResult["moved"] = [];
+    for (const p of after.packages) {
+      const before = project.packages.find((q) => q.name === p.name);
+      const now = p.installed ?? p.locked;
+      if (now === null || p.approved === null || compareVersions(now, p.approved) !== 0) return failed("verify_failed");
+      moved.push({ name: p.name, from: before?.installed ?? before?.locked ?? before?.declared ?? "unknown", to: now });
+    }
+    return { outcome: "updated", detail: manager, moved, project: after };
+  } finally {
+    try {
+      unlinkSync(lock);
+    } catch {
+      // released already
+    }
+  }
 }

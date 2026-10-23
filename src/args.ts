@@ -602,7 +602,7 @@ export const VERB_USAGE: Record<string, string> = {
   runner:
     "runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts] | runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off] [--json]",
   update:
-    "update [--check] [--project <absolute path>] [--dir <runner directory>] | update policy [<component> on|off] | update policy sdk on|off --project <absolute path> [--json]   (components: runner, supervisor, watchdog, cli, skills-cloud, skills-dev, replica)",
+    "update [--check] [--project <absolute path>] [--dir <runner directory>] | update sdk --project <absolute path> | update policy [<component> on|off] | update policy sdk on|off --project <absolute path> [--json]   (components: runner, supervisor, watchdog, cli, skills-cloud, skills-dev, replica)",
   setup:
     "setup [onboard options]   (sets up Catalyst step by step; same as catalyst onboard) | setup --engine <file> --engine-sha256 <hex> [-- <install options>]   (run by install.sh; install.sh --help lists the options)",
   login:
