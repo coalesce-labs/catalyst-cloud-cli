@@ -47,6 +47,9 @@ export interface FixtureServer {
    *  this HTTP status instead of the NDJSON body, so a test can drive a replica writer's snapshot pull
    *  into a real, repeated failure. */
   snapshotStatus?: number;
+  /** CTC-6569 — when set, the full-seed branch of `/api/v1/snapshot` waits this many ms before it
+   *  answers, the way the mirror prepares a large workspace's snapshot before its first byte. */
+  snapshotDelayMs?: number;
   budgetExhausted: boolean;
   /** CTC-1953/CTC-1954 ship ahead of some tenants' mirror; `false` makes those two routes 404 the
    *  way an older cloud does, so the bundle's "needs a newer cloud" path meets a real 404. */
@@ -1070,6 +1073,7 @@ export async function startMeFixture(
           accountId: FIXTURE_ACCOUNT,
           cursor: state.headCursor,
         });
+      if (state.snapshotDelayMs !== undefined) await new Promise((r) => setTimeout(r, state.snapshotDelayMs));
       if (state.snapshotStatus !== undefined)
         return send(state.snapshotStatus, { error: "snapshot unavailable" });
       if (url.searchParams.get("account") !== FIXTURE_ACCOUNT)
