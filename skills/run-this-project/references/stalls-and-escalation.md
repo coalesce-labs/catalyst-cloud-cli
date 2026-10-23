@@ -24,7 +24,7 @@ Quote a reason the table does not know as the explainer spelled it.
 
 ## Shared causes are one note
 
-When several tickets are offered and nothing takes them, or the explainer names a routing, slot, provider or image condition, the cause is shared (coding-account headroom, a provider outage, a paused repository, a bad runner image). Write one summary line naming the condition and the tickets it holds. `catalyst accounts` reads coding-account status; enrolling or pausing one is the settings page.
+When several tickets are offered and nothing takes them, or the explainer names a routing, slot, provider or image condition, the cause is shared (coding-account headroom, a provider outage, a paused repository, a bad runner image). Write one summary line naming the condition and the tickets it holds. For a paused repository, `catalyst repo status` says who paused it, when and why; put that in the line, and leave resuming (`catalyst repo resume <owner/name>`) to a workspace owner or admin. `catalyst accounts` reads coding-account status; enrolling or pausing one is the settings page.
 
 ## Escalate inward
 
