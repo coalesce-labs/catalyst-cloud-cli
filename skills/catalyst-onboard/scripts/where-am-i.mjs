@@ -32,7 +32,7 @@ const NOTES = [
   "Reads, in this order: `status` (machine), `ready --json` (machine checks and project checks, kept apart),",
   "`replica status --probe --json` and `events status --from-cache --probe --json` (optional local freshness),",
   "`me --json` and personal connection statuses (person), `contract --path …` for the account, the projects and the repositories,",
-  "`contract --path codingAccounts` and `accounts --json` (coding accounts, and which one needs a new credential), and each",
+  "`contract --path codingAccounts` and `accounts --all --json` (coding accounts, and which one needs a new credential), and each",
   "project's hosts_current check with its fixedWhere (host), and each project's environment_declared check with its per-repository notes (repository declarations). The teams read is refreshed, so a mapping just saved reads back mapped.",
   "Reads `capabilities --json` once: when the installed CLI can run a step for this person's role (`team check`, `team map`), the next step is that command; otherwise the page, with who can.",
   "Reads `legacy --json` when the CLI has the verb: leftovers of the old local Catalyst runtime become a machine line and a note; removing them is the person's yes.",
@@ -85,6 +85,10 @@ const verbAdminOnly = (verb) => {
   const c = capability(verb);
   return c?.availability === "available" && c.needs === "admin" && !canManage();
 };
+// `catalyst onboard` starts the workspace consents and registers a repository; an older CLI has no
+// such verb, and then the step stays the page.
+const onboardAvailable = () => capability("onboard")?.availability === "available";
+const UPDATE_CLI = "npm install -g @catalyst-cloud/cli@latest";
 // `blocking` is false for a finding that is real and reportable but does not stop the next step —
 // an unmatched Linear identity is the one that matters: it must be said, and it must not become the
 // thing the person is told to go and do before they can map a project.
@@ -335,12 +339,12 @@ if (!connected) {
         ? "you"
         : matched
           ? null
-          : "a workspace owner or admin",
+          : "you",
       personalGrantIncomplete
         ? "catalyst connections personal <provider> start or status"
         : matched
           ? null
-          : link("/settings/account"),
+          : "catalyst identity linear options",
       false,
     );
   }
@@ -424,7 +428,7 @@ if (!connected) {
         ...envLines,
       ],
       "a workspace owner or admin",
-      link("/settings/connections"),
+      onboardAvailable() ? "catalyst onboard" : link("/settings/connections"),
     );
   }
 }
@@ -538,7 +542,7 @@ if (!connected) {
       );
       blockedProjects.push({
         key,
-        action: `fix ${key}'s blocking check${ids.length === 1 ? "" : "s"} (${ids.join(", ") || "see the projects lines"}): ${how || owner}; then run catalyst team check ${key} (or press Re-check) and run this again`,
+        action: `fix ${key}'s blocking check${ids.length === 1 ? "" : "s"} (${ids.join(", ") || "see the projects lines"}): ${how || owner}; then run catalyst team check ${key} and run this again`,
         owner,
       });
     }
@@ -565,7 +569,11 @@ if (!connected) {
       : "a workspace owner or admin";
     const mapWhere = verbAvailable("team map")
       ? "catalyst team list"
-      : link("/settings/linear-teams");
+      : verbAdminOnly("team map")
+        ? "catalyst team map <KEY>"
+        : capability("team map")
+          ? link("/settings/projects")
+          : UPDATE_CLI;
     const projectOwner =
       blockedProjects.length > 0 ? blockedProjects[0].owner : mapOwner;
     const projectWhere = blockedProjects.length > 0 ? null : mapWhere;
@@ -653,7 +661,9 @@ if (!connected) {
       rows.length > 0 ? "ok" : "unfinished",
       lines,
       "a workspace owner or admin",
-      link("/settings/projects"),
+      onboardAvailable()
+        ? "catalyst onboard --team <KEY> --repo <owner/name>"
+        : link("/settings/projects"),
     );
   }
 }
@@ -706,7 +716,8 @@ const credentialProblem = (a) => {
   return null;
 };
 const readAccountRows = () => {
-  const acc = runCli(["accounts", "--json"]);
+  // --all: the CLI leaves removed accounts out by default, and the retire note needs them.
+  const acc = runCli(["accounts", "--all", "--json"]);
   const doc = tryJson(acc.stdout);
   const rows = Array.isArray(doc)
     ? doc
@@ -908,8 +919,9 @@ if (!connected) {
   }
 }
 
-// the Re-check step, as a command when this person can run it, else as the page with the
-// person who can. `team check` is the CLI twin of the page's Re-check button (admin or owner).
+// the re-check step, always `catalyst team check`: run it when this person can, name the owner or
+// admin who can otherwise. A CLI without the verb is told to update; only a cloud that does not
+// serve the route yet falls back to the projects page.
 const mappedKeys = () =>
   (teamRows ?? [])
     .map((t) => t.key ?? t.id)
@@ -925,14 +937,21 @@ const recheckStep = () => {
     };
   if (cmds.length > 0 && verbAdminOnly("team check"))
     return {
-      action: `a workspace owner or admin runs ${cmds.join(" and ")} (or presses Re-check on the projects page); then run this again`,
+      action: `a workspace owner or admin runs ${cmds.join(" and ")}; then run this again`,
       owner: "a workspace owner or admin",
-      where: link("/settings/linear-teams"),
+      where: cmds[0],
+    };
+  if (capability("team check"))
+    return {
+      action:
+        "this cloud does not serve catalyst team check yet, so a workspace owner or admin re-checks the project on the projects page; then run this again",
+      owner: "a workspace owner or admin",
+      where: link("/settings/projects"),
     };
   return {
-    action: "press Re-check on the projects page, then run this again",
+    action: `update the CLI (${UPDATE_CLI}), then a workspace owner or admin runs catalyst team check ${cmds.length > 0 ? mappedKeys()[0] : "<KEY>"}; then run this again`,
     owner: "a workspace owner or admin",
-    where: link("/settings/linear-teams"),
+    where: UPDATE_CLI,
   };
 };
 
@@ -989,7 +1008,7 @@ if (!connected) {
           : "no project has a readiness check yet, so whether a host is connected cannot be read.",
       ],
       teamRows === null ? "a workspace owner or admin" : step.owner,
-      teamRows === null ? link("/settings/linear-teams") : step.where,
+      teamRows === null ? "catalyst contract --refresh" : step.where,
     ).next =
       teamRows === null
         ? "refresh the contract (catalyst contract --refresh), then run this again; the project list could not be read, so the host check cannot be either"
@@ -1030,7 +1049,7 @@ const DECL_INSTRUMENT =
   "environment_declared in catalyst contract --path teams";
 const DECL_REASONS = {
   no_team_repo_default: {
-    text: "no repository is the project's default yet: register one and make it the default",
+    text: "no repository is the project's default yet: register one and make it the default (catalyst onboard --team <KEY> --repo <owner/name> registers it; the default is chosen on Your projects, with no command yet)",
     who: "a workspace owner or admin",
     page: "/settings/projects",
   },
@@ -1050,7 +1069,7 @@ const DECL_REASONS = {
     page: null,
   },
   declaration_awaiting_approval: {
-    text: "the declaration is proposed and waits for approval: Settings → Your projects → the project → Repositories → the repository → Environment → Setup declaration → Approve this revision",
+    text: "the declaration is proposed and waits for approval, because no review approved it (a non-author approval of the merged head, or a merge by an owner or admin): approve it at Settings → Your projects → the project → Repositories → the repository → Environment → Setup declaration → Approve this revision (no command approves one repository's revision yet)",
     who: "a workspace owner or admin",
     page: "/settings/projects",
   },
@@ -1058,7 +1077,7 @@ const DECL_REASONS = {
 const DECL_DO =
   "write .catalyst/catalyst.toml with references/declaring-a-repository.md, then open a pull request";
 let declNext =
-  "commit .catalyst/catalyst.toml to the repository and have an owner or admin approve it";
+  "merge .catalyst/catalyst.toml through a pull request that someone other than the author approves; that review approves it";
 if (!connected) {
   add(
     "repository declarations",
@@ -1123,9 +1142,10 @@ if (!connected) {
   let unknown = false;
   const describe = (reason) =>
     DECL_REASONS[reason] ?? {
-      text: `environment_declared ${reason ?? "failed"} (a reason this bundle does not know; read it on the page)`,
+      text: `environment_declared ${reason ?? "failed"} (a reason this bundle does not know; catalyst ready --json prints its fix line)`,
       who: "a workspace owner or admin",
-      page: "/settings/projects",
+      page: null,
+      do: "catalyst ready --json",
     };
   const flag = (team, repo, reason) => {
     const r = describe(reason);
@@ -1133,7 +1153,7 @@ if (!connected) {
     if (verdict === "ok") declNext = `${repo ? `${repo}: ` : ""}${r.text}`;
     verdict = "unfinished";
     owner ??= r.who;
-    where ??= r.page === null ? DECL_DO : link(r.page);
+    where ??= r.do ?? (r.page === null ? DECL_DO : link(r.page));
   };
   if (found.length === 0) {
     lines.push(
@@ -1169,7 +1189,7 @@ if (!connected) {
   } else {
     if (verdict !== "ok")
       lines.push(
-        "Names only: a value never passes through this script or the file. The person enters values on the repository's Environment page.",
+        "Names only: a value never passes through this script or the file. The person enters each value at a hidden prompt: catalyst var set NAME --repo <owner/name>, or catalyst secret set NAME --repo <owner/name> for a secret.",
       );
     add(
       "repository declarations",
@@ -1285,18 +1305,22 @@ const NEXT = {
       : personalGithubIncomplete
         ? "install the tenant GitHub App and register its repository before connecting your personal GitHub account"
         : "get this person's seat and Linear identity sorted",
-  account:
-    "connect the Linear integration on the Integrations page (the GitHub App comes later, with the repository)",
+  account: onboardAvailable()
+    ? "start the Linear integration with catalyst onboard and hand over the consent link it prints (the GitHub App comes later, with the repository)"
+    : "connect the Linear integration on the Integrations page (the GitHub App comes later, with the repository)",
   projects:
     blockedProjects.length > 0
       ? blockedProjects.map((b) => b.action).join("; and ")
       : verbAvailable("team map")
         ? "pick ONE project: run catalyst team list, then catalyst team map <KEY> (or team adopt <KEY>) and approve its preview"
         : verbAdminOnly("team map")
-          ? "a workspace owner or admin maps ONE project: catalyst team map <KEY>, or Map my stages on the projects page"
-          : "pick ONE project and map its stages (or adopt the Catalyst workflow)",
-  repositories:
-    "install the GitHub App on the Integrations page, granting it the repository you want worked; register it on Your projects and attach it to the project before continuing",
+          ? "a workspace owner or admin maps ONE project: catalyst team map <KEY> (or team adopt <KEY>), approving its preview"
+          : capability("team map")
+            ? "pick ONE project and map its stages (or adopt the Catalyst workflow) on the projects page; this cloud does not serve catalyst team map yet"
+            : `pick ONE project and map its stages with catalyst team map <KEY> (or team adopt <KEY>); this CLI is too old for that verb, so update it first: ${UPDATE_CLI}`,
+  repositories: onboardAvailable()
+    ? "install the GitHub App from the link catalyst onboard prints, granting it the repository you want worked; then register it and attach it to the project with catalyst onboard --team <KEY> --repo <owner/name> before continuing"
+    : "install the GitHub App on the Integrations page, granting it the repository you want worked; register it on Your projects and attach it to the project before continuing",
   "coding accounts": accountsNext,
   "repository declarations": declNext,
   "repository agent setup": repoNext ?? "read the checkout's agent setup again",
@@ -1365,7 +1389,7 @@ function versionAdvice() {
   const latest = npm.error || npm.status !== 0 ? null : semver(npm.stdout);
   // The installer is the update path, not `catalyst install`. Its command is on the app's
   // setup page; this names the script it fetches rather than composing the request here.
-  const reinstall = `re-run the install command from the app's setup page (it installs from ${link("/install.sh")})`;
+  const reinstall = `run ${UPDATE_CLI}, or re-run the install script at ${link("/install.sh")}`;
   if (installed === null || latest === null) {
     return {
       text: `Whether a newer Catalyst CLI is published could not be checked. You can ${reinstall}; if this still appears afterwards, tell the Catalyst team.`,

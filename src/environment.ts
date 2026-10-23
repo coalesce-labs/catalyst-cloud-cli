@@ -132,7 +132,7 @@ export function renderRead(r: EnvironmentRead): string[] {
   // never a refusal: the secret may be created next, and a repo may supply the name at checkout.
   const unresolved = r.unresolvedReferences ?? [];
   if (unresolved.length > 0) {
-    lines.push(`referenced but not set on this tenant yet: ${unresolved.join(", ")} — add them in the app, or a phase that needs one will fail on it`);
+    lines.push(`referenced but not set in this workspace yet: ${unresolved.join(", ")}. Set them with catalyst var set or catalyst secret set, or a phase that needs one will fail on it`);
   }
   return lines;
 }

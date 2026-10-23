@@ -8,9 +8,9 @@ One coding account is enough to start. A second gives the router somewhere to go
 
 ### The kinds, and enrolling
 
-Settings → AI accounts lists the providers this workspace can connect and what each one asks for; an API key is billed per token by its provider. Do not promise a provider. Ask the person to open Settings → AI accounts and choose from the providers it lists; if the one they name is not there, say so and ask whether they have a key from one that is.
+Settings → AI accounts lists the providers this workspace can connect and what each one asks for; an API key is billed per token by its provider. Do not promise a provider. Ask which provider the person has a key for. No command lists the providers yet, so check the name against that page; if it is not there, say so and ask whether they have a key from one that is.
 
-Enrolling is a browser step by construction: on Settings → AI accounts, an owner or admin picks the provider, labels the account, and pastes the key into a write-only field. If the page says Catalyst takes over a login, say so before the paste. Call an account by its label, else its email, else its slot (`displayName` in `catalyst accounts --json`).
+Adding an account has no command yet, so it is a browser step for now: on Settings → AI accounts, an owner or admin picks the provider, labels the account, and pastes the key into a write-only field. If the page says Catalyst takes over a login, say so before the paste. Call an account by its label, else its email, else its slot (`displayName` in `catalyst accounts --json`).
 
 ### The states
 
@@ -19,8 +19,8 @@ Enrolling is a browser step by construction: on Settings → AI accounts, an own
 | state | what it says | what to do |
 | -- | -- | -- |
 | `enrolled` | one is active; another can still have a dead credential | "<provider> account <slot> needs a new credential" is the next step: `references/replacing-a-credential.md`. `unreadable` detail: read again later |
-| `none_enrolled` | none enrolled | hand over the page to the enroller the contract names |
-| `inactive` | every account is out of rotation | reactivate one on its page, never enrol another |
+| `none_enrolled` | none enrolled | hand over the page to the enroller the contract names; there is no command to add one yet |
+| `inactive` | every account is out of rotation | reactivate one on its page (no command does this yet), never enrol another |
 | `unread` | the cloud could not read them | it is not "no accounts"; read again later |
 
 **A cancelled or ended account** stays for reporting, unused, and does not hold setup up; say so in one clause. It keeps its own login: a token from another login would put a live account onto a dead slot. It stays enrolled rather than retired or deleted, and is reactivated on its page only if it can run again.

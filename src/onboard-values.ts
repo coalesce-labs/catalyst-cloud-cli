@@ -61,10 +61,24 @@ export function onboardValuesAdapter(
       const cfg = loadConfig(ctx.home);
       const teamId = selectedOnboardTeam(journal);
       if (!cfg || !teamId) return waiting("required_values_unverified");
-      const read = async (timeoutMs?: number): Promise<Reading> => {
+      const read = async (timeoutMs?: number, readSignal = signal): Promise<Reading> => {
         let loaded: Awaited<ReturnType<typeof loadFreshTeamContract>>;
         try {
-          loaded = await loadFreshTeamContract(ctx, cfg, [teamId], signal, timeoutMs);
+          // The contract transport owns another timeout. Carry our caller's cancellation through
+          // its fetch too, including response-body reads and any credential refresh.
+          const readCtx: Ctx = readSignal
+            ? {
+                ...ctx,
+                fetch: (input, init) =>
+                  ctx.fetch(input, {
+                    ...init,
+                    signal: init?.signal
+                      ? AbortSignal.any([readSignal, init.signal])
+                      : readSignal,
+                  }),
+              }
+            : ctx;
+          loaded = await loadFreshTeamContract(readCtx, cfg, [teamId], readSignal, timeoutMs);
         } catch {
           return { kind: "unverified" };
         }
@@ -89,32 +103,49 @@ export function onboardValuesAdapter(
         deps.message?.(
           `Waiting for Catalyst to read the settings of ${named(reading.repositories)} (up to 1 minute)…`,
         );
-        // Bounded twice: by the clock, and by attempts (a test's clock may stand still).
+        // One deadline covers sleep, readiness refresh and contract/body reads. Attempts also
+        // bound an injected sleep whose clock stands still.
         const deadline = Date.now() + VALUES_WAIT_MS;
-        let release = () => {};
-        const stopped = new Promise<void>((resolve) => {
-          if (signal?.aborted) return resolve();
-          const onAbort = () => resolve();
-          signal?.addEventListener("abort", onAbort, { once: true });
-          release = () => signal?.removeEventListener("abort", onAbort);
+        const owned = new AbortController();
+        const waitSignal = signal ? AbortSignal.any([signal, owned.signal]) : owned.signal;
+        let stop = () => {};
+        const stopped = new Promise<null>((resolve) => {
+          stop = () => {
+            owned.abort();
+            resolve(null);
+          };
         });
-        for (
-          let attempt = 0;
-          reading.kind === "unread" &&
-          attempt < VALUES_WAIT_MS / VALUES_POLL_MS &&
-          Date.now() < deadline &&
-          !signal?.aborted;
-          attempt++
-        ) {
-          // Ctrl-C ends the pause at once, not at the next poll.
-          await Promise.race([
-            deps.sleep(Math.min(VALUES_POLL_MS, Math.max(0, deadline - Date.now()))),
-            stopped,
-          ]);
-          if (signal?.aborted) break;
-          reading = await read(WAIT_READ_TIMEOUT_MS);
+        const timer = setTimeout(stop, VALUES_WAIT_MS);
+        signal?.addEventListener("abort", stop, { once: true });
+        try {
+          if (signal?.aborted) stop();
+          for (
+            let attempt = 0;
+            reading.kind === "unread" &&
+            attempt < VALUES_WAIT_MS / VALUES_POLL_MS &&
+            Date.now() < deadline &&
+            !waitSignal.aborted;
+            attempt++
+          ) {
+            // Ctrl-C or expiry ends either stage at once, even if an injected promise stalls.
+            await Promise.race([
+              deps.sleep(Math.min(VALUES_POLL_MS, Math.max(0, deadline - Date.now()))),
+              stopped,
+            ]);
+            if (waitSignal.aborted || Date.now() >= deadline) break;
+            const next = await Promise.race([
+              read(Math.min(WAIT_READ_TIMEOUT_MS, deadline - Date.now()), waitSignal),
+              stopped,
+            ]);
+            // A result after expiry says nothing about the last observed unread verdict.
+            if (waitSignal.aborted || Date.now() >= deadline || !next) break;
+            reading = next;
+          }
+        } finally {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", stop);
+          owned.abort();
         }
-        release();
       }
       if (signal?.aborted) return waiting("interrupted");
       if (reading.kind === "pass") return { state: "done", evidence: { team: teamId } };

@@ -46,6 +46,10 @@ describe("the table itself", () => {
     expect(CAPABILITIES.find((c) => c.verb === "onboard")?.bootstrapHandoff).toBe(true);
     // CTC-4633: the installer forwards --headless only to a CLI that says it takes it.
     expect(CAPABILITIES.find((c) => c.verb === "onboard")?.headless).toBe(true);
+    expect(CAPABILITIES.find((c) => c.verb === "setup")).toMatchObject({
+      engineProtocol: 1,
+      bootstrapHandoffVersion: 2,
+    });
   });
 
   test("every verb the table names is one the dispatcher knows (the first word), and the verb has usage and a flag table", () => {
@@ -59,9 +63,11 @@ describe("the table itself", () => {
   test("the team verbs the setup guide relies on are declared admin, and reads are member", () => {
     const needs = Object.fromEntries(CAPABILITIES.map((c) => [c.verb, c.needs]));
     expect(needs["team check"]).toBe("admin");
+    expect(needs["env import"]).toBe("admin");
     expect(needs["team map"]).toBe("admin");
     expect(needs["team adopt"]).toBe("admin");
     expect(needs["team list"]).toBe("member");
+    expect(needs["mcp status"]).toBe("member");
     expect(needs["ready"]).toBe("member");
     expect(needs["environment approve"]).toBe("admin");
     expect(needs["project wip-limit get"]).toBe("member");
@@ -132,4 +138,11 @@ describe("the verb", () => {
     expect(await main(["capabilities", "--json"], offline)).toBe(0);
     expect(JSON.parse(offline.out.join("\n")).capabilities.length).toBe(CAPABILITIES.length);
   });
+});
+
+test("mcp status is an available member read with no agent route dependencies", () => {
+  expect(CAPABILITIES.find((row) => row.verb === "mcp status")).toMatchObject({
+    verb: "mcp status", needs: "member", routes: [], since: "0.16.24",
+  });
+  expect(reportCapabilities(null).find((row) => row.verb === "mcp status")?.availability).toBe("available");
 });

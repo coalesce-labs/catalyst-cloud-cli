@@ -149,12 +149,14 @@ async function inventory(
  * (the server's isUsableCodingAccount): any provider, any member's account, and a canceled
  * subscription keeps working until its paid access ends. */
 function unusableCause(row: Slot, now: number): string | null {
-  if (row.declaredState !== "active") return "coding_account_inactive";
+  // CTC-6204: ended first. A revoked account is usually also declared inactive, and "turn it on"
+  // is advice it can never take.
   if (
     row.revokedAtMs !== null ||
     (row.accessEndsAtMs !== null && row.accessEndsAtMs <= now)
   )
     return "coding_account_ended";
+  if (row.declaredState !== "active") return "coding_account_inactive";
   if (row.needsCredential) return "coding_account_needs_login";
   if (row.quarantined) return "coding_account_quarantined";
   if (row.walled) return "coding_account_walled";

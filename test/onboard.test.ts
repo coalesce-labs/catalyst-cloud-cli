@@ -702,7 +702,7 @@ describe("plain finish names what is left (CTC-4477)", () => {
     expect(text).toContain("Next, when you want:");
     expect(text).toContain("Review repository settings: ");
     expect(text).toContain(
-      "Check the repository's values: Set the missing values on the repository's Environment page: open https://cloud.example.dev/settings/projects, then the project, then the repository. Then run catalyst setup.",
+      "Check the repository's values: Set the missing values with catalyst var set NAME --repo <owner/name> (catalyst secret set NAME --repo <owner/name> for a secret). Then run catalyst setup.",
     );
     expect(text).toContain("Schedule the daily update: ");
     expect(text).toContain(

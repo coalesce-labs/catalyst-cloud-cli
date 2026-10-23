@@ -123,7 +123,7 @@ describe("values", () => {
     expect(setupStepView({ id: "values", state: "done" }).outcome).toBe("values set");
   });
 
-  test("missing values wait with the variable names and the Environment page, never a value", async () => {
+  test("missing values wait with the variable names and the command that sets them, never a value", async () => {
     server.contract.teams[0]!.readiness.checks.push({
       id: "required_values",
       state: "fail",
@@ -135,7 +135,7 @@ describe("values", () => {
     expect(result).toMatchObject({ state: "waiting", reason: "required_values_missing" });
     const step = { id: "values" as const, state: "waiting" as const, reason: result.reason, evidence: result.evidence };
     expect(onboardReasonText(step, { baseUrl: BASE })).toBe(
-      `Set STRIPE_KEY, DATABASE_URL on the repository's Environment page: open ${BASE}/settings/projects, then the project, then the repository. Then run catalyst setup.`,
+      `Set STRIPE_KEY, DATABASE_URL with catalyst var set NAME --repo <owner/name> (catalyst secret set NAME --repo <owner/name> for a secret). Then run catalyst setup.`,
     );
     const screen = setupFinalScreen(
       { ...teamJournal(), exit: 0, steps: [{ id: "projects", state: "done" }, step] },
@@ -587,7 +587,7 @@ describe("review fixes", () => {
     const result = await onboardValuesAdapter().check(ctx, teamJournal());
     expect(result).toMatchObject({ state: "waiting", reason: "required_values_missing" });
     expect(onboardReasonText({ id: "values", state: "waiting", reason: result.reason, evidence: result.evidence }, { baseUrl: BASE })).toBe(
-      `Set STRIPE_KEY on the repository's Environment page: open ${BASE}/settings/projects, then the project, then the repository. DATABASE_URL refers to DB_PASSWORD, which has no value, so Catalyst can't start work there. Then run catalyst setup.`,
+      `Set STRIPE_KEY with catalyst var set STRIPE_KEY --repo <owner/name> (catalyst secret set STRIPE_KEY --repo <owner/name> for a secret). DATABASE_URL refers to DB_PASSWORD, which has no value, so Catalyst can't start work there. Then run catalyst setup.`,
     );
   });
 });
@@ -658,7 +658,7 @@ describe("a member's run", () => {
       `Only an owner or admin of your Catalyst workspace can install Catalyst on GitHub. Ask one to open ${BASE}/settings/connections and install it there.`,
     );
     expect(text).toContain(
-      `Only a Catalyst owner or admin can set up the team's Catalyst workflow. Ask one to open ${BASE}/settings/linear-teams/ENG/adopt.`,
+      "Only a Catalyst owner or admin can set up the team's Catalyst workflow. Ask one to run catalyst team adopt ENG.",
     );
   });
 
@@ -882,7 +882,7 @@ describe("final review fixes", () => {
       steps: journal.steps.map((s) => (s.id === "signin" ? { ...s, evidence: { role: "member" } } : s)),
     };
     expect(setupFinalScreen(withRole, BASE).actions.map((a) => a.text)).toContain(
-      `Ask a Catalyst owner or admin to set STRIPE_KEY on the repository's Environment page: open ${BASE}/settings/projects, then the project, then the repository. Then run catalyst setup.`,
+      `Ask a Catalyst owner or admin to set STRIPE_KEY with catalyst var set STRIPE_KEY --repo <owner/name> (catalyst secret set STRIPE_KEY --repo <owner/name> for a secret). Then run catalyst setup.`,
     );
   });
 });

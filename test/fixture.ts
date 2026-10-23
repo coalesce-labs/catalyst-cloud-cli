@@ -4,7 +4,7 @@
 // can assert a header was sent; `budgetExhausted` turns the agent POSTs into 429s naming the budget.
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { TenantContract } from "../src/contract-types";
-import { buildFixtureContract, FIXTURE_ACCOUNT } from "./fixture-contract";
+import { buildFixtureContract, FIXTURE_ACCOUNT, FIXTURE_ROUTE_PREFIX } from "./fixture-contract";
 
 export const FIXTURE_ME_BODY = {
   account: FIXTURE_ACCOUNT,
@@ -51,6 +51,8 @@ export interface FixtureServer {
   /** CTC-1953/CTC-1954 ship ahead of some tenants' mirror; `false` makes those two routes 404 the
    *  way an older cloud does, so the bundle's "needs a newer cloud" path meets a real 404. */
   routesDeployed: boolean;
+  /** CTC-6204 — when set, GET /api/v1/coding-accounts answers these rows instead of CODING_ACCOUNTS. */
+  codingAccounts?: unknown[];
   /** CTC-4744 — when set, GET /api/v1/agent/tenant/readiness?team=<id> answers 200 and calls this,
    *  the way the cloud's read-through recomputes an expired verdict. Unset, the route is a 404. */
   readinessRead?: (teamId: string) => void;
@@ -69,6 +71,13 @@ export interface FixtureServer {
         linearUserId: string | null;
       }
     | null;
+  /** CTC-5399 — when set, /api/v1/me answers THIS refusal (status + JSON body) before the key
+   *  table: the person is signed in but has no workspace behind them, so the cloud refuses with
+   *  403 `jwt-org-unmapped` on the identity read. */
+  meRefusal?: { status: number; body: unknown };
+  /** CTC-5871 — when set, an agent write POST answers what this returns (after it is recorded in
+   *  `writes`); `undefined` falls through to the default 200. */
+  agentWriteReply?: (name: string, body: unknown) => { status: number; body: unknown } | undefined;
   writes: RecordedRequest[];
   requests: RecordedRequest[];
   /** Override the issue list the read routes serve. */
@@ -86,6 +95,8 @@ export interface FixtureServer {
   release?: { status: number; body: unknown };
   /** The contract's `ticket-release-class` route answers this when set. */
   releaseClass?: { status: number; body: unknown };
+  /** CTC-3550 — `POST <prefix>/registry/pull-credential` answers this (status + body) when set; 404 otherwise. */
+  pullCredential?: { status: number; body: unknown };
   /** CTC-2545 — the account-scope environment declaration, as a REAL little state machine rather than
    *  a canned body: propose bumps a revision and a hash, approve is a compare-and-set against them.
    *  A canned pair would let a verb that approved the wrong revision pass, which is the one thing
@@ -182,6 +193,7 @@ function issue(over: Record<string, unknown>): Record<string, unknown> {
     title: `Title of ${over.identifier}`,
     state: "Todo",
     state_id: null,
+    state_type: null,
     assignee: null,
     assignee_id: null,
     assignee_name: null,
@@ -266,7 +278,31 @@ export function manyIssues(n: number): Record<string, unknown>[] {
   );
 }
 
-function issueDetail(row: Record<string, unknown>): Record<string, unknown> {
+function fixtureBlockers(row: Record<string, unknown>, issues: Record<string, unknown>[]) {
+  return issues.filter((candidate) => {
+    const terminal = candidate.state_type != null
+      ? ["completed", "canceled", "duplicate"].includes(String(candidate.state_type))
+      : ["done", "canceled", "cancelled", "duplicate"].includes(String(candidate.state).toLowerCase());
+    return !terminal && Array.isArray(candidate.relations) && candidate.relations.some(
+      (relation) => relation?.type === "blocks" && relation.related_identifier === row.identifier,
+    );
+  }).map((candidate) => {
+    const names = Array.isArray(candidate.labels) ? candidate.labels.map((label) => label.name) : [];
+    return {
+      identifier: candidate.identifier,
+      title: candidate.title,
+      state: candidate.state,
+      is_ask: names.some((name) => name === "catalyst-ask" || String(name).startsWith("ask/")),
+      is_approval: names.includes("ask/approval"),
+      is_decided: false,
+      unresolved: false,
+      assignee_id: candidate.assignee_id ?? null,
+      assignee_name: candidate.assignee_name ?? candidate.assignee ?? null,
+    };
+  });
+}
+
+function issueDetail(row: Record<string, unknown>, issues: Record<string, unknown>[]): Record<string, unknown> {
   return {
     ...row,
     description: `Description of ${row.identifier}`,
@@ -314,6 +350,7 @@ function issueDetail(row: Record<string, unknown>): Record<string, unknown> {
         ? [{ repo_id: "repo-api", number: 41, node_id: "PR_kwDOfixture41" }]
         : [],
     agent_sessions: [],
+    blocked_by: fixtureBlockers(row, issues),
   };
 }
 
@@ -954,6 +991,7 @@ export async function startMeFixture(
       auth.startsWith("Bearer ") &&
       o.issuedAccessTokens.has(auth.slice("Bearer ".length));
     if (path.startsWith("/api/v1/me")) {
+      if (state.meRefusal) return send(state.meRefusal.status, state.meRefusal.body);
       const out =
         handler?.(req.url ?? path) ??
         (auth === `Bearer ${FIXTURE_KEY}`
@@ -1112,7 +1150,7 @@ export async function startMeFixture(
         (r) => r.identifier === ref || r.id === ref,
       );
       return row
-        ? send(200, issueDetail(row))
+        ? send(200, issueDetail(row, state.issues))
         : send(404, { error: "not found" });
     }
     if (path === "/api/v1/pulls") {
@@ -1257,7 +1295,7 @@ export async function startMeFixture(
     // cloud" path is tested against a real 404 rather than a mocked branch.
     if (path === "/api/v1/coding-accounts") {
       return state.routesDeployed
-        ? send(200, { accounts: CODING_ACCOUNTS })
+        ? send(200, { accounts: state.codingAccounts ?? CODING_ACCOUNTS })
         : send(404, { error: "not found" });
     }
     const executionMatch = /^\/api\/v1\/issues\/([^/]+)\/execution$/.exec(path);
@@ -1402,6 +1440,18 @@ export async function startMeFixture(
       return send(200, { created, rotated, errors, declared: declared() });
     }
 
+    // CTC-3550 — the image download credential, ahead of the generic agent-POST branch so the write
+    // budget and the canned `{id, ok}` reply never answer it. Tests opt in by adding the route.
+    if (
+      req.method === "POST" &&
+      path === `${FIXTURE_ROUTE_PREFIX}/registry/pull-credential`
+    ) {
+      state.writes.push({ method: "POST", path, headers: req.headers, body });
+      return state.pullCredential
+        ? send(state.pullCredential.status, state.pullCredential.body)
+        : send(404, { error: "not found" });
+    }
+
     if (req.method === "POST" && postRoutes().has(path)) {
       if (state.budgetExhausted) {
         return send(
@@ -1415,6 +1465,8 @@ export async function startMeFixture(
       }
       state.writes.push({ method: "POST", path, headers: req.headers, body });
       const name = path.split("/").at(-1);
+      const reply = state.agentWriteReply?.(name ?? "", body);
+      if (reply) return send(reply.status, reply.body);
       if (name === "ticket-release") {
         const r = state.release ?? {
           status: 200,

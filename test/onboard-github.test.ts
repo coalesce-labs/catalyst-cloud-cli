@@ -187,6 +187,24 @@ describe("native personal-bearer GitHub App installation", () => {
     expect(f.logs.join("\n")).not.toContain("synthetic-signed-material");
     expect(readFileSync(configPathFor(f.home))).toEqual(before);
   });
+  test("warns which account's two-factor code GitHub wants before opening the install handoff", async () => {
+    const f = fixture();
+    f.status(absent());
+    f.flip();
+    let beforeOpen = "";
+    const adapter = githubInstallationAdapter({
+      ...f.options,
+      openBrowser: (url) => {
+        beforeOpen = f.logs.join("\n");
+        f.opened.push(url);
+      },
+    });
+    expect((await adapter.act!(f.ctx, f.journal)).state).toBe("done");
+    expect(beforeOpen).toContain("GitHub may show Confirm access");
+    expect(beforeOpen).toContain("two-factor code for the GitHub account you are signed in to");
+    expect(f.opened).toEqual([link]);
+    expect(f.logs.join("\n")).not.toContain("synthetic-signed-material");
+  });
   test.each([404, 405, 503])(
     "older cloud or unavailable status %s waits without fallback or browser",
     async (code) => {

@@ -234,7 +234,7 @@ export function onboardCapacityAdapter(
         teamId = selectedOnboardTeam(journal),
         repos = selectedOnboardRepositories(journal);
       if (!expected) return waiting("capacity_identity_unverified");
-      if (!teamId || repos.length !== 1 || repos[0].teamId !== teamId)
+      if (!teamId || repos.length === 0 || repos.some(r => r.teamId !== teamId))
         return waiting("capacity_context_unverified");
       const controller = new AbortController(),
         signal = external
@@ -277,13 +277,11 @@ export function onboardCapacityAdapter(
         if (
           "reason" in inventory ||
           !current() ||
-          !inventory.repositories.some(
-            (r) =>
-              r.repoId === repos[0].repoId &&
-              r.teamId === teamId &&
-              r.owner.toLowerCase() === repos[0].owner.toLowerCase() &&
-              r.name.toLowerCase() === repos[0].name.toLowerCase(),
-          )
+          !repos.every(selectedRepo => inventory.repositories.some(
+            r => r.repoId === selectedRepo.repoId && r.teamId === teamId &&
+              r.owner.toLowerCase() === selectedRepo.owner.toLowerCase() &&
+              r.name.toLowerCase() === selectedRepo.name.toLowerCase(),
+          ))
         )
           return pause("capacity_context_unverified");
         const read = await readExistingOnboardJson(ctx, route, signal);
@@ -293,7 +291,7 @@ export function onboardCapacityAdapter(
           return pause("capacity_identity_unverified");
         const observed = snapshot(read.body, ctx.now().getTime());
         const bucket = observed?.buckets.find(
-            (b) => b.repo === repos[0].repoId,
+            b => b.teams.some(t => t.key === teamKey) && repos.some(r => r.repoId === b.repo),
           ),
           mapped = bucket?.teams.find((t) => t.key === teamKey);
         if (!observed || !bucket || !mapped)

@@ -573,12 +573,7 @@ function action(
         (row) => row.id === "linear.team" && row.state === "done",
       );
       const key = team && value(team, "teamKey");
-      return link(
-        key
-          ? `/settings/linear-teams/${encodeURIComponent(key)}/adopt`
-          : "/settings/linear-teams",
-        "set up the team's Catalyst workflow",
-      );
+      return `Run catalyst team adopt ${key || "<TEAM KEY>"} to preview the team's Catalyst workflow, then run it again with the --yes --plan-hash value it prints.`;
     }
     case "linear.automations":
       return "Open your Linear team settings and set each pull request automation to No action.";
@@ -661,6 +656,7 @@ export function setupFinalScreen(
           : undefined
         : clean(onboardReasonText(readiness, { baseUrl: base, journal }))
       : undefined;
+  const machineOnly = journal.steps.some(step => step.reason === "returning_workspace_move_on");
   const heading = paused
     ? "Setup paused"
     : journal.steps.some(
@@ -670,6 +666,8 @@ export function setupFinalScreen(
             step.state !== "done",
         )
       ? "Not ready for work yet"
+      : journal.exit === 0 && machineOnly
+        ? "This computer is set up"
       : journal.exit === 0 && journal.complete
         ? "Setup complete"
         : journal.exit === 0
@@ -683,6 +681,8 @@ export function setupFinalScreen(
   const ticketUrl = savedTicketUrl && page(base, savedTicketUrl);
   const next = paused
     ? "Next: run catalyst onboard to continue."
+    : machineOnly && journal.exit === 0
+      ? "Next: run catalyst ready to review your existing projects."
     : key
       ? `Follow ${ticketUrl ?? key} in Linear; Catalyst comments there as each phase finishes.`
       : heading === "Setup complete"
@@ -793,6 +793,8 @@ export function onboardJsonView(
     ? "paused"
     : journal.exit === 10
       ? "failed"
+      : screen.heading === "This computer is set up"
+        ? "machine-complete"
       : screen.heading === "Setup complete"
         ? "complete"
         : screen.heading === "Ready for work"

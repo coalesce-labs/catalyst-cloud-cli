@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -12,7 +13,7 @@ import {
 } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { writeConfig, type Ctx, type CustomerConfig } from "../src/config.js";
@@ -24,7 +25,8 @@ import {
   type RunnerEngine,
   type RunnerEngineInfo,
 } from "../src/onboard-runner.js";
-import type { OnboardJournal } from "../src/onboard.js";
+import { readOnboardJournal, writeOnboardJournal, type OnboardJournal } from "../src/onboard.js";
+import { onboardReasonText } from "../src/onboard-next.js";
 
 const now = new Date("2026-10-02T12:00:00.000Z");
 const SUPERVISOR = `ghcr.io/coalesce-labs/catalyst-supervisor@sha256:${"a".repeat(64)}`;
@@ -42,12 +44,24 @@ afterEach(() => {
 });
 
 interface FakeEngine extends RunnerEngine {
+  nativeThoughtsCustody(input: { dir: string; supervisorImage: string; runnerImage: string }, signal?: AbortSignal): Promise<ReturnType<typeof nativeCustodyFixture>>;
   calls: string[];
   images: Map<string, string>;
   networkState: "ready" | "missing" | "misshaped";
   running: boolean;
   files: Map<string, string>;
-  upError: boolean;
+  upError: string | false;
+  containers: Array<{ service: string; state: string }> | null;
+  unpauseFails: boolean;
+}
+const custodyKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "der" }).toString("base64");
+function nativeCustodyFixture(dir: string) {
+  const state = join(dir, "..", "darwin-thoughts-custody");
+  const authority = { version: 1 as const, installationId: "a".repeat(64), publicKey: custodyKey,
+    nativeUid: 501, nativeGid: 20, nativeHome: join(dir, "..", ".."), endpoint: "unix:///fixture/docker.sock", daemonId: "fixture-daemon",
+    thoughtsRoot: join(dir, "thoughts"), locksRoot: join(dir, "locks"), requestsRoot: join(dir, "..", "darwin-thoughts-requests"), responsesRoot: join(dir, "..", "darwin-thoughts-responses") };
+  return { authority, envAuthority: JSON.stringify(Object.fromEntries(Object.entries(authority).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))),
+    requestsRoot: authority.requestsRoot, responsesRoot: authority.responsesRoot, configPath: join(state, "producer.json"), serviceLabel: "dev.catalystcloud.runner.darwin-thoughts-custody" };
 }
 function fakeEngine(
   info: RunnerEngineInfo | null = { arch: "arm64", vm: true },
@@ -63,6 +77,8 @@ function fakeEngine(
     running: false,
     files: new Map(),
     upError: false,
+    containers: null,
+    unpauseFails: false,
     info: async () => {
       engine.calls.push("info");
       return info;
@@ -83,6 +99,8 @@ function fakeEngine(
     },
     socketGid: async () => 991,
     nativeEgressStatus: async()=>true,
+    vmCapabilities: async () => { engine.calls.push("vmCapabilities"); return "ready"; },
+    nativeThoughtsCustody: async ({ dir }) => { engine.calls.push("nativeThoughtsCustody"); return nativeCustodyFixture(dir); },
     claimDirs: async (dir, paths) => {
       engine.calls.push(`claimDirs ${paths.length}`);
       return true;
@@ -111,8 +129,19 @@ function fakeEngine(
     },
     composeUp: async () => {
       engine.calls.push("composeUp");
-      if (engine.upError) return false;
+      if (engine.upError !== false)
+        return { ok: false, ...(engine.upError ? { error: engine.upError } : {}) };
       engine.running = true;
+      return { ok: true };
+    },
+    projectContainers: async () => {
+      engine.calls.push("projectContainers");
+      return engine.containers;
+    },
+    composeUnpause: async () => {
+      engine.calls.push("composeUnpause");
+      if (engine.unpauseFails) return false;
+      for (const row of engine.containers ?? []) if (row.state === "paused") row.state = "running";
       return true;
     },
     composeRunning: async () => engine.running,
@@ -124,6 +153,7 @@ interface Host {
   hostId: string;
   hostName: string;
   team: string;
+  teams?: string[];
   enrollmentKind: string;
   revokedAtMs: number | null;
   capability: {
@@ -223,6 +253,13 @@ function fixture(
       receivedAtMs: now.getTime(),
     } as Host["capability"],
     mints: [] as unknown[],
+    // CTC-4455: "absent" answers the add-team route as an older cloud does (404).
+    teamRoute: "absent" as "absent" | "ok" | "team_limit",
+    // How many add-team requests the cloud answers `supervisor_outdated` before accepting.
+    teamOutdated: 0,
+    teamAdds: [] as unknown[],
+    // The cloud accepts the add, but its listing never shows the team.
+    teamListingLags: false,
   };
   const engine = options.engine ?? fakeEngine();
   const requests: string[] = [];
@@ -294,6 +331,22 @@ function fixture(
         }
       }
       return Response.json({ hosts: state.hosts });
+    }
+    const teamAdd = /^\/api\/v1\/hosts\/([^/]+)\/teams$/.exec(url.pathname);
+    if (teamAdd && method === "POST" && state.teamRoute !== "absent") {
+      const body = JSON.parse(String(init?.body)) as { team: string };
+      state.teamAdds.push(body);
+      const host = state.hosts.find((h) => h.hostId === teamAdd[1]);
+      if (!host) return Response.json({ ok: false, error: "unknown_host" }, { status: 404 });
+      if (state.teamRoute === "team_limit")
+        return Response.json({ ok: false, error: "team_limit" }, { status: 409 });
+      if (state.teamOutdated > 0) {
+        state.teamOutdated--;
+        return Response.json({ ok: false, error: "supervisor_outdated" }, { status: 409 });
+      }
+      const teams = [...new Set([...(host.teams ?? [host.team]), body.team])];
+      if (!state.teamListingLags) host.teams = teams;
+      return Response.json({ ok: true, hostId: host.hostId, teams, added: true });
     }
     if (url.pathname === "/api/v1/hosts/join-tokens" && method === "POST") {
       state.mints.push(JSON.parse(String(init?.body)));
@@ -410,6 +463,133 @@ function secretsNowhere(f: ReturnType<typeof fixture>) {
   expect(visible).not.toContain("ctc_user_fixture_secret");
 }
 
+describe("release-pinned supervisor receiving", () => {
+  const old = `ghcr.io/coalesce-labs/catalyst-supervisor@sha256:${"d".repeat(64)}`;
+  function productionImages(initial: "matching" | "stale", pullResult: "matching" | "stale" | "refused" = "matching") {
+    const engine = fakeEngine();
+    let supervisor = initial === "matching" ? RUNNER_HOST_IMAGES.supervisor : old;
+    const reads: string[] = [];
+    const pulls: string[] = [];
+    const configs: string[] = [];
+    const actual = dockerRunnerEngine({
+      env: { DOCKER_HOST: "unix:///fixture/docker.sock" },
+      exec: async (args, opts) => {
+        if (args[0] === "image" && args[1] === "inspect") {
+          const requested = args[2]!;
+          reads.push(requested);
+          const received = requested === RUNNER_HOST_IMAGES.supervisor ? supervisor : requested;
+          return { code: 0, stdout: JSON.stringify([{
+            Id: `sha256:${"e".repeat(64)}`, Os: "linux", Architecture: "arm64", RepoDigests: [received],
+          }]) };
+        }
+        if (args.includes("pull")) {
+          const requested = args.at(-1)!;
+          pulls.push(requested);
+          const config = args[args.indexOf("--config") + 1]!;
+          configs.push(config);
+          expect(args.slice(0, 2)).toEqual(["--host", "unix:///fixture/docker.sock"]);
+          expect(opts.env?.DOCKER_CONFIG).toBe(config);
+          expect(JSON.parse(readFileSync(join(config, "config.json"), "utf8"))).toEqual({ auths: {} });
+          if (pullResult === "matching") supervisor = requested;
+          return { code: pullResult === "refused" ? 1 : 0, stdout: "" };
+        }
+        throw Error(`unexpected Docker call: ${args.join(" ")}`);
+      },
+    });
+    engine.imageArch = actual.imageArch;
+    engine.pull = actual.pull;
+    const enrollment = engine.enrollment;
+    engine.enrollment = async (...args) => {
+      engine.calls.push("credential-helper");
+      return enrollment(...args);
+    };
+    const f = fixture({ selected: true, runnerCloud: true, env: {}, engine });
+    return { f, reads, pulls, configs };
+  }
+
+  test("a matching production cache starts the release digest, records it and makes no pull", async () => {
+    const x = productionImages("matching");
+    const result = await run(x.f);
+    expect(result).toMatchObject({ state: "done", evidence: { supervisorImage: RUNNER_HOST_IMAGES.supervisor } });
+    if (result.state !== "done") throw Error("expected completed installation receiving");
+    expect(x.reads).toEqual(Object.values(RUNNER_HOST_IMAGES).flatMap(ref => [ref, ref]));
+    expect(x.pulls).toEqual([]);
+    expect(x.f.engine.calls).toContain("composeUp");
+    expect(readFileSync(join(x.f.dir, ".env"), "utf8")).toContain(`CATALYST_SUPERVISOR_IMAGE=${RUNNER_HOST_IMAGES.supervisor}\n`);
+    const path = join(x.f.home, "install-journal.json");
+    writeOnboardJournal(path, { ...x.f.journal, steps: [...x.f.journal.steps, { id: "runner", ...result, state: result.state }] });
+    expect(readOnboardJournal(path, x.f.journal.cli)?.steps.find(s => s.id === "runner")?.evidence?.supervisorImage).toBe(RUNNER_HOST_IMAGES.supervisor);
+    secretsNowhere(x.f);
+  });
+
+  test("a stale arm64 cache is pulled by the release digest and verified again before Compose", async () => {
+    const x = productionImages("stale");
+    x.f.engine.nativeThoughtsCustody = async ({ dir, supervisorImage }) => {
+      expect(supervisorImage).toBe(RUNNER_HOST_IMAGES.supervisor);
+      expect(x.reads.filter(ref => ref === supervisorImage)).toHaveLength(2);
+      expect(x.pulls).toEqual([supervisorImage]);
+      expect(x.f.engine.calls).not.toContain("credential-helper");
+      expect(x.f.engine.calls).not.toContain("composeUp");
+      return nativeCustodyFixture(dir);
+    };
+    expect(await run(x.f)).toMatchObject({ state: "done", evidence: { supervisorImage: RUNNER_HOST_IMAGES.supervisor } });
+    expect(x.f.engine.calls).toContain("composeUp");
+    expect(x.pulls).toEqual([RUNNER_HOST_IMAGES.supervisor]);
+    expect(x.configs).toHaveLength(1);
+    expect(existsSync(x.configs[0]!)).toBe(false);
+    secretsNowhere(x.f);
+  });
+
+  test.each(["refused", "stale"] as const)("stale cache and %s pull refuse before credentials, admission or runtime start", async pull => {
+    const x = productionImages("stale", pull);
+    const result = await x.f.adapter.act!(x.f.ctx, x.f.journal);
+    expect(result).toMatchObject({ state: "waiting", reason: "runner_supervisor_image_unavailable",
+      evidence: { image: RUNNER_HOST_IMAGES.supervisor, supervisorImage: RUNNER_HOST_IMAGES.supervisor } });
+    expect(x.pulls).toEqual([RUNNER_HOST_IMAGES.supervisor]);
+    for (const call of ["vmCapabilities", "nativeThoughtsCustody", "credential-helper", "composeUp"])
+      expect(x.f.engine.calls).not.toContain(call);
+    expect(x.f.engine.calls.some(call => call.startsWith("writeVolumeFile"))).toBe(false);
+    expect(x.f.state.mints).toEqual([]);
+    expect(x.f.state.keyMints).toEqual([]);
+    expect(x.f.state.admissionWrites).toEqual([]);
+    expect(x.f.engine.running).toBe(false);
+    expect(existsSync(join(x.f.dir, ".env"))).toBe(false);
+    expect(x.configs).toHaveLength(1);
+    expect(existsSync(x.configs[0]!)).toBe(false);
+    if (result.state !== "waiting") throw Error("expected supervisor image refusal");
+    expect(onboardReasonText({ id: "runner", ...result, state: result.state }, {})).toContain("supervisor image required by this CLI release");
+  });
+
+  test.each([
+    { Id: "sha256:bad" }, { Os: "windows" }, { Architecture: "" }, { RepoDigests: [] },
+  ])("production cache refuses malformed image metadata %j", async patch => {
+    const engine = dockerRunnerEngine({ exec: async () => ({ code: 0, stdout: JSON.stringify([{
+      Id: `sha256:${"e".repeat(64)}`, Os: "linux", Architecture: "arm64", RepoDigests: [RUNNER_HOST_IMAGES.supervisor], ...patch,
+    }]) }) });
+    expect(await engine.imageArch(RUNNER_HOST_IMAGES.supervisor)).toBeNull();
+  });
+
+  test("saved intent and a live old supervisor do not satisfy the current release", async () => {
+    const x = productionImages("matching");
+    expect((await run(x.f)).state).toBe("done");
+    const custody = nativeCustodyFixture(x.f.dir);
+    for (const root of [custody.requestsRoot, custody.responsesRoot]) mkdirSync(root, { mode: 0o700 });
+    const config = { Image: old,
+      Env: ["CATALYST_HOST_NAME=catalyst-laptop", "CATALYST_MIRROR_URL=https://cloud.example.test"],
+      Labels: { "com.docker.compose.project": "catalyst-host", "com.docker.compose.service": "supervisor",
+        "com.docker.compose.project.working_dir": x.f.dir,
+        "com.docker.compose.project.config_files": join(x.f.dir, "compose.yaml") + "," + join(x.f.dir, "compose.darwin-thoughts.yaml") } };
+    x.f.engine.installation = dockerRunnerEngine({ exec: async args => {
+      if (args[0] === "ps") return { code: 0, stdout: "e".repeat(64) };
+      if (args[0] === "inspect") return { code: 0, stdout: JSON.stringify([{ Config: config }]) };
+      throw Error(`unexpected Docker call: ${args.join(" ")}`);
+    } }).installation;
+    expect(await x.f.adapter.check(x.f.ctx, x.f.journal)).toEqual({ state: "pending" });
+    config.Image = RUNNER_HOST_IMAGES.supervisor;
+    expect(await x.f.adapter.check(x.f.ctx, x.f.journal)).toMatchObject({ state: "done" });
+  });
+});
+
 describe("opting in", () => {
   test("without a choice and without a terminal it is skipped and touches nothing", async () => {
     const f = fixture();
@@ -472,6 +652,46 @@ describe("opting in", () => {
 });
 
 describe("prerequisites", () => {
+  test.each([
+    "runner_home_mount_unwritable", "runner_container_host_unreachable",
+    "runner_container_network_unreachable", "runner_engine_probe_unavailable",
+  ] as const)("a failed VM capability probe stops before enrollment or start: %s", async reason => {
+    const engine = fakeEngine();
+    engine.vmCapabilities = async (dir, image, baseUrl) => {
+      engine.calls.push("vmCapabilities");
+      expect(dir).toBe(f.dir); expect(image).toBe(SUPERVISOR);
+      expect(baseUrl).toBe("https://cloud.example.test");
+      return reason;
+    };
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    const result = await run(f);
+    expect(result).toMatchObject({ state: "waiting", reason, evidence: { selected: true } });
+    expect(engine.calls).toContain("vmCapabilities");
+    expect(engine.calls).not.toContain("nativeThoughtsCustody");
+    expect(engine.calls).not.toContain("composeUp");
+    expect(engine.calls.some(call => call.startsWith("writeVolumeFile") || call.startsWith("createNetwork"))).toBe(false);
+    expect(f.state.mints).toEqual([]); expect(f.state.keyMints).toEqual([]);
+    expect(f.state.admissionWrites).toEqual([]);
+    const text = onboardReasonText({ id: "runner", state: "waiting", reason });
+    expect(text).toContain("catalyst onboard --runner");
+    if (reason === "runner_home_mount_unwritable") {
+      expect(text).toContain("writable"); expect(text).toContain("Colima");
+      expect(text).toContain("uid 10001");
+    }
+    if (reason === "runner_container_host_unreachable") expect(text).toContain("reach this Mac");
+    if (reason === "runner_container_network_unreachable") expect(text).toContain("health endpoint");
+  });
+
+  test("a remote endpoint is named before any local change or cloud request", async () => {
+    const engine = fakeEngine({ arch: "arm64", vm: true, unsupported: true,
+      unsupportedReason: "runner_engine_nonlocal" });
+    const f = fixture({ selected: true, engine });
+    expect((await run(f)).reason).toBe("runner_engine_nonlocal");
+    expect(existsSync(f.dir)).toBe(false); expect(f.requests).toEqual([]);
+    expect(onboardReasonText({ id: "runner", state: "waiting", reason: "runner_engine_nonlocal" }))
+      .toContain("unix:///");
+  });
+
   test("no Docker engine is said plainly and skipped, with nothing written", async () => {
     const f = fixture({ selected: true, engine: fakeEngine(null) });
     expect(await run(f)).toEqual({
@@ -496,19 +716,259 @@ describe("prerequisites", () => {
     expect(f.engine.calls).toEqual(["info"]);
   });
 
-  test("missing images are pulled without credentials, and stop the step before a token is minted", async () => {
+  test.each([
+    { name: "macOS Docker Desktop", arch: "arm64" as const, vm: true },
+    { name: "native Linux", arch: "amd64" as const, vm: false },
+  ])("supported $name setup prepares missing images before receiving native custody", async (info) => {
+    const engine = fakeEngine(info);
+    engine.images.clear();
+    engine.pull = async (ref) => {
+      engine.calls.push(`pull ${ref}`);
+      engine.images.set(ref, info.arch);
+      return true;
+    };
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    engine.nativeThoughtsCustody = async ({ dir }) => {
+      engine.calls.push("nativeThoughtsCustody");
+      for (const ref of [SUPERVISOR, WATCHDOG, RUNNER]) {
+        expect(engine.calls.filter(call => call === `pull ${ref}`)).toHaveLength(1);
+        expect(engine.images.get(ref)).toBe(info.arch);
+      }
+      expect(engine.calls).toContain("vmCapabilities");
+      expect(engine.calls).not.toContain("composeUp");
+      expect(f.state.mints).toEqual([]);
+      expect(f.state.keyMints).toEqual([]);
+      expect(f.state.admissionWrites).toEqual([]);
+      return nativeCustodyFixture(dir);
+    };
+    expect(await run(f)).toMatchObject({ state: "done" });
+    for (const ref of [SUPERVISOR, WATCHDOG, RUNNER])
+      expect(engine.calls.filter(call => call === `pull ${ref}`)).toHaveLength(1);
+    expect(engine.calls.includes("nativeThoughtsCustody")).toBe(info.vm);
+    expect(engine.calls.filter(call => call === "composeUp")).toHaveLength(1);
+  });
+
+  test("unavailable VM images stop before custody, enrollment or Compose", async () => {
     const engine = fakeEngine();
     engine.images.delete(SUPERVISOR);
     const f = fixture({ selected: true, engine });
     const result = await run(f);
     expect(result).toMatchObject({
       state: "waiting",
-      reason: "runner_images_unavailable",
+      reason: "runner_supervisor_image_unavailable",
       evidence: { selected: true, image: SUPERVISOR },
     });
-    expect(engine.calls).toContain(`pull ${SUPERVISOR}`);
+    expect(engine.calls.filter(call => call.startsWith("pull "))).toEqual([`pull ${SUPERVISOR}`]);
+    expect(engine.calls).not.toContain("nativeThoughtsCustody");
     expect(f.state.mints).toEqual([]);
     expect(engine.calls).not.toContain("composeUp");
+  });
+
+  test.each([
+    ["pull refused", "runner_supervisor_image_unavailable"],
+    ["image still absent", "runner_supervisor_image_unavailable"],
+    ["emulated image", "runner_image_emulated"],
+    ["interrupted pull", "interrupted"],
+  ])("VM image preparation holds on %s before native or credential work", async (kind, reason) => {
+    const engine = fakeEngine();
+    engine.images.delete(SUPERVISOR);
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    const controller = new AbortController();
+    const enrollment = engine.enrollment;
+    engine.enrollment = async (...args) => {
+      engine.calls.push("credential-helper");
+      return enrollment(...args);
+    };
+    engine.pull = async (ref) => {
+      engine.calls.push(`pull ${ref}`);
+      if (kind === "emulated image") engine.images.set(ref, "amd64");
+      if (kind === "interrupted pull") controller.abort();
+      return kind !== "pull refused";
+    };
+    expect(await f.adapter.act!(f.ctx, f.journal, controller.signal)).toMatchObject({ state: "waiting", reason });
+    expect(engine.calls.filter(call => call.startsWith("pull "))).toEqual([`pull ${SUPERVISOR}`]);
+    for (const call of ["vmCapabilities", "nativeThoughtsCustody", "credential-helper", "composeUp"])
+      expect(engine.calls).not.toContain(call);
+    expect(f.state.mints).toEqual([]);
+    expect(f.state.keyMints).toEqual([]);
+    expect(f.state.admissionWrites).toEqual([]);
+  });
+
+  test("VM image preparation never substitutes for a fresh signed custody check", async () => {
+    const engine = fakeEngine();
+    engine.images.delete(SUPERVISOR);
+    engine.pull = async (ref) => {
+      engine.calls.push(`pull ${ref}`);
+      engine.images.set(ref, "arm64");
+      return true;
+    };
+    engine.nativeThoughtsCustody = async () => {
+      engine.calls.push("nativeThoughtsCustody");
+      throw new Error("darwin_thoughts_custody_install:foreign_owner");
+    };
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    expect(await run(f)).toMatchObject({ state: "waiting", reason: "runner_thoughts_custody_unavailable" });
+    expect(engine.calls).toContain(`pull ${SUPERVISOR}`);
+    expect(engine.calls).toContain("nativeThoughtsCustody");
+    expect(engine.calls).not.toContain("composeUp");
+    expect(engine.calls.some(call => call.startsWith("writeVolumeFile"))).toBe(false);
+    expect(f.state.mints).toEqual([]);
+    expect(f.state.keyMints).toEqual([]);
+    expect(f.state.admissionWrites).toEqual([]);
+  });
+
+  test("native custody refusal stops a VM before credential helpers, join, key mint, admission or Compose", async () => {
+    const engine = fakeEngine();
+    engine.nativeThoughtsCustody = async () => { engine.calls.push("nativeThoughtsCustody"); throw new Error("darwin_thoughts_custody_install:foreign_owner"); };
+    const enrollment = engine.enrollment;
+    engine.enrollment = async (...args) => { engine.calls.push("credential-helper"); return enrollment(...args); };
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    const result = await run(f);
+    expect(result).toMatchObject({ state: "waiting", reason: "runner_thoughts_custody_unavailable" });
+    expect(engine.calls).toContain("nativeThoughtsCustody");
+    expect(engine.calls).not.toContain("credential-helper");
+    expect(engine.calls).not.toContain("composeUp");
+    expect(engine.calls.some(call => call.startsWith("writeVolumeFile"))).toBe(false);
+    expect(f.state.mints).toEqual([]);
+    expect(f.state.keyMints).toEqual([]);
+    expect(f.state.admissionWrites).toEqual([]);
+    expect(existsSync(join(f.dir, ".env"))).toBe(false);
+  });
+
+  test.each(["capability_missing", "result_unverified", "call_threw"] as const)(
+    "reports custody case %s in output, journal and actual OTLP payload without credentials", async failureCase => {
+      const engine = fakeEngine();
+      expect(typeof engine.nativeThoughtsCustody).toBe("function");
+      if (failureCase === "capability_missing") Object.defineProperty(engine, "nativeThoughtsCustody", { value: undefined });
+      else if (failureCase === "result_unverified") engine.nativeThoughtsCustody = async ({ dir }) => {
+        const value = nativeCustodyFixture(dir);
+        return { ...value, authority: { ...value.authority, installationId: "b".repeat(64) } };
+      };
+      else engine.nativeThoughtsCustody = async () => { throw new TypeError(JOIN_TOKEN + ORG_KEY); };
+      const f = fixture({ selected: true, runnerCloud: true, engine });
+      const original = f.ctx.fetch;
+      const sent: string[] = [];
+      f.ctx.fetch = async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/telemetry/token")) return Response.json({ token: "ctc_tel_fixture_export", account: "account-a", scope: "telemetry:write", endpoint: "https://cloud.example.test/api/v1/telemetry" });
+        if (url.endsWith("/api/v1/telemetry/v1/logs")) { sent.push(String(init?.body)); return Response.json({}); }
+        return original(input, init);
+      };
+      const result = await run(f);
+      expect(result).toMatchObject({ reason: "runner_thoughts_custody_unavailable", evidence: { custodyFailureCase: failureCase, custodyTelemetry: "sent" } });
+      expect(f.messages.join("\n")).toContain("Setup could not verify local storage:");
+      if (failureCase === "call_threw") expect(result.evidence).toMatchObject({ custodyErrorClass: "TypeError", custodyErrorMessageRedacted: true });
+      if (failureCase === "result_unverified") expect(result.evidence).toMatchObject({ custodyResultInstalled: true, custodyAuthorityMatched: false });
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toContain('"eventName":"onboarding.runner.custody.refused"');
+      expect(sent[0]).toContain('"stringValue":"' + failureCase + '"');
+      expect(sent[0]).not.toContain(JOIN_TOKEN); expect(sent[0]).not.toContain(ORG_KEY);
+      if (result.state !== "waiting") throw Error("expected a custody refusal receipt");
+      f.journal.steps = [{ ...result, id: "runner", state: result.state }];
+      const path = join(f.home, "diagnostic-journal.json");
+      writeOnboardJournal(path, f.journal);
+      expect(readOnboardJournal(path, f.journal.cli)?.steps[0]?.evidence).toEqual(result.evidence);
+      expect(engine.calls).not.toContain("composeUp");
+      secretsNowhere(f);
+    },
+  );
+
+  test("fresh native custody reaches the VM installer before credential work and persists only public authority channels", async () => {
+    const engine = fakeEngine();
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    let custodyReceived = false;
+    engine.nativeThoughtsCustody = async (input) => {
+      expect(input).toEqual({ dir: f.dir, supervisorImage: SUPERVISOR, runnerImage: RUNNER });
+      expect(engine.calls).toContain("vmCapabilities");
+      expect(f.state.mints).toEqual([]); expect(f.state.keyMints).toEqual([]); expect(f.state.admissionWrites).toEqual([]);
+      expect(engine.calls).not.toContain("composeUp");
+      custodyReceived = true;
+      return nativeCustodyFixture(f.dir);
+    };
+    const hasVolumeFile = engine.hasVolumeFile;
+    engine.hasVolumeFile = async (...args) => { expect(custodyReceived).toBe(true); return hasVolumeFile(...args); };
+    expect((await run(f)).state).toBe("done");
+    expect(custodyReceived).toBe(true);
+    const installed = nativeCustodyFixture(f.dir);
+    const persisted = readFileSync(join(f.dir, ".env"), "utf8");
+    expect(persisted).toContain("CATALYST_THOUGHTS_CUSTODY_AUTHORITY='" + installed.envAuthority + "'");
+    expect(persisted).toContain("CATALYST_THOUGHTS_CUSTODY_REQUESTS_DIR=" + installed.requestsRoot);
+    expect(persisted).toContain("CATALYST_THOUGHTS_CUSTODY_RESPONSES_DIR=" + installed.responsesRoot);
+    expect(persisted).not.toContain("private-key.der");
+    expect(persisted).not.toContain("producer.json");
+    expect(existsSync(join(f.dir, "compose.darwin-thoughts.yaml"))).toBe(true);
+  });
+
+  test("native custody receives existing VM install root mode without adopting unsafe permissions", async () => {
+    const receiveMode = async (input: { dir: string }) => {
+      if ((statSync(input.dir).mode & 0o7777) !== 0o700)
+        throw new Error("darwin_thoughts_custody_install:directory_custody_unsafe");
+      return nativeCustodyFixture(input.dir);
+    };
+    const healthyEngine = fakeEngine();
+    healthyEngine.nativeThoughtsCustody = receiveMode;
+    const healthy = fixture({ selected: true, runnerCloud: true, engine: healthyEngine });
+    mkdirSync(healthy.dir, { recursive: true, mode: 0o700 });
+    chmodSync(healthy.dir, 0o700);
+    expect((await run(healthy)).state).toBe("done");
+    expect(statSync(healthy.dir).mode & 0o7777).toBe(0o700);
+
+    const unsafeEngine = fakeEngine();
+    unsafeEngine.nativeThoughtsCustody = receiveMode;
+    const enrollment = unsafeEngine.enrollment;
+    unsafeEngine.enrollment = async (...args) => {
+      unsafeEngine.calls.push("credential-helper");
+      return enrollment(...args);
+    };
+    const unsafe = fixture({ selected: true, runnerCloud: true, engine: unsafeEngine });
+    mkdirSync(unsafe.dir, { recursive: true, mode: 0o700 });
+    chmodSync(unsafe.dir, 0o777);
+    expect(statSync(unsafe.dir).mode & 0o7777).toBe(0o777);
+    expect(await run(unsafe)).toMatchObject({ state: "waiting", reason: "runner_thoughts_custody_unavailable" });
+    expect(statSync(unsafe.dir).mode & 0o7777).toBe(0o777);
+    expect(unsafeEngine.calls).not.toContain("credential-helper");
+    expect(unsafeEngine.calls).not.toContain("composeUp");
+    expect(unsafeEngine.calls.some(call => call.startsWith("writeVolumeFile"))).toBe(false);
+    expect(unsafe.state.mints).toEqual([]);
+    expect(unsafe.state.keyMints).toEqual([]);
+    expect(unsafe.state.admissionWrites).toEqual([]);
+  });
+
+  test("re-installing over an existing custody project re-attests on the new pin and reaches Compose again", async () => {
+    const engine = fakeEngine();
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    expect((await run(f)).state).toBe("done");
+    const next = SUPERVISOR.replace("a".repeat(64), "f".repeat(64));
+    engine.images.set(next, "arm64");
+    f.ctx.env.CATALYST_SUPERVISOR_IMAGE = next;
+    let custodyImage: string | undefined;
+    engine.nativeThoughtsCustody = async (input) => {
+      engine.calls.push("nativeThoughtsCustody");
+      custodyImage = input.supervisorImage;
+      return nativeCustodyFixture(input.dir);
+    };
+    expect((await run(f)).state).toBe("done");
+    expect(custodyImage).toBe(next);
+    expect(readFileSync(join(f.dir, ".env"), "utf8")).toContain(`CATALYST_SUPERVISOR_IMAGE=${next}\n`);
+    expect(readFileSync(join(f.dir, ".env"), "utf8")).toContain("CATALYST_THOUGHTS_CUSTODY_AUTHORITY=");
+    expect(existsSync(join(f.dir, "compose.darwin-thoughts.yaml"))).toBe(true);
+    expect(engine.calls).toContain(`imageArch ${next}`);
+    expect(engine.calls.filter(call => call === "composeUp")).toHaveLength(2);
+    secretsNowhere(f);
+  });
+
+  test("native Linux keeps cached-image pulls and never invokes Darwin custody", async () => {
+    const engine = fakeEngine({ arch: "amd64", vm: false });
+    for (const ref of [SUPERVISOR, WATCHDOG, RUNNER]) engine.images.set(ref, "amd64");
+    engine.images.delete(SUPERVISOR);
+    engine.pull = async (ref) => { engine.calls.push(`pull ${ref}`); engine.images.set(ref, "amd64"); return true; };
+    const f = fixture({ selected: true, runnerCloud: true, engine });
+    expect((await run(f)).state).toBe("done");
+    expect(engine.calls).toContain(`pull ${SUPERVISOR}`);
+    expect(engine.calls).toContain("claimDirs 3");
+    expect(engine.calls).not.toContain("nativeThoughtsCustody");
+    expect(readFileSync(join(f.dir, ".env"), "utf8")).not.toContain("CATALYST_THOUGHTS_CUSTODY_");
+    expect(existsSync(join(f.dir, "compose.darwin-thoughts.yaml"))).toBe(false);
   });
 
   test("the default host images are digest-pinned", () => {
@@ -516,7 +976,7 @@ describe("prerequisites", () => {
       expect(ref).toMatch(/^ghcr\.io\/coalesce-labs\/[a-z-]+@sha256:[0-9a-f]{64}$/);
   });
 
-  const PUBLIC_RUNNER = "ghcr.io/coalesce-labs/catalyst-runner@sha256:50eeb256b4693fc42c81458bdfc887137a0df757260601f2a869738578d00782";
+  const PUBLIC_RUNNER = "ghcr.io/coalesce-labs/catalyst-runner@sha256:598fd0ef2675bfd8e0665f70ef4ed8bf30706fba25fa2c39fc0df0801512a423";
   function defaultFixture() {
     const engine = fakeEngine();
     engine.images.set(RUNNER_HOST_IMAGES.supervisor, "arm64");
@@ -629,6 +1089,7 @@ describe("bringing the host up", () => {
         hostName: "catalyst-laptop",
         hostId: "host-1",
         capacity: 2,
+        supervisorImage: SUPERVISOR,
       },
     });
     expect(f.state.mints).toEqual([
@@ -677,6 +1138,96 @@ describe("bringing the host up", () => {
     });
     expect(f.state.mints).toHaveLength(1);
     expect(f.engine.calls).not.toContain("composeUp");
+  });
+
+  test("CTC-4455: a runner enrolled for another team serves the selected team once setup adds it", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "ok";
+    f.engine.calls.length = 0;
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostId: "host-1" } });
+    expect(f.state.teamAdds).toEqual([{ version: 1, team: "A" }]);
+    expect(f.state.hosts[0]!.teams).toEqual(["B", "A"]);
+    expect(f.state.mints).toHaveLength(1);
+    expect(f.requests).toContain("POST /api/v1/hosts/host-1/teams?account=account-a");
+    secretsNowhere(f);
+  });
+
+  test("CTC-4455: an older supervisor is started from this release before the team is added", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "ok";
+    f.state.teamOutdated = 1;
+    f.engine.calls.length = 0;
+    expect(await run(f)).toMatchObject({ state: "done" });
+    expect(f.state.teamAdds).toHaveLength(2);
+    expect(f.engine.calls).toContain("composeUp");
+    expect(f.state.hosts[0]!.teams).toEqual(["B", "A"]);
+  });
+
+  test("CTC-4455: a supervisor that never serves a set of teams stops setup once the wait runs out", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "ok";
+    f.state.teamOutdated = 100;
+    expect(await run(f)).toMatchObject({ state: "waiting", reason: "runner_supervisor_outdated" });
+    // One add before compose, then ceil(waitMs / pollMs) = ceil(20s / 5s) after it.
+    expect(f.state.teamAdds).toHaveLength(1 + 4);
+    expect(f.state.hosts[0]!.teams).toBeUndefined();
+  });
+
+  test("CTC-4455: an accepted add that the runner listing never shows is named after act", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "ok";
+    f.state.teamListingLags = true;
+    expect(await run(f)).toMatchObject({ state: "waiting", reason: "runner_team_not_added" });
+    expect(f.state.teamAdds).toHaveLength(1);
+    // This run: check pending, act done, then check names the team.
+    expect(f.results.slice(-3)).toMatchObject([{ state: "pending" }, { state: "done" }, { state: "waiting" }]);
+  });
+
+  test("CTC-4455: without the runner flag, a team the runner does not serve yet is named, not added", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "ok";
+    // A yes saved by an earlier run only reports on the runner.
+    f.journal.steps = [...f.journal.steps.filter((step) => step.id !== "runner"),
+      { id: "runner", state: "done", evidence: { selected: true } }];
+    const adapter = onboardRunnerAdapter({ engine: f.engine, sleep: async () => {} });
+    expect(await adapter.check(f.ctx, f.journal)).toMatchObject({
+      state: "waiting",
+      reason: "runner_needs_runner_flag",
+    });
+    expect(f.state.teamAdds).toHaveLength(0);
+  });
+
+  test("CTC-4455: a runner at its team limit is refused before this machine changes", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.team = "B";
+    f.state.teamRoute = "team_limit";
+    f.engine.calls.length = 0;
+    expect(await run(f)).toMatchObject({ state: "waiting", reason: "runner_team_limit" });
+    expect(f.engine.calls).not.toContain("composeUp");
+  });
+
+  test("a renamed enrolled machine remains recognized when another team takes its old name",async()=>{
+    const f=fixture({selected:true});withOrgKey(f);await run(f);
+    const own=f.state.hosts[0];if(!own)throw new Error("missing enrollment");own.hostName="studio-mac";
+    f.state.hosts.push({...own,hostId:"host-other",hostName:"catalyst-laptop",team:"B"});
+    expect((await run(f)).state).toBe("done");expect(f.state.mints).toHaveLength(1);
   });
 
   test("a rerun on an enrolled, running host mints nothing and changes nothing", async () => {
@@ -781,6 +1332,8 @@ describe("bringing the host up", () => {
 
   test("a saved yes alone only reports: an unattended run never restarts a stopped runner", async () => {
     const f = fixture();
+    const enrollment = f.engine.enrollment;
+    f.engine.enrollment = async (...args) => { f.engine.calls.push("credential-helper"); return enrollment(...args); };
     withOrgKey(f);
     f.journal.steps.push({
       id: "runner",
@@ -792,6 +1345,8 @@ describe("bringing the host up", () => {
       reason: "runner_needs_runner_flag",
     });
     expect(f.engine.calls).not.toContain("composeUp");
+    expect(f.engine.calls).not.toContain("nativeThoughtsCustody");
+    expect(f.engine.calls).not.toContain("credential-helper");
     expect(f.state.mints).toEqual([]);
     expect(existsSync(f.dir)).toBe(false);
   });
@@ -820,6 +1375,68 @@ describe("bringing the host up", () => {
     expect(f.state.mints).toHaveLength(1);
   });
 
+  test("a stale compose is refreshed without losing the saved disk policy or enrollment", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    expect((await run(f)).state).toBe("done");
+    const policy = [
+      "CATALYST_SLOTS=1", "CATALYST_SLOT_DISK_MODE=budget", "CATALYST_SLOT_DISK_BUDGET_GIB=12",
+      "CATALYST_DISK_BUDGET_GIB=32", "CATALYST_WORKSPACE_RETENTION_HOURS=1",
+      "CATALYST_HOST_FREE_FLOOR_GIB=45", "CATALYST_HOST_DISK_SAMPLE_DIR=/host/samples",
+      "CATALYST_HOST_DISK_SAMPLE_FILE=/var/lib/catalyst/host-disk/sample.json",
+    ];
+    const envPath = join(f.dir, ".env");
+    writeFileSync(envPath, readFileSync(envPath, "utf8") + policy.join("\n") + "\n");
+    const beforeEnv = readFileSync(envPath);
+    const beforeCredential = f.engine.files.get("CATALYST_HOST_CREDENTIAL_FILE");
+    writeFileSync(join(f.dir, "compose.yaml"), "services: {}\n");
+    f.engine.calls.length = 0;
+    expect((await run(f)).state).toBe("done");
+    expect(f.engine.calls.filter(call => call === "composeUp")).toHaveLength(1);
+    expect(readFileSync(envPath)).toEqual(beforeEnv);
+    expect(f.engine.files.get("CATALYST_HOST_CREDENTIAL_FILE")).toBe(beforeCredential);
+    expect(f.state.mints).toHaveLength(1);
+    const rendered = readFileSync(join(f.dir, "compose.yaml"), "utf8");
+    expect(rendered).toBe(readFileSync(join(__dirname, "..", "vendor/self-host/compose.yaml"), "utf8"));
+    expect(rendered).toContain("${CATALYST_HOST_DISK_SAMPLE_DIR:-./host-disk}:/var/lib/catalyst/host-disk:ro");
+    expect(rendered).toContain("CATALYST_HOST_FREE_FLOOR_GIB: ${CATALYST_HOST_FREE_FLOOR_GIB:-25}");
+    expect(rendered).toContain("CATALYST_HOST_DISK_SAMPLE_FILE: ${CATALYST_HOST_DISK_SAMPLE_FILE:-}");
+    expect(existsSync(join(f.dir, "host-disk"))).toBe(true);
+  });
+
+  test("a stale compose remains untouched when this run has not selected runner repair", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    expect((await run(f)).state).toBe("done");
+    const stale = "services: {}\n";
+    writeFileSync(join(f.dir, "compose.yaml"), stale);
+    f.engine.calls.length = 0;
+    const adapter = onboardRunnerAdapter({ selected: false, engine: f.engine });
+    // Reporting without --runner never applies an update.
+    await adapter.check(f.ctx, f.journal);
+    expect(readFileSync(join(f.dir, "compose.yaml"), "utf8")).toBe(stale);
+    expect(f.engine.calls).not.toContain("composeUp");
+  });
+
+  test("an explicit disk policy overrides saved values while retaining other saved settings", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    expect((await run(f)).state).toBe("done");
+    const envPath = join(f.dir, ".env");
+    writeFileSync(envPath, readFileSync(envPath, "utf8") + "CATALYST_HOST_FREE_FLOOR_GIB=25\nCATALYST_DISK_BUDGET_GIB=32\n");
+    f.ctx.env.CATALYST_SLOTS = "1";
+    f.ctx.env.CATALYST_HOST_FREE_FLOOR_GIB = "45";
+    f.ctx.env.CATALYST_HOST_DISK_SAMPLE_DIR = "/host/fresh-samples";
+    f.ctx.env.CATALYST_HOST_DISK_SAMPLE_FILE = "/var/lib/catalyst/host-disk/sample.json";
+    expect((await run(f)).state).toBe("done");
+    const env = readFileSync(envPath, "utf8");
+    expect(env).toContain("CATALYST_SLOTS=1\n");
+    expect(env).toContain("CATALYST_HOST_FREE_FLOOR_GIB=45\n");
+    expect(env).toContain("CATALYST_HOST_DISK_SAMPLE_DIR=/host/fresh-samples\n");
+    expect(env).toContain("CATALYST_HOST_DISK_SAMPLE_FILE=/var/lib/catalyst/host-disk/sample.json\n");
+    expect(env).toContain("CATALYST_DISK_BUDGET_GIB=32\n");
+  });
+
   test("an explicitly supplied replacement organization key replaces the saved key", async () => {
     const f = fixture({ selected: true });
     withOrgKey(f);
@@ -839,11 +1456,9 @@ describe("bringing the host up", () => {
     expect((await run(f)).reason).toBe("runner_org_key_file_invalid");
   });
 
-  test("the default host name carries a random suffix so two machines never share one", () => {
-    const a = runnerDefaultHostName(),
-      b = runnerDefaultHostName();
-    expect(a).not.toBe(b);
-    for (const name of [a, b]) expect(name).toMatch(/^catalyst-[A-Za-z0-9._-]+-[0-9a-f]{6}$/);
+  test("the machine name defaults to the hostname; enrollment IDs distinguish machines",()=>{
+    expect(runnerDefaultHostName()).toBe(hostname().split(".")[0]?.replace(/[^A-Za-z0-9._-]/g,"-").slice(0,63));
+    expect(runnerDefaultHostName()).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/);
   });
 
   test("a misshaped session network is reported, never replaced", async () => {
@@ -855,14 +1470,18 @@ describe("bringing the host up", () => {
     expect(f.state.mints).toEqual([]);
   });
 
-  test("a Compose failure fails the step", async () => {
+  test("a Compose failure fails the step naming the project and the daemon's error", async () => {
     const engine = fakeEngine();
-    engine.upError = true;
+    engine.upError = "Error response from daemon: driver failed programming external connectivity";
     const f = fixture({ selected: true, engine });
     withOrgKey(f);
     expect(await run(f)).toMatchObject({
       state: "failed",
       reason: "runner_compose_failed",
+      evidence: {
+        project: "catalyst-host",
+        composeError: "Error response from daemon: driver failed programming external connectivity",
+      },
     });
   });
 
@@ -918,19 +1537,117 @@ describe("bringing the host up", () => {
     });
   });
 
+  test("reuses the verified existing installation after the workstation state root changes", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    const before = f.engine.calls.filter(c => c === "composeUp").length;
+    f.engine.installation = async () => ({ dir: f.dir, hostName: "catalyst-laptop", baseUrl: "https://cloud.example.test" });
+    const alternative = join(f.ctx.home, "different-state");
+    f.ctx.env.CATALYST_STATE_DIR = alternative;
+    expect(await f.adapter.check(f.ctx, f.journal)).toMatchObject({ state: "done", evidence: { hostId: "host-1" } });
+    expect(existsSync(alternative)).toBe(false);
+    expect(f.engine.calls.filter(c => c === "composeUp")).toHaveLength(before);
+    expect(f.state.mints).toHaveLength(1);
+  });
+
+  test("the naming prompt chooses a new machine but preserves a verified installation name", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    let questions = 0;
+    const adapter = onboardRunnerAdapter({
+      selected: true,
+      engine: f.engine,
+      hostName: () => "default-machine",
+      chooseName: async () => { questions++; return "studio-mac"; },
+      sleep: async () => {},
+    });
+    expect((await adapter.check(f.ctx, f.journal)).state).toBe("pending");
+    expect((await adapter.act!(f.ctx, f.journal)).state).toBe("done");
+    expect(await adapter.check(f.ctx, f.journal)).toMatchObject({ state: "done", evidence: { hostName: "studio-mac" } });
+    expect(questions).toBe(1);
+    f.engine.installation = async () => ({ dir: f.dir, hostName: "studio-mac", baseUrl: "https://cloud.example.test" });
+    const envFile = join(f.dir, ".env");
+    writeFileSync(envFile, readFileSync(envFile, "utf8").replace(/^CATALYST_HOST_NAME=.*\n/m, ""));
+    const resumed = onboardRunnerAdapter({
+      selected: true,
+      engine: f.engine,
+      chooseName: async () => { questions++; return "replacement-name"; },
+      sleep: async () => {},
+    });
+    expect((await resumed.check(f.ctx, f.journal)).state).toBe("pending");
+    expect((await resumed.act!(f.ctx, f.journal)).state).toBe("done");
+    expect(await resumed.check(f.ctx, f.journal)).toMatchObject({ state: "done", evidence: { hostName: "studio-mac" } });
+    expect(questions).toBe(1);
+    expect(readFileSync(envFile, "utf8")).toContain("CATALYST_HOST_NAME=studio-mac");
+    expect(f.state.mints).toHaveLength(1);
+  });
+  test("moving on reuses only the verified existing machine's project without selecting another team", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.engine.installation = async () => ({ dir: f.dir, hostName: "catalyst-laptop", baseUrl: "https://cloud.example.test" });
+    f.journal.steps = [{ id: "linear.team", state: "skipped", reason: "returning_workspace_move_on" }];
+    expect(await f.adapter.check(f.ctx, f.journal)).toMatchObject({ state: "done", evidence: { hostId: "host-1" } });
+    expect(f.journal.steps[0]!.state).toBe("skipped");
+    expect(f.state.mints).toHaveLength(1);
+    f.engine.installation = async () => "missing";
+    expect(await f.adapter.check(f.ctx, f.journal)).toMatchObject({ state: "waiting", reason: "runner_context_unverified" });
+    expect(f.state.mints).toHaveLength(1);
+  });
+
+  test("an existing installation for another project keeps its config before an attempted repair", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.engine.installation = async () => ({ dir: f.dir, hostName: "catalyst-laptop", baseUrl: "https://cloud.example.test" });
+    f.engine.enrollment = async () => ({ hostId: "host-other", tenant: "account-a", team: "B", enrollmentKind: "self_hosted" });
+    const before = readFileSync(join(f.dir, ".env"), "utf8");
+    expect((await f.adapter.act!(f.ctx, f.journal)).reason).toBe("runner_enrolled_for_other_team");
+    expect(readFileSync(join(f.dir, ".env"), "utf8")).toBe(before);
+    expect(f.state.mints).toHaveLength(1);
+  });
+  test("an unverifiable existing installation is preserved before preparing replacement files", async () => {
+    const f = fixture({ selected: true });
+    f.engine.installation = async () => "unverified";
+    expect((await run(f)).reason).toBe("runner_installation_unverified");
+    expect(existsSync(f.dir)).toBe(false);
+    expect(f.state.mints).toHaveLength(0);
+    expect(f.engine.calls).not.toContain("composeUp");
+  });
+
+  test("a healthy exact enrollment is recognized after its machine is renamed", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts[0]!.hostName = "My renamed machine";
+    expect(await f.adapter.check(f.ctx, f.journal)).toMatchObject({
+      state: "done", evidence: { hostId: "host-1", hostName: "My renamed machine" },
+    });
+    expect(f.state.mints).toHaveLength(1);
+  });
+  test("a missing exact enrollment is unverified, never evidence of revocation", async () => {
+    const f = fixture({ selected: true });
+    withOrgKey(f);
+    await run(f);
+    f.state.hosts = [];
+    f.state.enrollOnUp = false;
+    expect((await f.adapter.check(f.ctx, f.journal)).reason).toBe("runner_enrollment_unverified");
+    expect(f.state.mints).toHaveLength(1);
+  });
+
   test("a host whose old enrollment was revoked is not silently re-enrolled over its stale credential", async () => {
     const f = fixture({ selected: true });
     withOrgKey(f);
     await run(f);
     f.state.hosts[0]!.revokedAtMs = now.getTime();
-    f.engine.files.set("CATALYST_HOST_CREDENTIAL_FILE", "stale");
-    expect((await run(f)).reason).toBe("runner_enrollment_stale");
+    expect((await run(f)).reason).toBe("runner_enrollment_revoked");
     expect(f.state.mints).toHaveLength(1);
   });
 });
 
 describe("the Docker engine", () => {
-  function recordingExec(answers: Record<string, { code: number; stdout?: string }> = {}) {
+  function recordingExec(answers: Record<string, { code: number; stdout?: string; stderr?: string }> = {}) {
     const runs: Array<{
       args: string[];
       env: NodeJS.ProcessEnv;
@@ -945,10 +1662,45 @@ describe("the Docker engine", () => {
       ) => {
         runs.push({ args, ...opts });
         const key = Object.keys(answers).find((k) => args.join(" ").startsWith(k));
-        return { code: key ? answers[key]!.code : 0, stdout: key ? (answers[key]!.stdout ?? "") : "" };
+        return {
+          code: key ? answers[key]!.code : 0,
+          stdout: key ? (answers[key]!.stdout ?? "") : "",
+          stderr: key ? (answers[key]!.stderr ?? "") : "",
+        };
       },
     };
   }
+
+  test("the production Engine exposes the closed native custody installer port", () => {
+    expect(dockerRunnerEngine().nativeThoughtsCustody).toBeTypeOf("function");
+  });
+
+  test("discovers the exact owned Compose directory and public machine identity", async () => {
+    const engine = fakeEngine({ arch: "amd64", vm: false });
+    for (const ref of [SUPERVISOR, WATCHDOG, RUNNER]) engine.images.set(ref, "amd64");
+    const f = fixture({ selected: true, engine });
+    f.engine.files.set("CATALYST_ORG_KEY_FILE", ORG_KEY);
+    await run(f);
+    const config = {
+      Image: SUPERVISOR,
+      Env: ["CATALYST_HOST_NAME=catalyst-laptop", "CATALYST_MIRROR_URL=https://cloud.example.test"],
+      Labels: {
+        "com.docker.compose.project": "catalyst-host",
+        "com.docker.compose.service": "supervisor",
+        "com.docker.compose.project.working_dir": f.dir,
+        "com.docker.compose.project.config_files": join(f.dir, "compose.yaml"),
+      },
+    };
+    const inspect = (value: unknown, code = 0) => dockerRunnerEngine({ exec: recordingExec({
+      "ps --all": { code: 0, stdout: "0123456789ab" },
+      inspect: { code, stdout: JSON.stringify(value) },
+    }).exec }).installation!(f.ctx.home, SUPERVISOR);
+    expect(await inspect([{ Config: config }])).toEqual({ dir: f.dir, hostName: "catalyst-laptop", baseUrl: "https://cloud.example.test", supervisorImage: SUPERVISOR });
+    expect(await inspect([{ Config: { ...config, Image: "unrelated:latest" } }])).toBe("unverified");
+    expect(await inspect([{ Config: config }], 1)).toBe("unverified");
+    expect(await dockerRunnerEngine({ exec: recordingExec({ "ps --all": { code: 0, stdout: "" } }).exec }).installation!(f.ctx.home, SUPERVISOR)).toBe("missing");
+    expect(await dockerRunnerEngine({ exec: recordingExec({ "ps --all": { code: 1, stdout: "" } }).exec }).installation!(f.ctx.home, SUPERVISOR)).toBe("unverified");
+  });
 
   test("Compose runs in the runner directory with the caller's CATALYST_ variables removed", async () => {
     const r = recordingExec();
@@ -956,7 +1708,7 @@ describe("the Docker engine", () => {
       exec: r.exec,
       env: { PATH: "/bin", CATALYST_RUNNER_IMAGE: "other", DOCKER_HOST: "unix:///x.sock" },
     });
-    expect(await engine.composeUp("/r")).toBe(true);
+    expect(await engine.composeUp("/r")).toEqual({ ok: true });
     expect(r.runs[0]!.args).toEqual([
       "compose",
       "--project-name",
@@ -970,6 +1722,101 @@ describe("the Docker engine", () => {
     ]);
     expect(r.runs[0]!.cwd).toBe("/r");
     expect(r.runs[0]!.env).toEqual({ PATH: "/bin", DOCKER_HOST: "unix:///x.sock" });
+  });
+
+  test("persisted native custody selects exactly the base and Darwin Compose files", async () => {
+    const f = fixture();
+    mkdirSync(f.dir, { recursive: true, mode: 0o700 });
+    const custody = nativeCustodyFixture(f.dir);
+    writeFileSync(join(f.dir, ".env"), `CATALYST_THOUGHTS_CUSTODY_AUTHORITY='${custody.envAuthority}'\nCATALYST_THOUGHTS_CUSTODY_REQUESTS_DIR=${custody.requestsRoot}\nCATALYST_THOUGHTS_CUSTODY_RESPONSES_DIR=${custody.responsesRoot}\n`, { mode: 0o600 });
+    writeFileSync(join(f.dir, "compose.darwin-thoughts.yaml"), "services: {}\n", { mode: 0o600 });
+    const r = recordingExec();
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    expect(await engine.composeUp(f.dir)).toEqual({ ok: true });
+    expect(r.runs[0]!.args).toEqual(["compose", "--project-name", "catalyst-host", "--file", join(f.dir, "compose.yaml"), "--file", join(f.dir, "compose.darwin-thoughts.yaml"), "--env-file", join(f.dir, ".env"), "up", "--detach"]);
+  });
+
+  test("partial persisted native custody refuses Compose rather than silently dropping the Darwin override", async () => {
+    const f = fixture();
+    mkdirSync(f.dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(f.dir, ".env"), "CATALYST_THOUGHTS_CUSTODY_AUTHORITY='{}'\n", { mode: 0o600 });
+    const r = recordingExec();
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    expect(await engine.composeUp(f.dir)).toEqual({ ok: false });
+    expect(r.runs).toEqual([]);
+  });
+
+  test("the existing project's containers are read with their states before Compose starts", async () => {
+    const r = recordingExec({ "ps --all": { code: 0, stdout: "watchdog\tpaused\nsupervisor\texited\n" } });
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    expect(await engine.projectContainers!()).toEqual([
+      { service: "watchdog", state: "paused" },
+      { service: "supervisor", state: "exited" },
+    ]);
+    expect(r.runs[0]!.args).toEqual([
+      "ps", "--all",
+      "--filter", "label=com.docker.compose.project=catalyst-host",
+      "--format", '{{.Label "com.docker.compose.service"}}\t{{.State}}',
+    ]);
+  });
+
+  test("an unreadable container listing reads as null, never as a wrong verdict", async () => {
+    const r = recordingExec({ "ps --all": { code: 1, stdout: "" } });
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    expect(await engine.projectContainers!()).toBeNull();
+  });
+
+  test("compose unpause adopts the paused project in place, removing nothing", async () => {
+    const r = recordingExec();
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    expect(await engine.composeUnpause!("/r")).toBe(true);
+    expect(r.runs[0]!.args).toEqual([
+      "compose", "--project-name", "catalyst-host", "--file", "/r/compose.yaml",
+      "--env-file", "/r/.env", "unpause",
+    ]);
+    expect(r.runs[0]!.cwd).toBe("/r");
+  });
+
+  test("a Compose failure carries the daemon's own error text, without log noise", async () => {
+    const r = recordingExec({ compose: { code: 1, stderr: "time=2026-10-02T12:00:00Z level=warning msg=unrelated noise\nError response from daemon: Cannot start container catalyst-host-supervisor-1: container is paused\n" } });
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    const up = await engine.composeUp("/r");
+    expect(up.ok).toBe(false);
+    expect(up.error).toBe("Error response from daemon: Cannot start container catalyst-host-supervisor-1: container is paused");
+  });
+
+  test("Compose output that is only control characters yields no error text", async () => {
+    const r = recordingExec({ compose: { code: 1, stderr: "\x00\x07\x1b" } });
+    const engine = dockerRunnerEngine({ exec: r.exec, env: {} });
+    const up = await engine.composeUp("/r");
+    expect(up.ok).toBe(false);
+    expect(up.error).toBeUndefined();
+  });
+
+  test("installation receives an exact two-file Darwin identity only with private custody files", async () => {
+    const f = fixture();
+    mkdirSync(f.dir, { recursive: true, mode: 0o700 });
+    const custody = nativeCustodyFixture(f.dir);
+    writeFileSync(join(f.dir, "compose.yaml"), "services: {}\n", { mode: 0o644 });
+    const override = join(f.dir, "compose.darwin-thoughts.yaml");
+    writeFileSync(override, "services: {}\n", { mode: 0o600 });
+    writeFileSync(join(f.dir, ".env"), `CATALYST_THOUGHTS_CUSTODY_AUTHORITY='${custody.envAuthority}'\nCATALYST_THOUGHTS_CUSTODY_REQUESTS_DIR=${custody.requestsRoot}\nCATALYST_THOUGHTS_CUSTODY_RESPONSES_DIR=${custody.responsesRoot}\n`, { mode: 0o600 });
+    for (const root of [custody.requestsRoot, custody.responsesRoot]) mkdirSync(root, { mode: 0o700 });
+    const config = { Image: SUPERVISOR, Env: ["CATALYST_HOST_NAME=catalyst-laptop", "CATALYST_MIRROR_URL=https://cloud.example.test"], Labels: {
+      "com.docker.compose.project": "catalyst-host", "com.docker.compose.service": "supervisor",
+      "com.docker.compose.project.working_dir": f.dir,
+      "com.docker.compose.project.config_files": join(f.dir, "compose.yaml") + "," + override,
+    } };
+    const inspect = () => dockerRunnerEngine({ exec: recordingExec({ "ps --all": { code: 0, stdout: "0123456789ab" }, inspect: { code: 0, stdout: JSON.stringify([{ Config: config }]) } }).exec }).installation!(f.ctx.home, SUPERVISOR);
+    expect(await inspect()).toEqual({ dir: f.dir, hostName: "catalyst-laptop", baseUrl: "https://cloud.example.test", supervisorImage: SUPERVISOR });
+    writeFileSync(override, "services: {}\n");
+    // chmod, rather than creation mode, makes the broad permissions meaningful on an existing file.
+    const { chmodSync } = await import("node:fs");
+    chmodSync(override, 0o666);
+    expect(await inspect()).toBe("unverified");
+    chmodSync(override, 0o600);
+    config.Labels["com.docker.compose.project.config_files"] += ",/foreign/override.yaml";
+    expect(await inspect()).toBe("unverified");
   });
 
   test("handing folders to the runner uid gives root back only CHOWN", async () => {
@@ -1022,20 +1869,28 @@ describe("the Docker engine", () => {
     expect(r.runs[0]!.args.join(" ")).toContain('mv -f "$tmp" "$CATALYST_ORG_KEY_FILE"');
   });
 
-  test("info reads the engine architecture and whether it runs in a VM", async () => {
+  test.each([
+    ["Ubuntu 24.04 (Colima)", "unix:///Users/person/.colima/default/docker.sock"],
+    ["Rancher Desktop", "unix:///Users/person/.rd/docker.sock"],
+    ["OrbStack", "unix:///Users/person/.orbstack/run/docker.sock"],
+    ["Docker Desktop", "unix:///Users/person/.docker/run/docker.sock"],
+    ["another Linux engine", "unix:///var/run/docker.sock"],
+  ])("macOS accepts %s by local Linux engine capabilities", async (operatingSystem, endpoint) => {
     const r = recordingExec({
       "info": {
         code: 0,
-        stdout: JSON.stringify({ Architecture: "aarch64", OperatingSystem: "Docker Desktop", OSType: "linux" }),
+        stdout: JSON.stringify({ Architecture: "aarch64", OperatingSystem: operatingSystem, OSType: "linux" }),
       },
       "compose version": { code: 0, stdout: "v2.40.0" },
     });
-    const engine = dockerRunnerEngine({ exec: r.exec, env: { DOCKER_HOST: "unix:///var/run/docker.sock" }, platform: "darwin" });
+    const engine = dockerRunnerEngine({ exec: r.exec, env: { DOCKER_HOST: endpoint }, platform: "darwin" });
     expect(await engine.info()).toEqual({ arch: "arm64", vm: true });
+    expect(await engine.socketGid()).toBeNull();
+    expect(r.runs.some(row => row.args.join(" ") === "compose version")).toBe(true);
   });
 
   test.each([
-    { platform: "darwin" as const, operatingSystem: "Colima", endpoint: "unix:///var/run/docker.sock" },
+    { platform: "darwin" as const, operatingSystem: "Ubuntu (Colima)", endpoint: "tcp://remote:2376" },
     { platform: "linux" as const, operatingSystem: "Ubuntu", endpoint: "tcp://remote:2376" },
     { platform: "darwin" as const, operatingSystem: "Docker Desktop", endpoint: "ssh://remote" },
     { platform: "linux" as const, operatingSystem: "Ubuntu", endpoint: "unix:///run/user/1000/docker.sock" },
@@ -1155,15 +2010,43 @@ describe("the Docker engine", () => {
           expect(JSON.parse(readFileSync(join(pullConfig, "config.json"), "utf8"))).toEqual({ auths: {} });
           expect(opts.env.DOCKER_CONFIG).toBe(pullConfig);
           expect(opts.env.DOCKER_CONTEXT).toBeUndefined();
+          expect(opts.env.DOCKER_AUTH_CONFIG).toBeUndefined();
         }
         return r.exec(args, opts);
       },
-      env: { DOCKER_CONFIG: "/home/x/.docker", DOCKER_CONTEXT: "local" },
+      env: { DOCKER_CONFIG: "/home/x/.docker", DOCKER_CONTEXT: "local", DOCKER_AUTH_CONFIG: '{"auths":{"private.example":{}}}' },
     });
     expect(await engine.pull(SUPERVISOR)).toBe(true);
     expect(r.runs.at(-1)!.args).toEqual(["--host", "unix:///local/docker.sock", "--config", pullConfig, "pull", "--quiet", SUPERVISOR]);
     expect(existsSync(pullConfig)).toBe(false);
-  });});
+  });
+
+  test.each([
+    { DOCKER_HOST: "tcp://remote.example:2376" },
+    { DOCKER_HOST: "unix:///local/docker.sock", DOCKER_CONTEXT: "other" },
+  ])("image preparation refuses remote or conflicting engine selectors", async (env) => {
+    const r = recordingExec();
+    expect(await dockerRunnerEngine({ exec: r.exec, env }).pull(SUPERVISOR)).toBe(false);
+    expect(r.runs.some(run => run.args.includes("pull"))).toBe(false);
+  });
+
+  test("failed anonymous image preparation removes its private configuration", async () => {
+    let pullConfig = "";
+    const engine = dockerRunnerEngine({
+      env: { DOCKER_HOST: "unix:///local/docker.sock" },
+      exec: async (args, opts) => {
+        expect(args).toContain("pull");
+        pullConfig = args[args.indexOf("--config") + 1]!;
+        expect(JSON.parse(readFileSync(join(pullConfig, "config.json"), "utf8"))).toEqual({ auths: {} });
+        expect(opts.timeoutMs).toBe(900_000);
+        return { code: 1, stdout: "" };
+      },
+    });
+    expect(await engine.pull(SUPERVISOR)).toBe(false);
+    expect(pullConfig).not.toBe("");
+    expect(existsSync(pullConfig)).toBe(false);
+  });
+});
 
 test("the vendored Compose file matches its recorded provenance", () => {
   const root = join(__dirname, "..", "vendor", "self-host");
@@ -1374,5 +2257,400 @@ describe("runner admission without a repository capacity mapping", () => {
     withOrgKey(f);
     f.state.capability!.runtimeLive = false;
     expect(await run(f)).toMatchObject({ state: "waiting", reason: "runner_host_not_ready", evidence: { capacity: 0 } });
+  });
+});
+
+describe("owner-managed preserving replacement through the existing CLI path", () => {
+  function retained() {
+    const f = fixture({ selected: true });
+    delete f.ctx.env.CATALYST_STATE_DIR;
+    delete f.ctx.env.XDG_STATE_HOME;
+    f.dir = join(f.home, ".local", "state", "catalyst", "runner");
+    mkdirSync(f.dir, { recursive: true, mode: 0o700 });
+    for (const leaf of ["slots", "thoughts", "locks"])
+      mkdirSync(join(f.dir, leaf), { mode: leaf === "slots" ? 0o700 : 0o750 });
+    const old = `ghcr.io/coalesce-labs/catalyst-supervisor@sha256:${"d".repeat(64)}`;
+    const original = `CATALYST_SUPERVISOR_IMAGE=${old}\nCATALYST_RUNNER_IMAGE=${RUNNER}\nCATALYST_HOST_NAME=catalyst-laptop\nCATALYST_MIRROR_URL=https://cloud.example.test\nCATALYST_HOST_JOIN_TOKEN=${JOIN_TOKEN}\nCATALYST_SLOTS=8\n`;
+    writeFileSync(join(f.dir, ".env"), original, { mode: 0o600 });
+    writeFileSync(
+      join(f.dir, "compose.yaml"),
+      "name: catalyst-host\nservices: {}\n",
+      { mode: 0o644 },
+    );
+    const credential = JSON.stringify({
+      version: 1,
+      enrollment: {
+        hostId: "retained-host",
+        tenant: "account-a",
+        team: "A",
+        enrollmentKind: "self_hosted",
+      },
+    });
+    f.engine.files.set("CATALYST_HOST_CREDENTIAL_FILE", credential);
+    f.engine.files.set("CATALYST_ORG_KEY_FILE", ORG_KEY);
+    f.state.enrollOnUp = false;
+    f.state.hosts.push({
+      hostId: "retained-host",
+      hostName: "catalyst-laptop",
+      team: "A",
+      enrollmentKind: "self_hosted",
+      revokedAtMs: null,
+      capability: f.state.capability,
+    });
+    let present = true;
+    const cachedRuntime = { Id: `sha256:${"d".repeat(64)}`, RepoDigests: [old] };
+    let runtimeCacheAvailable = true;
+    const row = {
+      Image: cachedRuntime.Id,
+      Config: {
+        Image: old,
+        Env: [
+          "CATALYST_HOST_NAME=catalyst-laptop",
+          "CATALYST_MIRROR_URL=https://cloud.example.test",
+        ],
+        Labels: {
+          "com.docker.compose.project": "catalyst-host",
+          "com.docker.compose.service": "supervisor",
+          "com.docker.compose.project.working_dir": f.dir,
+          "com.docker.compose.project.config_files": join(
+            f.dir,
+            "compose.yaml",
+          ),
+        },
+      },
+    };
+    const actual = dockerRunnerEngine({
+      exec: async (args) => {
+        if (args[0] === "ps")
+          return { code: 0, stdout: present ? "e".repeat(64) : "" };
+        if (args[0] === "inspect")
+          return { code: 0, stdout: JSON.stringify([row]) };
+        if (args[0] === "image" && args[1] === "inspect" && args[2] === old && runtimeCacheAvailable)
+          return { code: 0, stdout: JSON.stringify([cachedRuntime]) };
+        return { code: 1, stdout: "" };
+      },
+    });
+    f.engine.installation = actual.installation;
+    const composeUp = f.engine.composeUp;
+    f.engine.composeUp = async (...args) => {
+      const started = await composeUp(...args);
+      if (started.ok) {
+        row.Config.Image = SUPERVISOR;
+        row.Image = `sha256:${"a".repeat(64)}`;
+      }
+      return started;
+    };
+    let received = false;
+    f.engine.nativeThoughtsCustody = async ({
+      dir,
+      supervisorImage,
+      runnerImage,
+    }) => {
+      expect(dir).toBe(f.dir);
+      expect(supervisorImage).toBe(SUPERVISOR);
+      expect(runnerImage).toBe(RUNNER);
+      for (const image of [SUPERVISOR, WATCHDOG, RUNNER])
+        expect(f.engine.calls).toContain(`imageArch ${image}`);
+      expect(f.engine.calls).not.toContain("composeUp");
+      received = true;
+      return nativeCustodyFixture(dir);
+    };
+    const hasFile = f.engine.hasVolumeFile;
+    f.engine.hasVolumeFile = async (...args) => {
+      expect(received).toBe(true);
+      return hasFile(...args);
+    };
+    return {
+      f,
+      credential,
+      row,
+      cachedRuntime,
+      setRuntimeCacheAvailable: (value: boolean) => { runtimeCacheAvailable = value; },
+      removedOutsideCli: () => {
+        present = false;
+      },
+    };
+  }
+  test("a verified owner-managed old pin upgrades through standard paths, retaining enrollment and tuning", async () => {
+    const x = retained();
+    expect(await x.f.adapter.act!(x.f.ctx, x.f.journal)).toEqual({
+      state: "done",
+    });
+    expect(x.f.engine.files.get("CATALYST_HOST_CREDENTIAL_FILE")).toBe(
+      x.credential,
+    );
+    expect(x.f.engine.files.get("CATALYST_ORG_KEY_FILE")).toBe(ORG_KEY);
+    expect(x.f.state.mints).toEqual([]);
+    expect(x.f.state.keyMints).toEqual([]);
+    expect(x.f.state.admissionWrites).toEqual([]);
+    expect(x.f.engine.calls.filter((c) => c === "composeUp")).toHaveLength(1);
+    const saved = readFileSync(join(x.f.dir, ".env"), "utf8");
+    expect(saved).toContain(`CATALYST_SUPERVISOR_IMAGE=${SUPERVISOR}`);
+    expect(saved).toContain(`CATALYST_WATCHDOG_IMAGE=${WATCHDOG}`);
+    expect(saved).toContain(`CATALYST_RUNNER_IMAGE=${RUNNER}`);
+    expect(saved).toContain("CATALYST_SLOTS=8");
+    expect(saved).toContain(`CATALYST_HOST_JOIN_TOKEN=${JOIN_TOKEN}`);
+    for (const leaf of ["thoughts", "locks"])
+      expect(statSync(join(x.f.dir, leaf)).mode & 0o777).toBe(0o750);
+    secretsNowhere(x.f);
+  });
+  test("a running image that differs from the saved pin stays unverified", async () => {
+    const x = retained();
+    x.row.Config.Image = `ghcr.io/coalesce-labs/catalyst-supervisor@sha256:${"f".repeat(64)}`;
+    expect((await x.f.adapter.act!(x.f.ctx, x.f.journal)).reason).toBe("runner_installation_unverified");
+    expect(x.f.engine.calls).not.toContain("composeUp");
+  });
+  function actOwned(f: ReturnType<typeof fixture>) {
+    if (!f.adapter.act) throw Error("fixture must provide an installer action");
+    return f.adapter.act(f.ctx, f.journal);
+  }
+  test("resumes the exact requested pin after an interrupted owner-managed upgrade", async () => {
+    const x = retained();
+    writeFileSync(join(x.f.dir, ".env"), readFileSync(join(x.f.dir, ".env"), "utf8").replace(/CATALYST_SUPERVISOR_IMAGE=[^\n]+/, `CATALYST_SUPERVISOR_IMAGE=${SUPERVISOR}`), { mode: 0o600 });
+    expect(await actOwned(x.f)).toEqual({ state: "done" });
+    expect(x.f.engine.calls.filter(call => call === "composeUp")).toHaveLength(1);
+    expect(x.f.engine.files.get("CATALYST_HOST_CREDENTIAL_FILE")).toBe(x.credential);
+    expect(x.f.state.mints).toEqual([]);
+  });
+  function interruptedIntent(x: ReturnType<typeof retained>) {
+    const middle = `ghcr.io/coalesce-labs/catalyst-supervisor@sha256:${"e".repeat(64)}`;
+    writeFileSync(join(x.f.dir, ".env"), readFileSync(join(x.f.dir, ".env"), "utf8").replace(/CATALYST_SUPERVISOR_IMAGE=[^\n]+/, `CATALYST_SUPERVISOR_IMAGE=${middle}`), { mode: 0o600 });
+  }
+  test("a cached old runtime upgrades after saved intent advanced to a different intermediate pin", async () => {
+    const x = retained();
+    interruptedIntent(x);
+    expect(await actOwned(x.f)).toEqual({ state: "done" });
+    expect(x.f.engine.calls.filter(call => call === "composeUp")).toHaveLength(1);
+    expect(x.f.engine.files.get("CATALYST_HOST_CREDENTIAL_FILE")).toBe(x.credential);
+    expect(x.f.state.mints).toEqual([]);
+    expect(readFileSync(join(x.f.dir, ".env"), "utf8")).toContain(`CATALYST_SUPERVISOR_IMAGE=${SUPERVISOR}`);
+  });
+  test.each(["cache unavailable", "cached identity differs", "configured digest absent", "runtime identity absent", "runtime identity unpinned"])("intermediate saved intent refuses %s before custody, enrollment or config writes", async kind => {
+    const x = retained();
+    interruptedIntent(x);
+    const before = readFileSync(join(x.f.dir, ".env"));
+    if (kind === "cache unavailable") x.setRuntimeCacheAvailable(false);
+    if (kind === "cached identity differs") x.cachedRuntime.Id = `sha256:${"f".repeat(64)}`;
+    if (kind === "configured digest absent") x.cachedRuntime.RepoDigests = [];
+    if (kind === "runtime identity absent") x.row.Image = "";
+    if (kind === "runtime identity unpinned") x.row.Image = "latest";
+    x.f.engine.nativeThoughtsCustody = async () => { throw Error("must not reach custody on an unverified runtime"); };
+    x.f.engine.enrollment = async () => { throw Error("must not reach enrollment on an unverified runtime"); };
+    expect((await actOwned(x.f)).reason).toBe("runner_installation_unverified");
+    expect(readFileSync(join(x.f.dir, ".env"))).toEqual(before);
+    expect(x.f.engine.calls).not.toContain("composeUp");
+  });
+  test("a custody refusal preserves the old pin and permits a supported retry", async () => {
+    const x = retained();
+    const before = readFileSync(join(x.f.dir, ".env"));
+    const custody = x.f.engine.nativeThoughtsCustody;
+    x.f.engine.nativeThoughtsCustody = async () => { throw Error("native custody refused"); };
+    expect((await actOwned(x.f)).reason).toBe("runner_thoughts_custody_unavailable");
+    expect(readFileSync(join(x.f.dir, ".env"))).toEqual(before);
+    expect(x.f.engine.calls).not.toContain("composeUp");
+    x.f.engine.nativeThoughtsCustody = custody;
+    expect(await actOwned(x.f)).toEqual({ state: "done" });
+    expect(x.f.engine.calls.filter(call => call === "composeUp")).toHaveLength(1);
+  });
+  test.each(["latest", `ghcr.io/another-publisher/supervisor@sha256:${"f".repeat(64)}`])("requested saved intent never adopts a foreign or unpinned runtime image: %s", async image => {
+    const x = retained();
+    x.row.Config.Image = image;
+    writeFileSync(join(x.f.dir, ".env"), readFileSync(join(x.f.dir, ".env"), "utf8").replace(/CATALYST_SUPERVISOR_IMAGE=[^\n]+/, `CATALYST_SUPERVISOR_IMAGE=${SUPERVISOR}`), { mode: 0o600 });
+    expect((await actOwned(x.f)).reason).toBe("runner_installation_unverified");
+    expect(x.f.engine.calls).not.toContain("composeUp");
+  });
+  test("a matching saved and running pin from another image repository stays unverified", async () => {
+    const x = retained();
+    const foreign = `ghcr.io/another-publisher/supervisor@sha256:${"f".repeat(64)}`;
+    x.row.Config.Image = foreign;
+    writeFileSync(join(x.f.dir, ".env"), readFileSync(join(x.f.dir, ".env"), "utf8").replace(/CATALYST_SUPERVISOR_IMAGE=[^\n]+/, `CATALYST_SUPERVISOR_IMAGE=${foreign}`), { mode: 0o600 });
+    x.f.engine.enrollment = async () => { throw new Error("must not read enrollment from foreign image"); };
+    expect((await x.f.adapter.act!(x.f.ctx, x.f.journal)).reason).toBe("runner_installation_unverified");
+    expect(x.f.engine.calls).not.toContain("composeUp");
+  });
+  test("an unpinned saved image stays unverified", async () => {
+    const x = retained();
+    writeFileSync(join(x.f.dir, ".env"), readFileSync(join(x.f.dir, ".env"), "utf8").replace(/CATALYST_SUPERVISOR_IMAGE=[^\n]+/, "CATALYST_SUPERVISOR_IMAGE=latest"), { mode: 0o600 });
+    expect((await x.f.adapter.act!(x.f.ctx, x.f.journal)).reason).toBe("runner_installation_unverified");
+    expect(x.f.engine.calls).not.toContain("composeUp");
+  });
+  test("an old pin with a different saved runtime identity stays unverified", async () => {
+    const x = retained();
+    writeFileSync(join(x.f.dir, ".env"), readFileSync(join(x.f.dir, ".env"), "utf8").replace("CATALYST_HOST_NAME=catalyst-laptop", "CATALYST_HOST_NAME=someone-else"), { mode: 0o600 });
+    expect((await x.f.adapter.act!(x.f.ctx, x.f.journal)).reason).toBe("runner_installation_unverified");
+    expect(x.f.engine.calls).not.toContain("composeUp");
+  });
+  test("an old pin with a different saved cloud URL stays unverified", async () => {
+    const x = retained();
+    writeFileSync(join(x.f.dir, ".env"), readFileSync(join(x.f.dir, ".env"), "utf8").replace("CATALYST_MIRROR_URL=https://cloud.example.test", "CATALYST_MIRROR_URL=https://other.example.test"), { mode: 0o600 });
+    x.f.engine.enrollment = async () => { throw new Error("must not read enrollment from mismatched cloud"); };
+    expect((await x.f.adapter.act!(x.f.ctx, x.f.journal)).reason).toBe("runner_installation_unverified");
+    expect(x.f.engine.calls).not.toContain("composeUp");
+  });
+  test("a missing old container can still be replaced through the verified saved enrollment", async () => {
+    const x = retained();
+    x.removedOutsideCli();
+    expect(await x.f.adapter.act!(x.f.ctx, x.f.journal)).toEqual({ state: "done" });
+    expect(x.f.engine.files.get("CATALYST_HOST_CREDENTIAL_FILE")).toBe(x.credential);
+    expect(x.f.state.mints).toEqual([]);
+    expect(x.f.engine.calls.filter((call) => call === "composeUp")).toHaveLength(1);
+  });
+  test.each(["uncached target", "native custody refusal"])(
+    "refuses %s before reading or changing retained credentials or activating Compose",
+    async (kind) => {
+      const x = retained();
+      x.removedOutsideCli();
+      if (kind === "uncached target") x.f.engine.images.delete(SUPERVISOR);
+      else
+        x.f.engine.nativeThoughtsCustody = async () => {
+          throw new Error("native custody refused");
+        };
+      expect((await x.f.adapter.act!(x.f.ctx, x.f.journal)).state).toBe(
+        "waiting",
+      );
+      expect(x.f.engine.files.get("CATALYST_HOST_CREDENTIAL_FILE")).toBe(
+        x.credential,
+      );
+      expect(x.f.engine.files.get("CATALYST_ORG_KEY_FILE")).toBe(ORG_KEY);
+      expect(x.f.state.mints).toEqual([]);
+      expect(x.f.state.keyMints).toEqual([]);
+      expect(x.f.state.admissionWrites).toEqual([]);
+      expect(x.f.engine.calls).not.toContain("composeUp");
+      expect(x.f.engine.calls.filter(call => call.startsWith("pull "))).toEqual(
+        kind === "uncached target" ? [`pull ${SUPERVISOR}`] : [],
+      );
+    },
+  );
+});
+
+describe("installing over an existing catalyst-host project", () => {
+  function withOrgKey(f: ReturnType<typeof fixture>) {
+    const file = join(f.home, "org-key");
+    writeFileSync(file, `${ORG_KEY}\n`, { mode: 0o600 });
+    f.ctx.env.CATALYST_RUNNER_ORG_KEY_FILE = file;
+  }
+
+  test("a paused project is resumed and adopted before Compose starts", async () => {
+    const engine = fakeEngine();
+    engine.containers = [
+      { service: "supervisor", state: "paused" },
+      { service: "watchdog", state: "paused" },
+    ];
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostId: "host-1" } });
+    expect(engine.calls.indexOf("composeUnpause")).toBeGreaterThan(-1);
+    expect(engine.calls.indexOf("composeUnpause")).toBeLessThan(engine.calls.indexOf("composeUp"));
+    expect(engine.containers?.every((row) => row.state === "running")).toBe(true);
+    expect(f.messages.join("\n")).toContain("Resumed the paused containers (supervisor, watchdog)");
+    expect(f.messages.join("\n")).toContain("catalyst-host");
+    secretsNowhere(f);
+  });
+
+  test("a paused project that cannot resume stops with the exact command, never exit 10", async () => {
+    const engine = fakeEngine();
+    engine.containers = [{ service: "supervisor", state: "paused" }];
+    engine.unpauseFails = true;
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    const result = await run(f);
+    expect(result).toMatchObject({
+      state: "waiting",
+      reason: "runner_compose_paused",
+      evidence: { project: "catalyst-host", services: "supervisor" },
+    });
+    expect(engine.calls).not.toContain("composeUp");
+    if (result.state !== "waiting") throw Error("expected a waiting result");
+    const text = onboardReasonText({ id: "runner", ...result, state: result.state });
+    expect(text).toContain("docker compose -p catalyst-host unpause");
+    expect(text).toContain("supervisor");
+    expect(text).toContain("catalyst onboard --runner");
+    expect(text).toContain("removed nothing");
+    secretsNowhere(f);
+  });
+
+  test("a stopped project is adopted with its stopped containers named", async () => {
+    const engine = fakeEngine();
+    engine.containers = [
+      { service: "supervisor", state: "exited" },
+      { service: "watchdog", state: "exited" },
+    ];
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostId: "host-1" } });
+    expect(engine.calls).not.toContain("composeUnpause");
+    expect(f.messages.join("\n")).toContain("Starting the existing catalyst-host project's stopped containers (supervisor, watchdog)");
+    secretsNowhere(f);
+  });
+
+  test("a changed Compose file names the existing containers it replaces", async () => {
+    const engine = fakeEngine();
+    engine.containers = [{ service: "supervisor", state: "running" }];
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    mkdirSync(f.dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(f.dir, "compose.yaml"), "name: catalyst-host\nservices: {}\n", { mode: 0o644 });
+    expect(await f.adapter.act!(f.ctx, f.journal)).toEqual({ state: "done" });
+    expect(f.messages.join("\n")).toContain("Replacing the existing catalyst-host project's containers (supervisor)");
+    secretsNowhere(f);
+  });
+
+  test("a clean machine behaves exactly as today", async () => {
+    const engine = fakeEngine();
+    engine.containers = [];
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    expect(await run(f)).toMatchObject({ state: "done", evidence: { hostId: "host-1", capacity: 2 } });
+    expect(engine.calls).not.toContain("composeUnpause");
+    expect(f.messages.join("\n")).not.toMatch(/existing catalyst-host project/i);
+    const legacy = fakeEngine();
+    delete legacy.projectContainers;
+    delete legacy.composeUnpause;
+    const plain = fixture({ selected: true, engine: legacy });
+    withOrgKey(plain);
+    expect(await run(plain)).toMatchObject({ state: "done", evidence: { hostId: "host-1" } });
+    expect(legacy.calls).not.toContain("composeUnpause");
+    secretsNowhere(f);
+    secretsNowhere(plain);
+  });
+
+  test("a Compose failure over a stopped project names the error, the project and the next command", async () => {
+    const engine = fakeEngine();
+    engine.containers = [{ service: "supervisor", state: "exited" }];
+    engine.upError = "Error response from daemon: Cannot start container catalyst-host-supervisor-1: container is paused";
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    const result = await run(f);
+    expect(result).toMatchObject({
+      state: "failed",
+      reason: "runner_compose_failed",
+      evidence: { project: "catalyst-host", composeError: "Error response from daemon: Cannot start container catalyst-host-supervisor-1: container is paused" },
+    });
+    if (result.state !== "failed") throw Error("expected a failed result");
+    const text = onboardReasonText({ id: "runner", ...result, state: result.state });
+    expect(text).toContain("runner project catalyst-host");
+    expect(text).toContain("container is paused");
+    expect(text).toContain("docker compose -p catalyst-host logs");
+    expect(text).toContain("catalyst onboard --runner");
+    secretsNowhere(f);
+  });
+
+  test("a Compose failure without captured output still names the project and the next command", async () => {
+    const engine = fakeEngine();
+    engine.upError = "";
+    const f = fixture({ selected: true, engine });
+    withOrgKey(f);
+    const result = await run(f);
+    expect(result).toMatchObject({
+      state: "failed",
+      reason: "runner_compose_failed",
+      evidence: { project: "catalyst-host" },
+    });
+    if (result.state !== "failed" || !result.evidence) throw Error("expected a failed result with evidence");
+    expect(result.evidence.composeError).toBeUndefined();
+    const text = onboardReasonText({ id: "runner", ...result, state: result.state });
+    expect(text).toContain("runner project catalyst-host");
+    expect(text).toContain("docker compose -p catalyst-host logs");
+    secretsNowhere(f);
   });
 });

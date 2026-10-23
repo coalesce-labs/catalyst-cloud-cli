@@ -3,3 +3,49 @@
 
 [project]
 linear_team = "CTC"
+
+[merge]
+# codex-attestation, matching catalyst-cloud: green required checks, every review thread resolved, and
+# one review. The review is the Codex bot, an App "Independent Agent Review" at the head, an
+# "Independent Agent Fix Check" naming the reviewed base, or a human approval at the head. Not strict:
+# strict refuses every PR while no reviewer row is configured for this repository (CTC-6009).
+policy = "codex-attestation"
+
+# The same install and checks the ci.yml pull request gate runs. The evals job is left out: it needs an Anthropic key and a Claude Code install.
+# bun is the runner image's own 1.4.2: mise cannot install bun, so any other version fails toolchain_missing (CTC-6377). ci.yml keeps its own pins.
+[environment]
+toolchains = [{ name = "node", version = "22" }, { name = "bun", version = "1.4.2" }]
+
+[[environment.setup]]
+name = "install-dependencies"
+run = ["sh", "-lc", "bun install --frozen-lockfile"]
+timeout_seconds = 900
+cache_key_files = ["bun.lock"]
+
+[environment.container]
+git = { submodules = false, lfs = false }
+
+[[environment.verify]]
+name = "release-check"
+run = ["sh", "-lc", "bun run release:check"]
+
+[[environment.verify]]
+name = "typecheck"
+run = ["sh", "-lc", "bun run typecheck"]
+
+[[environment.verify]]
+name = "vendored-copies"
+run = ["sh", "-lc", "bun run settings:check && bun run self-host:check"]
+
+[[environment.verify]]
+name = "test"
+run = ["sh", "-lc", "bun run test"]
+timeout_seconds = 1800
+
+[[environment.verify]]
+name = "build"
+run = ["sh", "-lc", "bun run build"]
+
+[[environment.verify]]
+name = "skills-scan"
+run = ["sh", "-lc", "bun run skills:scan"]

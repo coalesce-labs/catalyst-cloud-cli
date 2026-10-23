@@ -3,7 +3,8 @@
 // stops sending the person to a page for it, and when a verb is missing the guide says "update the
 // CLI" rather than inventing a command. Each capability names the role the cloud requires for it
 // and the contract routes it rides; availability is judged against the CACHED contract only, so
-// this verb never reaches the network and never blocks.
+// this verb never reaches the network and never blocks. Every new setup route gets a row here and a
+// guide line that offers it; a page link for a step with a row is a bug.
 import type { ParsedArgs } from "./args.js";
 import { readManifest, type Ctx } from "./config.js";
 import { readContractCache } from "./contract.js";
@@ -15,6 +16,8 @@ export type CapabilityRole = "member" | "admin";
 export interface Capability {
   /** Explicit support for the bootstrap's state and lock transfer contract. */
   bootstrapHandoff?: boolean;
+  /** Revision 2 continues setup with runner flags and a returning workspace review. */
+  bootstrapHandoffVersion?: number;
   /** CTC-4625: the install engine's event protocol `setup` speaks; install.sh checks it before use. */
   engineProtocol?: number;
   /** `onboard --headless`: inputs by flag, env or file; no prompt, no browser (CTC-4633). */
@@ -36,9 +39,12 @@ const agent = (method: "GET" | "POST", name: string) => ({ method, path: `/api/v
  *  the person, the workspace, the project, the repository, then work. A new verb is a new row here
  *  in the same change, or `catalyst capabilities` lies to every guide that reads it. */
 export const CAPABILITIES: readonly Capability[] = [
+  {verb:"hosts",does:"list this account's machines, current use and live capacity",needs:"member",routes:[],since:"0.16.0"},
+  {verb:"hosts remove|rename",does:"remove or rename a self-hosted machine in this account",needs:"admin",routes:[],since:"0.16.0"},
+  {verb:"runner update|auto-update",does:"move this machine's self-hosted runner to the release Catalyst approved, and check for one every 15 minutes",needs:"member",routes:[],since:"0.16.16"},
   // CTC-4680: plain `catalyst setup` runs the onboard flow, so install.sh may hand off to it. install.sh
   // reads this flag rather than `setup --help`, which already exits 0 on 0.15.x.
-  { verb: "setup", does: "set up Catalyst step by step, or show install.sh's plan, progress and sign-in in this terminal", needs: "member", routes: [], since: "0.15.0", engineProtocol: 1, bootstrapHandoff: true },
+  { verb: "setup", does: "set up Catalyst step by step, or show install.sh's plan, progress and sign-in in this terminal", needs: "member", routes: [], since: "0.15.0", engineProtocol: 1, bootstrapHandoff: true, bootstrapHandoffVersion: 2 },
   { verb: "onboard", does: "run and resume Catalyst setup with a saved step record", needs: "member", routes: [], since: "0.14.0", bootstrapHandoff: true, headless: true },
   { verb: "status", does: "say whether this machine is connected, as whom, and to which cloud", needs: "member", routes: [], since: "0.1.0" },
   { verb: "me", does: "read the person's seat, role and Linear identity", needs: "member", routes: [], since: "0.1.0" },
@@ -58,18 +64,24 @@ export const CAPABILITIES: readonly Capability[] = [
   { verb: "project wip-limit set", does: "set a project's new-start WIP limit (0 to 9999, or back to the workspace default)", needs: "admin", routes: [agent("POST", "team-wip-limit")], since: "0.13.1" },
   { verb: "repo agents-block", does: "add or refresh the one Catalyst block in a checkout's AGENTS.md, in the working tree, for the person to commit and open as a pull request", needs: "member", routes: [], since: "0.13.1" },
   { verb: "repo agent-setup", does: "read a checkout's agent setup (AGENTS.md, CLAUDE.md, .agents and .claude skills and rules) and, on request, make it portable in the working tree", needs: "member", routes: [], since: "0.13.1" },
+  { verb: "env shell", does: "open this repository's environment on this computer: Catalyst's image, the declared toolchain and variables (needs Docker; no login for Catalyst's image)", needs: "member", routes: [], since: "0.16.20" },
   { verb: "legacy", does: "find leftovers of the old local Catalyst runtime on this machine and, on a yes, remove them through their own tools", needs: "member", routes: [], since: "0.13.1" },
   { verb: "environment read", does: "read the workspace-wide environment declaration", needs: "member", routes: [agent("GET", "account-environment")], since: "0.8.0" },
   { verb: "environment propose", does: "propose the workspace-wide environment declaration (names only)", needs: "admin", routes: [agent("POST", "account-environment/propose")], since: "0.8.0" },
   { verb: "environment approve", does: "approve the workspace-wide environment declaration", needs: "admin", routes: [agent("POST", "account-environment/approve")], since: "0.8.0" },
   { verb: "secret set|import", does: "enter a repository secret's value from this terminal, never echoed", needs: "admin", routes: [], since: "0.8.0" },
   { verb: "var set|import", does: "enter plain environment variable values from this terminal, never echoed", needs: "admin", routes: [], since: "0.13.2" },
+  { verb: "env import", does: "store this computer's values for the names .catalyst/catalyst.toml declares, never printed", needs: "admin", routes: [], since: "0.16.20" },
   { verb: "accounts", does: "read the workspace's coding accounts and which can take work", needs: "member", routes: [], since: "0.5.0" },
   { verb: "explain|running|queue|history", does: "read why a ticket runs or waits, what runs now, and what is queued", needs: "member", routes: [], since: "0.1.0" },
   { verb: "write comment|state|label|create|reaction|attachment|session", does: "act on a ticket as the person, through the agent proxy", needs: "member", routes: [agent("POST", "issue-comment"), agent("POST", "issue-state"), agent("POST", "issue-label"), agent("POST", "issue-create")], since: "0.1.0" },
   { verb: "ask raise|accept|list", does: "raise a decision to a human, or answer one", needs: "member", routes: [agent("POST", "ask"), agent("POST", "ask-accept")], since: "0.1.0" },
+  { verb: "ask answer --proxy", does: "record an answer the ask's owner gave in chat, quoted exactly, when the owner has turned answers by proxy on", needs: "member", routes: [agent("POST", "ask-answer-proxy")], since: "0.16.23" },
+  { verb: "ask proxy status|on|off", does: "read or set whether agents may record an answer you give them in chat (your own login only)", needs: "member", routes: [], since: "0.16.23" },
+  { verb: "ask disown", does: "take back an answer recorded by proxy on your ask, reopening it (your own login only)", needs: "member", routes: [], since: "0.16.23" },
   { verb: "release", does: "release a parked ticket or a whole failure class back to work", needs: "admin", routes: [agent("POST", "ticket-release"), agent("POST", "ticket-release-class")], since: "0.6.0" },
   { verb: "mcp add|list|remove", does: "register an MCP server for the workspace by vault-secret name", needs: "admin", routes: [agent("POST", "mcp")], since: "0.9.0" },
+  { verb: "mcp status", does: "read an MCP server's state, auth kind, grants for this key, tool count and its last 50 tool calls with each failure's reason", needs: "member", routes: [], since: "0.16.24" },
 ];
 
 export type CapabilityAvailability = "available" | "needs_newer_cloud" | "cloud_unread";

@@ -201,10 +201,11 @@ export function apiBase(cfg: Pick<CustomerConfig, "baseUrl">): string {
   return `${normalizeBaseUrl(cfg.baseUrl)}/api/v1`;
 }
 
-/** True when the Catalyst installer owns skill placement on this machine: it exports
- *  CATALYST_SKILLS_DIR, or it wrote the machine paths file (every v1 record carries a skills role).
+/** True when the Catalyst installer owns skill placement on this machine: it marks the current
+ *  install, exports CATALYST_SKILLS_DIR, or wrote the machine paths file (every v1 record carries a skills role).
  *  The CLI then never refreshes skill folders itself; the installer's own refresh does. */
 export function installerOwnsSkills(home: string, env: NodeJS.ProcessEnv = {}): boolean {
+  if (env.CATALYST_INSTALL_SKILLS_OWNER === "1") return true;
   if (env.CATALYST_SKILLS_DIR !== undefined && env.CATALYST_SKILLS_DIR !== "") return true;
   try {
     const file = machinePathsFile({ env: { ...env, HOME: home } });

@@ -1,3 +1,6 @@
+import { cmdHosts, type HostsDeps } from "./hosts.js";
+import { cmdRunner, type RunnerCommandDeps } from "./runner-command.js";
+import { cmdSeat } from "./seat.js";
 // cli.ts — the `catalyst` dispatcher (npm: @catalyst-cloud/cli). Verbs live in
 // their own modules; this file keeps every export the 0.1 tests and the bin import.
 import {
@@ -92,6 +95,7 @@ import { cmdWrite, type WriteDeps } from "./write.js";
 import { cmdAsk } from "./ask.js";
 import { cmdMcp } from "./mcp.js";
 import { cmdRelease } from "./release.js";
+import { cmdStage } from "./stage.js";
 import { cmdEnvironment, type EnvironmentDeps } from "./environment.js";
 import { cmdEnv, type EnvDeps } from "./env.js";
 import { cmdSecret, type SecretDeps } from "./secret.js";
@@ -202,7 +206,10 @@ export function usageText(): string {
     "  catalyst onboard [--resume-from <step>] [--only <step>] [--runner|--no-runner] [--yes] [--dry-run] [--json]",
     `  catalyst ${SETUP_USAGE}`,
     "  catalyst status | notice | me | ready | accounts",
-    "  catalyst mcp add|list|remove (vault references only)",
+    "  catalyst seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE]",
+    "  catalyst hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name>",
+    "  catalyst runner update [--check] | runner auto-update [status|on|off]   (move this machine's runner to the approved release)",
+    "  catalyst mcp add|list|remove (vault references only) | mcp status <name>   (a server's state, grants and last 50 tool calls)",
     "  catalyst contract [--refresh] [--path <a.b.c>]",
     "  catalyst query <issues|issue <id>|pulls|pull <id>|projects|cycles|search <terms>|changes --since <cursor|head>>",
     '  catalyst replica <start [--detach]|stop|status [--probe]|sql "<select>"|schema [table]>',
@@ -211,15 +218,16 @@ export function usageText(): string {
     "  catalyst explain <ticket> | history <ticket> | running [--ticket T --phase P] | queue [--team K]",
     "  catalyst watch [--team K] [--ticket T]... [--project P] [--exec CMD]",
     "  catalyst write <comment|state|label|create|reaction|attachment|session> ...",
-    "  catalyst ask <raise|accept|list> ...",
+    "  catalyst ask <raise|accept|answer --proxy|proxy [status|on|off]|disown|list> ...",
     "  catalyst release <ticket> --because <what changed> [--retry-unchanged] [--dry-run] | release --class <c> --team <K> ...",
     "  catalyst environment [read] | environment propose --file <path>|--stdin [--approve] | environment approve   (your account; needs login)",
-    "  catalyst env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write]> [--json]   (this repository, offline — no login, no network)",
+    "  catalyst env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (this repository; no login — shell needs Docker and downloads Catalyst's image once)",
     "  catalyst secret set <NAME> --repo <owner/name> [--command '<cmd>'] | secret import <file> --repo <owner/name> [--names NAME[,NAME...]]",
     "  catalyst var set <NAME> | var import <file> [--repo <owner/name>] [--names NAME[,NAME...]]   (plain environment variables)",
     "  catalyst team <list|check|map|adopt|migrate|checklist> ...",
     "  catalyst capabilities [--json]   (what this CLI can do, the role each verb needs, and whether this cloud serves it)",
     "  catalyst project list [--json]   (all workspace projects, including those with no stage mapping)",
+    "  catalyst stage <start|renew|done|fail> <ticket> <phase>   (a cloud-claimed local phase)",
     "  catalyst project wip-limit <get|set <n>|set default> [--team K]   (a project's new-start WIP limit; members read, owners and admins set)",
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
@@ -260,6 +268,8 @@ export interface MainDeps {
   secret?: SecretDeps;
   var?: VarDeps;
   connections?: ConnectionsDeps;
+  hosts?: HostsDeps;
+  runner?: RunnerCommandDeps;
   identity?: IdentityDeps;
   team?: TeamDeps;
   legacy?: LegacyDeps;
@@ -569,11 +579,11 @@ export async function main(
               ...(deps.setupApproved
                 ? { reviewedSetup: true, confirm: async () => true }
                 : {}),
-              beforeStep: async () => {
-                if (args.flags["dry-run"] !== true)
-                  await refreshSessionIfShort(ctx, ONBOARD_STEP_MIN_MS);
-              },
               ...createOnboardRuntime(args, ctx, {
+                beforeStep: async () => {
+                  if (args.flags["dry-run"] !== true)
+                    await refreshSessionIfShort(ctx, ONBOARD_STEP_MIN_MS);
+                },
                 ui,
                 signinTimeoutMs: deps.onboardSigninTimeoutMs,
                 stageSignin: (signal) => {
@@ -714,8 +724,12 @@ export async function main(
         return await cmdMcp(args, ctx);
       case "accounts":
         return await cmdAccounts(args, ctx);
+      case "seat":
+        return await cmdSeat(args, ctx);
       case "release":
         return await cmdRelease(args, ctx);
+      case "stage":
+        return await cmdStage(args, ctx);
       case "environment":
         return await cmdEnvironment(args, ctx, deps.environment ?? {});
       case "env":
@@ -736,6 +750,10 @@ export async function main(
         return await cmdLegacy(args, ctx, deps.legacy ?? {});
       case "identity":
         return await cmdIdentity(args, ctx, deps.identity ?? {});
+      case "hosts":
+        return await cmdHosts(args, ctx, deps.hosts);
+      case "runner":
+        return await cmdRunner(args, ctx, deps.runner);
       case "connections":
         return await cmdConnections(args, ctx, deps.connections ?? {});
       default:
@@ -862,6 +880,7 @@ async function runSetup(
           ...(flags.json ? ["--json"] : []),
           ...(flags.verbose ? ["--verbose"] : []),
           ...(flags.localSync ? ["--local-sync"] : []),
+          ...(flags.runner === undefined ? [] : [flags.runner ? "--runner" : "--no-runner"]),
           ...(flags.yes || flags.json || !terminal ? ["--yes"] : []),
         ];
         let ui: OnboardUi | undefined;
@@ -986,7 +1005,7 @@ async function cmdLogin(
     );
   } else {
     ctx.stderr(
-      `[catalyst] this is your Catalyst workspace's shared key (a host credential), not your own. The skills work, but nothing your agent writes will carry your name, and "what needs me" cannot mean you. Make a personal key at Settings → API keys and sign in with that.`,
+      `[catalyst] this is your Catalyst workspace's shared key (a host credential), not your own. The skills work, but nothing your agent writes will carry your name, and "what needs me" cannot mean you. Run catalyst login to sign in as yourself; for an unattended machine, make a personal key at Settings → API keys and sign in with that.`,
     );
   }
   ctx.stdout(

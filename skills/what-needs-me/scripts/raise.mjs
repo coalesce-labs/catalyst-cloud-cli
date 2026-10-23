@@ -14,12 +14,16 @@ const SPEC = {
   blocks: { value: true, repeat: true, help: "a ticket this decision holds (repeat per ticket)" },
   "nothing-to-block": { value: false, help: "declare that no ticket is held (the ask then never shows in Waiting on me)" },
   "ask-key": { value: true, help: "idempotency key so a re-run does not file a second ask" },
+  "gates-pr": { value: true, repeat: true, help: "a PR whose hold label the answer removes (repeat per PR; needs --released-by)" },
+  "gates-label": { value: true, repeat: true, help: "the hold the answer removes: hold or hold:preview (repeatable; default hold)" },
+  "released-by": { value: true, repeat: true, help: "an option letter whose answer releases the hold (repeat per letter)" },
+  "gates-repo": { value: true, help: "the --gates-pr repository as owner/name (default: the account's only repository)" },
   json: { value: false, help: "print the cloud's response as JSON" },
 };
 
 const { help, flags } = parseFlags(process.argv.slice(2), SPEC);
 if (help) {
-  printHelp("node scripts/raise.mjs --team <key> --title <question> [--context <text>] [--option <text>]... [--default <text>] --blocks <ticket>... | --nothing-to-block [--ask-key <key>] [--json] [--help]", SPEC, [
+  printHelp("node scripts/raise.mjs --team <key> --title <question> [--context <text>] [--option <text>]... [--default <text>] --blocks <ticket>... | --nothing-to-block [--ask-key <key>] [--gates-pr <n>... --released-by <letter>... [--gates-label hold|hold:preview]... [--gates-repo <owner/name>]] [--json] [--help]", SPEC, [
     "Search for an existing ask first (node scripts/inbox.mjs); one decision, one ask.",
     "File BEFORE proceeding on the default. Cite the identifier only from this script's output.",
   ]);
@@ -41,6 +45,10 @@ if (flags.default) args.push("--default", flags.default);
 for (const b of flags.blocks ?? []) args.push("--blocks", b);
 if (flags["nothing-to-block"]) args.push("--nothing-to-block");
 if (flags["ask-key"]) args.push("--ask-key", flags["ask-key"]);
+for (const n of flags["gates-pr"] ?? []) args.push("--gates-pr", n);
+for (const l of flags["gates-label"] ?? []) args.push("--gates-label", l);
+for (const l of flags["released-by"] ?? []) args.push("--released-by", l);
+if (flags["gates-repo"]) args.push("--gates-repo", flags["gates-repo"]);
 args.push("--json");
 
 const result = parseJson(mustRun(args, { quiet: true }).stdout, "ask raise");
@@ -49,5 +57,6 @@ if (flags.json) process.stdout.write(JSON.stringify(result) + "\n");
 else {
   process.stdout.write(`ask raised: ${id ?? "(no identifier returned)"}${flags.blocks ? ` — holds ${flags.blocks.join(", ")}` : " — holds nothing"}\n`);
   if (flags.default) process.stdout.write(`default if silent: ${flags.default}\n`);
+  if (flags["gates-pr"]) process.stdout.write(`answer ${flags["released-by"].join(" or ")} releases the hold on PR ${flags["gates-pr"].map((n) => `#${n}`).join(", ")}\n`);
 }
 process.exit(0);

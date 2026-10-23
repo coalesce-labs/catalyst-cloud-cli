@@ -233,9 +233,9 @@ function answers(s: Scenario): Record<string, unknown> {
     ...(s.accountsFail
       ? {}
       : s.accounts !== undefined
-        ? { "accounts --json": s.accounts }
+        ? { "accounts --all --json": s.accounts }
         : s.codingAccounts !== undefined
-          ? { "accounts --json": HEALTHY_ACCOUNTS }
+          ? { "accounts --all --json": HEALTHY_ACCOUNTS }
           : {}),
     ...(s.codingAccounts === undefined
       ? {}
@@ -1035,13 +1035,13 @@ describe("where-am-i.mjs: no next step without a basis", () => {
     const doc = json(refusedHome("0.9.1", "0.9.1"));
     expect(doc.next?.action).toContain(NOT_PUBLISHED);
     expect(doc.next?.owner).toBe("the Catalyst team");
-    expect(doc.next?.action).not.toMatch(/re-run the install command/);
+    expect(doc.next?.action).not.toMatch(/re-run the install script/);
   });
 
-  test("installed CLI is older than npm's latest: re-run the install command", () => {
+  test("installed CLI is older than npm's latest: update the CLI", () => {
     const doc = json(refusedHome("0.10.0", "0.9.1"));
     expect(doc.next?.action).toContain(
-      "Update the CLI: re-run the install command from the app's setup page (it installs from https://cloud.example/install.sh).",
+      "Update the CLI: run npm install -g @catalyst-cloud/cli@latest, or re-run the install script at https://cloud.example/install.sh.",
     );
     expect(doc.next?.action).not.toContain(NOT_PUBLISHED);
     expect(doc.next?.action).not.toContain("catalyst-skills install");
@@ -1240,8 +1240,8 @@ describe("where-am-i.mjs: the repository declaration is read from the project's 
     const doc = json(home);
     expect(part(doc, "repository declarations").verdict).toBe("unreadable");
     expect(doc.finished).toBe(false);
-    expect(doc.next?.action).toMatch(/Re-check/);
-    expect(doc.next?.action).not.toMatch(/catalyst\.toml/);
+    expect(doc.next?.action).toMatch(/catalyst team check/);
+    expect(doc.next?.action).not.toMatch(/Re-check|catalyst\.toml/);
   });
 
   test("a cloud that carries no such check: nothing is read, said so, and it does not block", () => {
@@ -1523,7 +1523,7 @@ describe("where-am-i.mjs: a mapped project whose readiness is blocked", () => {
     );
     expect(doc.next?.part).toBe("projects");
     expect(doc.next?.action).toMatch(
-      /^fix ENG's blocking checks \(linear_automation_pr_open, linear_automation_pr_merge\): in Linear, open Settings → Teams → ENG → Workflow → Workflows & automations → Pull request and commit automations and set On PR open, On PR merge to No action \(Catalyst does not yet offer to change these rules\); then run catalyst team check ENG \(or press Re-check\) and run this again$/,
+      /^fix ENG's blocking checks \(linear_automation_pr_open, linear_automation_pr_merge\): in Linear, open Settings → Teams → ENG → Workflow → Workflows & automations → Pull request and commit automations and set On PR open, On PR merge to No action \(Catalyst does not yet offer to change these rules\); then run catalyst team check ENG and run this again$/,
     );
     expect(doc.next?.owner).toBe(
       "A tenant owner or admin, in Linear’s own settings.",
@@ -1555,7 +1555,7 @@ describe("where-am-i.mjs: a mapped project whose readiness is blocked", () => {
 });
 
 describe("where-am-i.mjs: a mapped project that was never checked", () => {
-  test("leaves the repository declaration unread and asks for Re-check, never ok", () => {
+  test("leaves the repository declaration unread and asks for a team check, never ok", () => {
     const doc = json(
       connectedHome({
         codingAccounts: CA_ENROLLED,
@@ -1566,14 +1566,16 @@ describe("where-am-i.mjs: a mapped project that was never checked", () => {
     const d = part(doc, "repository declarations");
     expect(d.verdict).toBe("unreadable");
     expect(d.lines[0]).toMatch(/no project has a readiness check yet/);
-    expect(d.where).toBe("https://cloud.example/settings/linear-teams");
+    // An older CLI with no capabilities verb is told to update, never sent to a page.
+    expect(d.where).toBe("npm install -g @catalyst-cloud/cli@latest");
     expect(doc.next?.part).toBe("repository declarations");
-    expect(doc.next?.action).toMatch(/Re-check/);
+    expect(doc.next?.action).toMatch(/update the CLI .*catalyst team check ENG/);
+    expect(doc.next?.action).not.toMatch(/Re-check/);
     expect(doc.finished).toBe(false);
   });
 });
 
-describe("where-am-i.mjs: a step is a command when this person's CLI can run it, else the page with who can", () => {
+describe("where-am-i.mjs: a step is a command when this person's CLI can run it, else the command with who can", () => {
   const cap = (verb: string, needs: string, availability = "available") => ({
     verb,
     needs,
@@ -1609,7 +1611,7 @@ describe("where-am-i.mjs: a step is a command when this person's CLI can run it,
     expect(run(home, ["--next"]).stdout).not.toMatch(/settings\/linear-teams/);
   });
 
-  test("a member is told which role can run it, and is not sent to the admin page as their own step", () => {
+  test("a member is told which role can run it, and the command is named rather than a page", () => {
     const doc = json(
       connectedHome(unchecked({ capabilities: TEAM_VERBS, role: "member" })),
     );
@@ -1617,14 +1619,16 @@ describe("where-am-i.mjs: a step is a command when this person's CLI can run it,
       /^a workspace owner or admin runs catalyst team check ENG/,
     );
     expect(doc.next?.owner).toBe("a workspace owner or admin");
-    expect(doc.next?.where).toBe("https://cloud.example/settings/linear-teams");
+    expect(doc.next?.where).toBe("catalyst team check ENG");
+    expect(doc.next?.action).not.toMatch(/Re-check/);
   });
 
-  test("an older CLI (no capabilities verb) and a cloud that does not serve the route both keep the page", () => {
+  test("an older CLI (no capabilities verb) is told to update; only a cloud that does not serve the route keeps the page", () => {
     const older = json(connectedHome(unchecked({})));
     expect(older.next?.action).toBe(
-      "press Re-check on the projects page, then run this again",
+      "update the CLI (npm install -g @catalyst-cloud/cli@latest), then a workspace owner or admin runs catalyst team check ENG; then run this again",
     );
+    expect(older.next?.where).toBe("npm install -g @catalyst-cloud/cli@latest");
     const olderCloud = json(
       connectedHome(
         unchecked({
@@ -1635,10 +1639,10 @@ describe("where-am-i.mjs: a step is a command when this person's CLI can run it,
       ),
     );
     expect(olderCloud.next?.action).toBe(
-      "press Re-check on the projects page, then run this again",
+      "this cloud does not serve catalyst team check yet, so a workspace owner or admin re-checks the project on the projects page; then run this again",
     );
     expect(olderCloud.next?.where).toBe(
-      "https://cloud.example/settings/linear-teams",
+      "https://cloud.example/settings/projects",
     );
   });
 

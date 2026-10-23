@@ -4,7 +4,7 @@ description: >-
   Set up Catalyst Cloud and say whether setup is working. Walks a person from nothing to their first ticket running, one step at a time: the coding account, the project, the integrations and connected accounts, each repository's settings file, then one real ticket moving. Also logs this machine in, reads the readiness verdict with who can fix each failure, and checks the optional local replica. Use when someone says "set me up", "onboard me", "I just signed up", "get me started", "what do I do first", "log me in", "which account is this machine on", "am I set up", "what is missing", "why does nothing happen" or "is the replica running", when a login expired, or when a skill script exits 2 saying this machine is not connected. Does every step a key can do through the catalyst CLI, hands over the exact page for the steps only a browser can do, and never claims a step it did not watch succeed.
 allowed-tools: Bash(catalyst:*) Bash(npx -p @catalyst-cloud/cli catalyst:*)
 ---
-<!-- vendored-from: @catalyst-cloud/catalyst-skills@0.15.5 — written in this repository for customer accounts -->
+<!-- vendored-from: @catalyst-cloud/catalyst-skills@0.16.25 — written in this repository for customer accounts -->
 
 # Onboard me
 
@@ -12,11 +12,12 @@ Guide setup through the same `catalyst onboard` flow that the installer runs. Th
 
 ## Use the onboarding command
 
-1. Run `catalyst capabilities --json`. If its `onboard` entry is available and advertises `bootstrapHandoff: true`, use this path. If absent, use the older step-by-step references below and name the CLI update needed for the continuous flow.
-2. For a requested setup, run `catalyst onboard`. To inspect first, run `catalyst onboard --dry-run --json`. Resume with `catalyst onboard`; the command rechecks saved results. Do not ask the person to confirm completed browser steps or add a separate approval before the command's plan question.
-3. In a terminal, the command shows the verified person, workspace and plan before approval. Without terminal input, or with `--json`, use `--yes` only when the person has accepted the displayed defaults; otherwise setup waits with exit 11 and keeps the saved connection and receipt. JSON keeps progress, identity and the plan on stderr and returns one result on stdout. A supplied key needs `catalyst login` before onboarding; browser sign-in does not replace it.
-4. For the current onboarding checks, run `catalyst ready --onboarding --json`. A failed check needs attention. An unknown check needs evidence. Report observed project work separately from incomplete setup; an unknown setup check does not prove work stopped.
-5. Exit 0 completes the requested scope. For a full run, exit 0 means work can start. If the receipt's `complete` is false, a repository value or the first ticket is still open, and the command lists it under "Next, when you want". The daily update never keeps `complete` false, and neither do repository settings this computer cannot review (no checkout here, or not yet approved); a settings review that timed out or could not keep its draft does. Only a person at a terminal picks the first ticket; `--yes`, `--json` and headless runs leave it waiting with an action. Exit 10 means a failed step, 11 means waiting, and 12 means a guard refused the action. A successful `--only` step does not mean onboarding is complete. Keep the command's safe fix and supported resume command in your reply.
+1. Accept the workspace invitation first. Catalyst has no self-serve sign-up: a person joins by accepting the invitation email their workspace admin sent. Until it is accepted, sign-in is refused with "This sign-in has no Catalyst workspace yet"; if no invitation ever arrived, asking that admin is the next step, and nothing below runs before it lands.
+2. Run `catalyst capabilities --json`. If its `onboard` entry is available and advertises `bootstrapHandoff: true`, use this path. If absent, use the older step-by-step references below and name the CLI update needed for the continuous flow.
+3. For a requested setup, run `catalyst onboard`. To inspect first, run `catalyst onboard --dry-run --json`. Resume with `catalyst onboard`; the command rechecks saved results. Do not ask the person to confirm completed browser steps or add a separate approval before the command's plan question.
+4. In a terminal, the command shows the verified person, workspace and plan before approval. Without terminal input, or with `--json`, use `--yes` only when the person has accepted the displayed defaults; otherwise setup waits with exit 11 and keeps the saved connection and receipt. JSON keeps progress, identity and the plan on stderr and returns one result on stdout. A supplied key needs `catalyst login` before onboarding; browser sign-in does not replace it.
+5. For the current onboarding checks, run `catalyst ready --onboarding --json`. A failed check needs attention. An unknown check needs evidence. Report observed project work separately from incomplete setup; an unknown setup check does not prove work stopped.
+6. Exit 0 completes the requested scope. For a full run, exit 0 means work can start. If the receipt's `complete` is false, a repository value or the first ticket is still open, and the command lists it under "Next, when you want". The daily update never keeps `complete` false, and neither do repository settings this computer cannot review (no checkout here, or not yet approved); a settings review that timed out or could not keep its draft does. Only a person at a terminal picks the first ticket; `--yes`, `--json` and headless runs leave it waiting with an action. Exit 10 means a failed step, 11 means waiting, and 12 means a guard refused the action. A successful `--only` step does not mean onboarding is complete. Keep the command's safe fix and supported resume command in your reply.
 
 Use cloud reads for ordinary workstation setup checks. Offer local sync for local SQL or sustained local reads inside the plan review. Local sync does not promise offline browsing. It is optional; do not make an absent replica a setup failure. Browser approval belongs to the person. Missing bearer capabilities stay unfinished; never call a session-only route from the CLI or invent a command.
 
@@ -36,7 +37,7 @@ Default invited-member setup handles personal accounts and leaves workspace admi
 
 1. Run `node scripts/where-am-i.mjs --next` and read its one line; trust it over your memory of the last turn. A `note:` after it is worth one clause.
 2. Say what the step is for.
-3. Ask one question or do one thing. Run a `do:` command a key can run and show its output; hand over a browser step as `references/what-the-browser-owns.md` says.
+3. Ask one question or do one thing. Offer to run every step a command can do, run it on a yes and show its output; hand over a browser step only as `references/what-the-browser-owns.md` says.
 4. Wait for the answer. Two or three short sentences a turn; the full report is for you, not to paste.
 5. Re-run the script and read back the part that should have changed. Still unchanged after one `catalyst contract --refresh`: report both what the page said and what the instrument says.
 
@@ -55,7 +56,8 @@ Scripts are run, never read; each prints `--help`.
 | logging in, a refused or expired login, which account this is, the Linear identity | `references/connecting-this-machine.md` |
 | anything reports not ready, a check id, or who fixes something | `references/reading-ready.md` |
 | the coding account or the `host` part, or before saying work can run | `references/what-a-phase-needs.md`; a credential to replace, `references/replacing-a-credential.md` |
-| a browser step, or confirming a page that said it worked | `references/what-the-browser-owns.md` |
+| preserving an existing paused Darwin runner during owner-managed replacement | `references/preserving-runner-replacement.md` |
+| which steps a command does and which need a browser, or confirming a page that said it worked | `references/what-the-browser-owns.md` |
 | the repository's `.catalyst/catalyst.toml` and its approval; its AGENTS.md block and agent layout | `references/declaring-a-repository.md`; `references/repository-agent-setup.md` |
 | the replica or event cache | `references/local-sync.md` |
 | local SQL, only when `catalyst replica status --json` reports `configured: true` | `references/local-replica.md` |

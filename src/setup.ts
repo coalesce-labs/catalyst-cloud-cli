@@ -42,6 +42,7 @@ export interface SetupDeps {
       yes: boolean;
       verbose: boolean;
       localSync: boolean;
+      runner?: boolean;
       logPath?: string;
     },
   ) => Promise<number>;
@@ -141,9 +142,10 @@ export function engineFlags(args: readonly string[]): {
   yes: boolean;
   verbose: boolean;
   localSync: boolean;
+  runner?: boolean;
   logPath?: string;
 } {
-  const seen = { json: false, yes: false, verbose: false, localSync: false };
+  const seen: ReturnType<typeof engineFlags> = { json: false, yes: false, verbose: false, localSync: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i] ?? "";
     if (VALUED.has(a)) {
@@ -154,6 +156,8 @@ export function engineFlags(args: readonly string[]): {
     if (a === "--yes") seen.yes = true;
     if (a === "--verbose") seen.verbose = true;
     if (a === "--with-replica") seen.localSync = true;
+    if (a === "--runner") seen.runner = true;
+    if (a === "--no-runner") seen.runner = false;
   }
   return seen;
 }

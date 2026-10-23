@@ -1,4 +1,5 @@
 import {nativeEgressInstallCommands} from "./onboard-runner-egress.js";
+import { GITHUB_CONFIRM_ACCESS } from "./onboard-github-copy.js";
 import { INSTALL_COMMAND, loadConfig, normalizeBaseUrl } from "./config.js";
 import type { OnboardJournal, OnboardStep } from "./onboard.js";
 import { githubInstallationPage } from "./onboard-permissions.js";
@@ -6,6 +7,8 @@ import { valuesFacts, valuesFix } from "./ready-copy.js";
 
 /** What a person reads for a step that is not done. Each line ends in an action they can take. */
 const REASONS: Record<string, string> = {
+  legacy_cleanup_failed:
+    "An earlier Catalyst installation could not be removed. Run catalyst legacy --remove to see the exact item and its blocker, fix that blocker, then run catalyst setup again. Shared data folders are kept.",
   account_identity_unverified:
     "Your login changed while AI accounts were checked. Run catalyst onboard again to verify your person and workspace.",
   account_inventory_unavailable:
@@ -98,6 +101,11 @@ const REASONS: Record<string, string> = {
   local_sync_capability_unavailable:
     "Local sync was selected but could not be verified.",
   member_scope: "Your workspace administrator handles this step.",
+  returning_workspace_move_on: "Existing projects were left in place while this computer was set up. Run catalyst ready to review their checks, or catalyst setup --team <TEAM KEY> to repair one.",
+  returning_inventory_unverified: "Setup could not verify this workspace's existing projects. Run catalyst ready to check the workspace, then run catalyst setup again. Its projects have been kept in place.",
+  returning_project_cleanup_requested: "Review the selected project's archive preview before making any change.",
+  returning_project_cleanup_unverified: "Setup could not confirm this project's archive state. Run catalyst project list to inspect it, then run catalyst setup again to review any remaining changes. Do not repeat an archive based on this message alone.",
+  returning_project_cleanup_changed: "This project's repositories changed after the preview. Run catalyst setup again to review its current project list before archiving.",
   member_team_required:
     "Setup needs your Linear team to check what Catalyst can work on. Run catalyst setup again with --team <KEY>, using your team's key from Linear.",
   onboarding_checks_pending: "Some required checks are still unverified.",
@@ -135,7 +143,7 @@ const REASONS: Record<string, string> = {
   team_create_unverified:
     "Setup could not confirm whether the Linear team was created. Check Linear for it before creating it again.",
   team_create_grant_required:
-    "Your own Linear connection is missing or has lapsed. Reconnect it in Settings → Connected accounts, then run catalyst onboard. Nothing was created.",
+    "Your own Linear connection is missing or has lapsed. Reconnect it with catalyst connections personal linear start and approve the link it prints, then run catalyst onboard. Nothing was created.",
   team_create_identity_unverified:
     "Your login changed while setup was creating a team. Resume with the original workspace and person.",
   team_choice_required:
@@ -189,8 +197,10 @@ const REASONS: Record<string, string> = {
   automations_compatible: "Nothing to change.",
   workflow_unavailable:
     "Setup could not read the team's workflow. Run catalyst onboard again to retry.",
-  capacity_admission_unverified:
-    "No runner is allowed to take work for this workspace yet. Enroll a self-hosted runner host, or ask Catalyst to enable cloud runners for it. Then run catalyst onboard.",
+  capacity_context_unverified:
+    "Setup could not confirm this project's registered repositories and its default repository for capacity. Run catalyst ready to see the project checks, then run catalyst setup again. Starting a ticket checks its own repository's admission.",
+  capacity_identity_unverified:
+    "Setup could not confirm your workspace and administrator role for the capacity check. Run catalyst login, then run catalyst setup again.",
   capacity_currently_full:
     "Every runner slot for this repository is in use. Run catalyst onboard again after current work finishes.",
   capacity_unavailable:
@@ -202,7 +212,7 @@ const REASONS: Record<string, string> = {
   runner_identity_unverified:
     "A workspace owner or administrator enrolls a runner. Sign in as one with catalyst login, then run catalyst onboard --runner.",
   runner_context_unverified:
-    "Setup could not confirm the selected Linear team. Run catalyst onboard again.",
+    "Setup could not confirm a project for this machine. Keep its existing installation and credentials. Run catalyst setup --runner --team <TEAM KEY> for the project this machine should serve.",
   runner_directory_unavailable:
     "Setup could not prepare the runner folder in Catalyst's state directory. Check its permissions, then run catalyst onboard again.",
   runner_image_unpinned:
@@ -216,13 +226,39 @@ const REASONS: Record<string, string> = {
   runner_docker_socket_unreadable:
     "Setup could not read the group of the Docker socket at /var/run/docker.sock. Check that Docker is running, then run catalyst onboard again.",
   runner_engine_unsupported:
-    "Runner setup needs local Docker Desktop or OrbStack on Mac, or native Linux Docker at /var/run/docker.sock. Select a supported local engine, then run catalyst onboard --runner.",
+    "Runner setup needs a local Linux Docker engine with Compose on Mac, or native Linux Docker at /var/run/docker.sock. Select a local engine, then run catalyst onboard --runner.",
+  runner_engine_nonlocal:
+    "The selected Docker endpoint is not a verified local unix:/// socket, or DOCKER_CONTEXT conflicts with DOCKER_HOST. Select a local Docker context and clear the conflicting variable, then run catalyst onboard --runner.",
+  runner_home_mount_unwritable:
+    "A container could not read and write the runner home mounts as uid 10001. Share Catalyst's state directory with your Docker VM and enable writable mounts. For Colima, configure a writable home mount with ownership mapping for uid 10001, then restart the VM and run catalyst onboard --runner.",
+  runner_container_host_unreachable:
+    "A container could not reach this Mac. Enable container-to-host networking in your Docker VM and allow the setup process through the Mac firewall, then run catalyst onboard --runner.",
+  runner_container_network_unreachable:
+    "A container could not reach Catalyst's health endpoint. Check the Docker VM's DNS, proxy and outbound HTTPS access, then run catalyst onboard --runner.",
+  runner_engine_probe_unavailable:
+    "Setup could not complete the container capability probe. Check Docker access and the pinned supervisor image, then run catalyst onboard --runner. Setup has not enrolled or started this machine.",
+  runner_thoughts_custody_unavailable:
+    "Setup could not verify protected access to this Mac's shared work files. Keep their ownership and permissions. Check Docker access, then run catalyst onboard --runner. If the check still fails, ask Catalyst support to inspect it.",
+  runner_installation_unverified:
+    "Setup found a possible existing machine installation but could not verify its Compose files and identity. Keep its files and credentials. Run docker compose -p catalyst-host logs supervisor to check it, then run catalyst setup --runner again.",
   runner_enrollment_unavailable:
     "Setup could not read this workspace's runner hosts. Run catalyst onboard again to retry.",
   runner_enrolled_for_other_team:
-    "This runner is enrolled for another Linear team. Keep using that team, or ask your administrator to revoke the old enrollment before setting up this machine for the selected team.",
+    "This runner is enrolled for another Linear team, and Catalyst could not add the selected team to it. Keep using that team, or ask your administrator to revoke the old enrollment before setting up this machine for the selected team.",
+  runner_team_not_added:
+    "This runner does not serve the selected Linear team yet. Run catalyst setup --runner to add the team to it.",
+  runner_team_limit:
+    "This runner already serves 16 Linear teams, the most one runner can serve. Set up another machine for the selected team.",
+  runner_team_add_failed:
+    "Setup could not add the selected Linear team to this runner. Run catalyst setup --runner again to retry.",
+  runner_supervisor_outdated:
+    "This runner's supervisor has not reported that it can serve several teams yet. Run docker compose -p catalyst-host logs supervisor to check it is running, then run catalyst setup --runner again.",
+  runner_enrollment_revoked:
+    "Catalyst confirms that this machine's saved enrollment was revoked. Keep its credential and organization key. Ask your workspace administrator to review the enrollment before replacing it, then run catalyst setup --runner.",
+  runner_credential_unverified:
+    "Setup could not read this machine's saved enrollment. Keep its credential and organization key. Run docker compose -p catalyst-host logs supervisor to check the error, then run catalyst setup --runner.",
   runner_enrollment_stale:
-    "This machine still holds the credential of a runner enrollment that was revoked. Stop the runner with docker compose -p catalyst-host down, remove the credential with docker volume rm catalyst-host_host-credential (this also removes the organization key), then run catalyst onboard --runner.",
+    "Setup could not match this machine's saved enrollment with Catalyst. Keep its credential and organization key, then run catalyst setup --runner to check again.",
   runner_login_refresh_required:
     "Renew your login with catalyst login, then run catalyst onboard.",
   runner_join_token_unavailable:
@@ -254,7 +290,9 @@ const REASONS: Record<string, string> = {
   runner_org_key_write_failed:
     "Setup could not place the organization key on the runner. Check that Docker is running, then run catalyst onboard again.",
   runner_compose_failed:
-    "Docker Compose could not start the runner. Run docker compose -p catalyst-host logs to see why, then run catalyst onboard again.",
+    "Docker Compose could not start the runner project catalyst-host. Run docker compose -p catalyst-host logs to see why, then run catalyst onboard --runner again.",
+  runner_compose_paused:
+    "The existing catalyst-host Compose project's containers are paused. Run docker compose -p catalyst-host unpause to resume them, then run catalyst onboard --runner again. Setup removed nothing.",
   runner_compose_not_running:
     "The runner's supervisor is not running. Run docker compose -p catalyst-host logs supervisor to see why, then run catalyst onboard again.",
   runner_enrollment_unverified:
@@ -266,7 +304,7 @@ const REASONS: Record<string, string> = {
   runner_admission_unverified:
     "Setup could not read whether the team's pool admits runner hosts. Run catalyst onboard again to retry.",
   github_app_permissions_outdated:
-    "GitHub App needs updated permissions. An organization owner on GitHub accepts the pending request on the App's installation page, then run catalyst onboard.",
+    `The existing GitHub App installation needs updated permissions accepted. ${GITHUB_CONFIRM_ACCESS} An organization owner on GitHub opens the App's installation page, chooses Review permissions, then Accept new permissions. Run catalyst onboard afterward.`,
   github_app_repository_missing:
     "The GitHub App installation cannot reach a repository a project registers. An organization owner on GitHub adds it under the installation's Repository access, then run catalyst onboard.",
   github_app_repository_not_installed:
@@ -406,7 +444,7 @@ function permissionText(
   switch (step.reason) {
     case "github_app_permissions_outdated":
       if (!url) return undefined;
-      return `GitHub App needs updated permissions${org ? ` on ${org}` : ""}${missing ? `: ${missing}` : ""}. ${github} reviews and accepts the request at ${url}, then run catalyst onboard.`;
+      return `The existing GitHub App installation${org ? ` on ${org}` : ""} needs updated permissions accepted${missing ? `: ${missing}` : ""}. ${GITHUB_CONFIRM_ACCESS} ${github} chooses Review permissions, then Accept new permissions at ${url}. Run catalyst onboard afterward.`;
     case "github_app_repository_missing":
       if (!url || !repository) return undefined;
       return `The GitHub App installation${org ? ` on ${org}` : ""} cannot reach ${repository}, which a project registers. ${github} adds it under Repository access at ${url}, then run catalyst onboard.`;
@@ -513,13 +551,10 @@ export function onboardReasonText(
   // A member is told which admin action is left and where an admin takes it.
   if (reason === "member_scope") {
     const key = onboardTeamKey(context.journal);
+    if (step.id === "linear.adopt")
+      return `Only a Catalyst owner or admin can set up the team's Catalyst workflow. Ask one to run catalyst team adopt ${key ?? "<TEAM KEY>"}.`;
     const adminOnly: Partial<Record<OnboardStep["id"], [string, string, string]>> = {
       "linear.workspace": ["connect Linear", "/settings/connections", " and connect it there"],
-      "linear.adopt": [
-        "set up the team's Catalyst workflow",
-        key ? `/settings/linear-teams/${encodeURIComponent(key)}/adopt` : "/settings/linear-teams",
-        "",
-      ],
     };
     const admin = adminOnly[step.id];
     if (admin) {
@@ -554,7 +589,7 @@ export function onboardReasonText(
     const where = context.baseUrl
       ? `at ${normalizeBaseUrl(context.baseUrl)}/settings/coding-accounts`
       : "in the web app on the Settings → AI accounts page";
-    return `No AI account in this workspace can take work yet. A workspace owner or administrator checks them ${where}: one may need its key replaced, or may have reached its usage limit. Then run catalyst onboard.`;
+    return `No AI account in this workspace can take work yet. Run catalyst accounts to see which one needs work. A workspace owner or administrator fixes it ${where}, since no command does that yet: one may need its key replaced, or may have reached its usage limit. Then run catalyst onboard.`;
   }
   if (reason === "account_enrollment_required") {
     const where = context.baseUrl
@@ -597,24 +632,33 @@ export function onboardReasonText(
       ? `This setup step is not available on this server yet. Continue in the web app at ${page}, then run catalyst onboard.`
       : "This setup step is not available on this server yet. Run catalyst onboard after the server update.";
   }
-  if(reason === "runner_native_egress_setup_required"){
-    const commands=nativeEgressInstallCommands();
-    return "Native Linux needs a root-managed session egress producer before the runner can take work. Its elevated installation creates the isolated session network and private-range and host-isolation nftables rules. Review and authorize this separately; setup has not run it. It requires systemd, python3, Docker and nftables. " + (commands ? "Install the verified bundled artifacts, then run the same setup command:\n"+commands : "Setup could not verify its bundled artifacts. Reinstall the CLI before authorizing installation.");
+  // CTC-6180: the command that enrolls this computer, named with its team.
+  // The command is its own line (never wrapped), and runnable as printed: with no known team key,
+  // setup asks for the team.
+  if (reason === "capacity_admission_unverified") {
+    const key = onboardTeamKey(context.journal);
+    return `No runner is allowed to take work for this workspace yet. To use Catalyst's cloud runners, ask Catalyst support to turn on cloud runners for your workspace, then run catalyst onboard. To run work on this computer instead, enroll it as a self-hosted runner${key ? "" : " (setup asks for your Linear team)"} with:\ncatalyst onboard --runner${key ? ` --team ${key}` : ""}`;
   }
-  if (reason === "runner_images_unavailable") {
+  if(reason === "runner_native_egress_setup_required"){
+    const command=nativeEgressInstallCommands();
+    return "Native Linux needs a root-managed session egress service before this computer can take work. It creates the isolated session network and the nftables rules that keep sessions off private addresses and this machine. It needs systemd, python3, Docker and nftables, and setup has not run it. " + (command ? "Review it, run this one command, then run the same setup command:\n"+command : "Setup could not verify its bundled files. Reinstall the CLI, then run the same setup command.");
+  }
+  if (reason === "runner_images_unavailable" || reason === "runner_supervisor_image_unavailable") {
     const image = step.evidence?.image;
     const named =
       typeof image === "string" &&
       /^[a-z0-9][a-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}$/.test(image)
         ? ` ${image}`
         : "";
-    return `This machine does not have the Catalyst image${named}, and its pull did not complete. Check network access and run the same setup command to retry the anonymous pull.`;
+    return reason === "runner_supervisor_image_unavailable"
+      ? `Setup could not verify or download the supervisor image required by this CLI release${named}. It has not started new work. Check network access and run the same setup command again.`
+      : `This machine does not have the Catalyst image${named}, and its pull did not complete. Check network access and run the same setup command to retry the anonymous pull.`;
   }
   if (reason === "runner_org_key_missing") {
     const where = context.baseUrl
       ? `at ${normalizeBaseUrl(context.baseUrl)}/settings/account-keys`
       : "on the web app's Account API keys page";
-    return `The runner is enrolled, but it takes no work without an organization key. A workspace owner or administrator creates one with the mirror:read, mirror:write and mirror:feed scopes ${where} and saves it in a file only they can read. Then run catalyst onboard --runner with CATALYST_RUNNER_ORG_KEY_FILE set to that file.`;
+    return `The runner is enrolled, but it takes no work without an organization key. A workspace owner or administrator runs catalyst onboard --runner on this machine; it mints the key and stores it for the runner. If their cloud cannot mint one yet, they create one with the mirror:read, mirror:write and mirror:feed scopes ${where}, save it in a file only they can read, and run catalyst onboard --runner with CATALYST_RUNNER_ORG_KEY_FILE set to that file.`;
   }
   if (reason === "runner_host_not_ready") {
     const failing = step.evidence?.failing;
@@ -623,6 +667,25 @@ export function onboardReasonText(
         ? `: ${failing.split(",").join(", ")}`
         : "";
     return `The runner is enrolled but its readiness checks fail${checks}. Run docker compose -p catalyst-host logs supervisor for the remedy, then run catalyst onboard again.`;
+  }
+  // CTC-5721: a Compose failure, or a paused older project, carries the evidence the adapter recorded.
+  if (reason === "runner_compose_paused") {
+    const services = typeof step.evidence?.services === "string" &&
+        /^[a-z0-9][a-z0-9_-]{0,63}(,[a-z0-9][a-z0-9_-]{0,63})*$/.test(step.evidence.services)
+      ? ` (${step.evidence.services.split(",").join(", ")})`
+      : "";
+    return `Setup found the existing catalyst-host Compose project's containers${services} paused and could not resume them. Run docker compose -p catalyst-host unpause to resume them, then run catalyst onboard --runner again. Setup removed nothing.`;
+  }
+  if (reason === "runner_compose_failed") {
+    const project = typeof step.evidence?.project === "string" &&
+        /^[a-z0-9][a-z0-9-]{0,63}$/.test(step.evidence.project)
+      ? step.evidence.project
+      : "catalyst-host";
+    const error = typeof step.evidence?.composeError === "string" &&
+        /^[\x20-\x7e]{1,500}$/.test(step.evidence.composeError)
+      ? step.evidence.composeError.replace(/\.+$/, "")
+      : undefined;
+    return `Docker Compose could not start the runner project ${project}${error ? `: ${error}` : ""}. Run docker compose -p ${project} logs to see why, then run catalyst onboard --runner again.`;
   }
   if (reason === "runner_admission_operator")
     return `The admission policy for team ${onboardTeamKey(context.journal) ?? "<TEAM KEY>"} needs a Catalyst operator to check it. Setup changes only restricted admission and preserves existing policy fields. Ask Catalyst support to confirm a compatible policy, then run the same setup command.`;

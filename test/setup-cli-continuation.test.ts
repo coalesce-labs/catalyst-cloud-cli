@@ -13,6 +13,7 @@ const io = vi.hoisted(() => ({
   ports: [] as { input: unknown; output: unknown }[],
   uiVerbose: [] as boolean[],
   argVerbose: [] as boolean[],
+  argRunner: [] as unknown[],
 }));
 vi.mock("../src/setup-prompts.js", async (original) => ({
   ...(await original<typeof import("../src/setup-prompts.js")>()),
@@ -41,6 +42,7 @@ vi.mock("../src/onboard-runtime.js", async () => {
       deps: { ui?: unknown },
     ) => {
       io.argVerbose.push(_args.flags.verbose === true);
+      io.argRunner.push(_args.flags.runner === true ? true : _args.flags["no-runner"] === true ? false : undefined);
       return ({
       ui: deps.ui,
       bindSignals: false,
@@ -63,6 +65,7 @@ afterEach(() => {
   io.ports = [];
   io.uiVerbose = [];
   io.argVerbose = [];
+  io.argRunner = [];
   io.terminal = null;
 });
 function fixture() {
@@ -126,3 +129,9 @@ test.each([false, true])("setup verbose reaches onboarding args and its human UI
  expect(io.argVerbose).toEqual([true]);
  expect(io.uiVerbose).toEqual(json ? [] : [true]);
 });
+
+ test.each([["--runner", true], ["--no-runner", false]] as const)("setup forwards %s through the engine continuation", async (flag, selected) => {
+   const f = fixture();
+   expect(await main([...f.args, flag], f.ctx, { isTty: () => true })).toBe(0);
+   expect(io.argRunner).toEqual([selected]);
+ });

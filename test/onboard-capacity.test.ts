@@ -282,6 +282,22 @@ describe("mapped-team-defaults advisory capacity", () => {
     expect(f.reads).toContain(route);
     expect(f.messages).toEqual([]);
   });
+  test("a project may keep several registered repositories while checking its mapped default", async () => {
+    const f = fixture();
+    const second = { owner: "example", name: "other", teamId: "team-a", repoId: "repo-b" };
+    const repos = f.journal.steps.find(s => s.id === "github.repos")!;
+    const original = JSON.parse(String(repos.evidence!.repository));
+    repos.evidence = { repository: JSON.stringify([...original, second]) };
+    const contract = f.state.contract as { merge: { repositories: unknown[] } };
+    contract.merge.repositories.push(second);
+    const inventory = f.state.repositories as { repos: unknown[] };
+    inventory.repos.push(second);
+    expect(await f.adapter.check(f.ctx, f.journal)).toMatchObject({
+      state: "done", evidence: { repoId: "repo-a", advisory: true },
+    });
+    expect(JSON.parse(String(repos.evidence.repository))).toHaveLength(2);
+    expect(f.messages[0]).toContain("Starting work will check admission again");
+  });
   test("disabled selected default admission does not borrow another team's enabled admission", async () => {
     const f = fixture(),
       dto = capacity();

@@ -1,6 +1,6 @@
 # The one path
 
-The steps run in the order a person can act on them, each the cheapest place to catch what the next would hide. The script prints each step's owner and link; this page adds why it matters, what to ask, and its trap. Browser handovers follow `references/what-the-browser-owns.md`.
+The steps run in the order a person can act on them, each the cheapest place to catch what the next would hide. The script prints each step's owner and link; this page adds why it matters, what to ask, and its trap. Offer to run each step a command can do; browser handovers follow `references/what-the-browser-owns.md`.
 
 ## 0. Where are we
 
@@ -20,7 +20,7 @@ Each stage of a ticket runs on an account the person owns, at their own rate, un
 
 ## 3. Connect the Linear integration
 
-The one Linear connection the whole workspace shares, made once by an owner or admin on `<their cloud>/settings/connections`; no project can be read without it.
+The one Linear connection the whole workspace shares, made once by an owner or admin; no project can be read without it. Offer to start it: `catalyst onboard` asks Linear for the consent link and prints it, and the owner or admin approves it in their browser. Without that link, the page is `<their cloud>/settings/connections`.
 
 ## 4. Pick one project, and map its stages
 
@@ -28,15 +28,15 @@ A card moved into an unmapped project does nothing, the most common reason a new
 
 `catalyst team list` shows the teams without checking readiness; the person picks one key. `catalyst team map <KEY>` or `catalyst team adopt <KEY>` prints a preview to approve before `--yes --plan-hash <hash>` (exit 3 applied nothing). Run `catalyst team check <KEY>` only for the selected team. `team migrate <KEY>`, its `--retire`, and `team adopt <KEY> --undo` each preview and need their own approval. `catalyst capabilities` says which verbs this cloud serves.
 
-A `blocked` project is not set up. Change Linear's own Git automation rules in Linear for now (Settings → Teams → the team → Workflow → Workflows & automations → Pull request and commit automations → No action); hand that over, then re-check.
+A `blocked` project is not set up. There is no command for Linear's own Git automation rules yet, so hand over the page in Linear (Settings → Teams → the team → Workflow → Workflows & automations → Pull request and commit automations → No action), then offer to run `catalyst team check <KEY>`.
 
 ## 5. Install the GitHub App
 
-Without it Catalyst cannot touch code. On the same page, the owner or admin installs the App and grants it the repository plus `<org>/thoughts`, where cloud phases write their notes (`<org>` owns the code repository). If it does not exist, they create a private repository named `thoughts`, initialized with a README, then on the App's installation page for that org choose All repositories or add `thoughts`. The script notes whether `gh` can see that repository, never that the App can reach it. Step 6 succeeding is the proof the App is installed.
+Without it Catalyst cannot touch code. Offer to start the install: `catalyst onboard` prints the App's install link, and the owner or admin grants it the repository plus `<org>/thoughts` on GitHub, where cloud phases write their notes (`<org>` owns the code repository). If `thoughts` does not exist, offer to create it as a private repository named `thoughts`, initialized with a README (`gh repo create <org>/thoughts --private --add-readme`); then on the App's installation page for that org they choose All repositories or add `thoughts`. The script notes whether `gh` can see that repository, never that the App can reach it. Step 6 succeeding is the proof the App is installed.
 
 ## 6. Register the repository
 
-On `<their cloud>/settings/projects`, add the repository **and attach it to the project from step 4** in the same form. A repository registered without a project is listed and never receives work.
+Offer to register the repository **and attach it to the project from step 4** in one command: `catalyst onboard --team <KEY> --repo <owner/name>` (an owner or admin). A repository registered without a project is listed and never receives work.
 
 ## 7. Connect your own accounts
 

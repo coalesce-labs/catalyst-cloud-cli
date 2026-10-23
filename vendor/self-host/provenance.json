@@ -1,8 +1,16 @@
 {
   "repository": "coalesce-labs/catalyst-cloud",
-  "commit": "3efb201e119fb9ce5a3f636c3212fcbed2d7efef",
+  "commit": "ee729b12ea821310c48de7bbc753a59d60cc45d6",
   "sha256": {
-    "deploy/self-host/compose.yaml": "302f4cd6740572bf1a40386f8ec0d3a1b6919fe8c5e303f232c36969d8f36a53",
+    "deploy/self-host/compose.yaml": "0ffb7671c7ea49d8490d6e97093ada0afcb31da3b00092a8768150b090cca0bc",
+    "deploy/self-host/compose.darwin-thoughts.yaml": "6269d66d6f487175ab8560d0648e65c8a0eccb86f69a8dc24daf41d8ae1dcf02",
+    "deploy/self-host/darwin-thoughts-custody/producer.mjs": "0e0f1bbdac23813e8ee57b6eb4ae3dfd24c3f1c51ebe0c3d119a1448734ea05e",
+    "deploy/self-host/darwin-thoughts-custody/verifier.mjs": "322b838917b9f7e1d9b7d9705a75143697ca093553bf0dcca7e7f5d4a88bbdc0",
+    "deploy/self-host/darwin-thoughts-custody/verifier.d.mts": "624428ced2eb18b045b761b49e20b7f52c0fc6c3132689571103ece7b4a1083f",
+    "deploy/self-host/darwin-thoughts-custody/watchdog.mjs": "6b5c7204aacd296c85a216d4f1b3adbe2084024fe37200ec1d24dfc2dec2e12d",
+    "deploy/self-host/darwin-thoughts-custody/watchdog-deadline.mjs": "a642e6d8968f56f635056d3b258e5c4ad186c638a273c26b4528e85b7d2a6346",
+    "deploy/self-host/darwin-thoughts-custody/service.plist.in": "66e9a2c175d2500b1f7130e7c04a5ed07f22bc7425661777f514fa3f2a816496",
+    "deploy/self-host/darwin-thoughts-custody/manifest.json": "b2525e457dcd82326a71a873df95f6845d8d3231bf2afc20119a6034ddb98852",
     "deploy/self-host/linux-session-egress/session-egress.py": "a20cedfa1e883127ec461e4b7f9588d379fe1633b8244ecd703c81f589d3f142",
     "deploy/self-host/linux-session-egress/catalyst-session-egress.service": "703c150ab23ec87aea47cfc394f63e061b66c4b8c1454a88a9be879c161ce2a5",
     "deploy/self-host/linux-session-egress/catalyst-session-egress-attest.service": "94fa75ea0616f6a1172fc20ca637a5727c36456357e4a977d5bdd65f2fad2e8d",

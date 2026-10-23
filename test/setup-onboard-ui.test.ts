@@ -4,6 +4,7 @@ import { expect, test, vi } from "vitest";
 import { createClackOnboardUi } from "../src/onboard-ui.js";
 import { createSetupRenderer } from "../src/setup-render.js";
 import { ONBOARD_STEPS, type OnboardJournal } from "../src/onboard.js";
+import { GITHUB_CONFIRM_ACCESS } from "../src/onboard-github-copy.js";
 const journal = (): OnboardJournal => ({
   schema: 1,
   runId: "test",
@@ -21,6 +22,7 @@ function fixture(
   unicode = false,
   consentGiven = true,
   verbose = false,
+  selectAnswer = "stop",
 ) {
   const output = new PassThrough();
   let text = "";
@@ -32,11 +34,12 @@ function fixture(
     unicode ? { TERM: "xterm-256color", LANG: "C.UTF-8" } : { NO_COLOR: "1" },
   );
   const quiet = () => {};
+  let selectCalls = 0;
   const prompts = {
     intro: quiet,
     outro: quiet,
     log: { message: quiet, info: quiet, warn: quiet, error: quiet },
-    select: async () => "stop",
+    select: async () => { selectCalls++; return selectAnswer; },
     isCancel: () => cancel,
   };
   const ui = createClackOnboardUi(
@@ -53,8 +56,9 @@ function fixture(
       baseUrl: () => "https://staging.catalystcloud.dev",
     },
   );
-  return { ui, signals, text: () => text };
+  return { ui, signals, text: () => text, selectCalls: () => selectCalls };
 }
+
 test("the install-engine continuation shows local sync inventory even while legacy repeats are hidden", () => {
   const f = fixture(true);
   f.ui.stepStart("legacy");
@@ -64,6 +68,37 @@ test("the install-engine continuation shows local sync inventory even while lega
   f.ui.dispose();
 });
 
+test("unattended project review uses move-on without opening a choice", async () => {
+  const projects = [{ id: "project-one", name: "Existing project", key: "ENG", status: "ready" }];
+  const unattended = fixture(false);
+  expect(await unattended.ui.reviewProjects?.(projects)).toBe("move-on");
+  expect(unattended.selectCalls()).toBe(0);
+  unattended.ui.dispose();
+
+  const interactive = fixture(true, false, false, true, false, "repair:project-one");
+  expect(await interactive.ui.reviewProjects?.(projects)).toEqual({ repair: "project-one" });
+  expect(interactive.selectCalls()).toBe(1);
+  interactive.ui.dispose();
+});
+
+test.each([false, true])("GitHub confirmation reaches the terminal before a direct handoff and remains while waiting (unicode=%s)", async (unicode) => {
+  const f = fixture(false, false, unicode);
+  try {
+    f.ui.stepStart("github.install");
+    f.ui.message("private adapter log: https://github.com/install?state=private-handoff");
+    f.ui.message(GITHUB_CONFIRM_ACCESS);
+    expect(f.text().replace(/\s+/g, " ")).toContain(GITHUB_CONFIRM_ACCESS);
+    expect(f.text()).not.toContain("private-handoff");
+    const beforeWait = f.text().length;
+    await f.ui.wait("Waiting for GitHub approval", async () => {
+      const waiting = f.text().slice(beforeWait).split("\u001b[J").at(-1) ?? "";
+      expect(waiting.replace(/\s+/g, " ")).toContain(GITHUB_CONFIRM_ACCESS);
+      expect(waiting).not.toContain("private-handoff");
+    });
+  } finally {
+    f.ui.dispose();
+  }
+});
 test("injected setup hides successful machine repeats and uses exact group/title", () => {
   const f = fixture();
   const j = journal();

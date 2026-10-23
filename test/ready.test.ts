@@ -327,7 +327,7 @@ describe("ready", () => {
     const text = ctx.out.join("\n");
     expect(text).toMatch(/^FAIL {2}team ENG: A variable ENG's repository needs has no value/m);
     expect(text).toContain(
-      `fix: set DATABASE_URL, STRIPE_KEY on the repository's Environment page: open ${server.url}/settings/projects, then the project, then the repository`,
+      `fix: set DATABASE_URL, STRIPE_KEY with catalyst var set NAME --repo <owner/name> (catalyst secret set NAME --repo <owner/name> for a secret)`,
     );
     expect(text).not.toContain("sk_live_never_printed");
     expect(text).not.toContain("resolve required_values");
@@ -348,7 +348,7 @@ describe("ready", () => {
       offline: true,
     });
     expect(r.checks.find((c) => c.id === "team:ENG:required_values")!.fix).toBe(
-      `set DATABASE_URL on the repository's Environment page: open ${server.url}/settings/projects, then the project, then the repository`,
+      `set DATABASE_URL with catalyst var set DATABASE_URL --repo <owner/name> (catalyst secret set DATABASE_URL --repo <owner/name> for a secret)`,
     );
   });
   test("CTC-3561: a team check without names, or with an empty list, keeps today's fix line", async () => {
@@ -372,10 +372,10 @@ describe("ready", () => {
       offline: true,
     });
     expect(r.checks.find((c) => c.id === "team:ENG:oauth_scope")!.fix).toBe(
-      `reconnect Linear at ${server.url}/settings/connections?reauthorize=linear`,
+      "run catalyst onboard and have an owner or admin approve the Linear link it prints",
     );
     expect(r.checks.find((c) => c.id === "team:ENG:required_values")!.fix).toBe(
-      `add the missing values on the repository's Environment page: open ${server.url}/settings/projects, then the project, then the repository`,
+      `set the missing values with catalyst var set NAME --repo <owner/name> (catalyst secret set NAME --repo <owner/name> for a secret)`,
     );
   });
   test("CTC-3606: an unresolved reference names the variable and the reference, and says the checkout refuses it", async () => {
@@ -446,7 +446,7 @@ describe("ready", () => {
       offline: true,
     });
     expect(r.checks.find((c) => c.id === "team:ENG:required_values")!.fix).toBe(
-      `set API_URL on the repository's Environment page: open ${server.url}/settings/projects, then the project, then the repository. ` +
+      `set API_URL with catalyst var set API_URL --repo <owner/name> (catalyst secret set API_URL --repo <owner/name> for a secret). ` +
         "DATABASE_URL refers to DB_SECRET, DB_HOST, which have no value, so Catalyst can't start work there. " +
         "acme/billing is missing STRIPE_KEY. " +
         "in acme/web, SENTRY_DSN refers to SENTRY_TOKEN, which has no value, so Catalyst can't start work there",
@@ -503,7 +503,7 @@ describe("ready", () => {
       offline: true,
     });
     expect(r.checks.find((c) => c.id === "team:ENG:required_values")!.fix).toBe(
-      `add the missing values on the repository's Environment page: open ${server.url}/settings/projects, then the project, then the repository`,
+      `set the missing values with catalyst var set NAME --repo <owner/name> (catalyst secret set NAME --repo <owner/name> for a secret)`,
     );
   });
   test("CTC-3561: the bundle's contract range accepts 1.24.0, the version that ships names", async () => {
@@ -825,8 +825,8 @@ describe("ready prints each team's dispatch gate (CTC-2208)", () => {
     expect(text).toMatch(
       /^FAIL {2}team ENG: Catalyst doesn't know which ENG stages to use for starting work and pull requests\. Until it does, it starts no ENG tickets\.$/m,
     );
-    // CTC-4680: the cloud's remedy names an API route and says "tenant"; the fix is the map page.
-    expect(text).toContain(`fix: pick them at ${server.url}/settings/linear-teams/ENG/map`);
+    // CTC-4680: the cloud's remedy names an API route and says "tenant"; the fix is the map command.
+    expect(text).toContain("fix: run catalyst team map ENG");
     expect(text).not.toContain("Open Settings → Linear teams → ENG and press Map my stages.");
     expect(text).toMatch(
       /^ {6}who: an owner or admin of your Catalyst workspace$/m,
@@ -884,11 +884,11 @@ describe("ready prints each team's dispatch gate (CTC-2208)", () => {
     expect(text).toMatch(
       /^FAIL {2}team OPS: Catalyst doesn't know which OPS stages to use for starting work\./m,
     );
-    expect(text).toContain(`fix: pick them at ${server.url}/settings/linear-teams/OPS/map`);
+    expect(text).toContain("fix: run catalyst team map OPS");
     expect(text).toMatch(/^note {2}team OPS: Catalyst hasn't checked this team yet$/m); // still emitted, after it
   });
 
-  test("AC2e — a status this bundle does not know never prints its code, and the fix is the team page", async () => {
+  test("AC2e — a status this bundle does not know never prints its code, and the fix is the team check", async () => {
     await seedJoined(home, server);
     installSkills(defaultSkillsDirFor(home), {});
     seedTeamGate(home, 0, {
@@ -903,7 +903,7 @@ describe("ready prints each team's dispatch gate (CTC-2208)", () => {
     const c = j.checks.find((x) => x.id === "team:ENG:dispatchGate")!;
     expect(c).toMatchObject({ ok: false });
     expect(c.line).toBe("team ENG: Catalyst can't start ENG tickets yet.");
-    expect(c.fix).toBe(`open ${server.url}/settings/linear-teams/ENG to see why`);
+    expect(c.fix).toBe("run catalyst team check ENG to see why");
   });
 });
 

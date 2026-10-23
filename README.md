@@ -85,7 +85,7 @@ catalyst ready
 
 `catalyst login` with no key opens a device-code login: it prints a short code and a URL, you approve it in your browser, and this machine is connected as you. On a machine with no browser (a remote box, a container) the code and URL still work — approve them from your phone. The short-lived session refreshes silently afterwards, so you log in about once a year. `npx -p @catalyst-cloud/cli catalyst login` works without the global install, and `bunx` works in place of `npx`. A non-default cloud is set with `CATALYST_CLOUD_BASE_URL` or `--base-url <url>`.
 
-Prefer a key? Pass one instead — mint a **personal key** at Settings → API keys in the Catalyst Cloud app (every member can; no admin needed). The environment form keeps it out of your shell history:
+For a script or an unattended machine, where nobody can approve a code, pass a **personal key** instead. Minting one is a browser step: Settings → API keys in the Catalyst Cloud app (every member can; no admin needed). The environment form keeps it out of your shell history:
 
 ```sh
 CATALYST_CLOUD_TOKEN=<your-personal-key> catalyst login
@@ -98,7 +98,8 @@ After a workspace owner connects your cloud account's Linear workspace, connect 
 ```sh
 catalyst connections personal linear start
 catalyst connections personal linear status
-# First install the workspace's GitHub App and register its repository in Settings.
+# First install the workspace's GitHub App and register its repository:
+# catalyst onboard --team <KEY> --repo <owner/name>
 catalyst connections personal github start
 catalyst connections personal github status
 ```
@@ -121,7 +122,7 @@ A keyless session's access token is short-lived and rotates on its own: every re
 
 `login` does not install skills; the install command above did that. Re-running `login` after a key rotation, or to switch rails, rewrites the config. `catalyst status` prints which cloud account this machine is connected to and as whom, `catalyst ready` prints one READY or NOT READY verdict with the fix for each failure and who can apply it, and `catalyst --version` prints the package version and its pinned contract range.
 
-The setup skill Catalyst seeds into your repository ends by pointing at this same command. That served skill lives in the Catalyst Cloud application, not here; this is the only connect step a customer runs. Your cloud account's **account key** (Settings → Account keys, admin-minted) is a different credential — for a host or daemon that runs unattended — and is not what a person connects their own agent with: it would strip your name from everything your agent writes, and `login` says so if you use one.
+The setup skill Catalyst seeds into your repository ends by pointing at this same command. That served skill lives in the Catalyst Cloud application, not here; this is the only connect step a customer runs. Your cloud account's **account key** (minted by `catalyst onboard --runner`, run by an owner or admin) is a different credential — for a host or daemon that runs unattended — and is not what a person connects their own agent with: it would strip your name from everything your agent writes, and `login` says so if you use one.
 
 ## Run and resume setup
 
@@ -161,6 +162,8 @@ Before any network call, the run checks that every input is present. Each missin
 | The person's Linear | `linear_personal_grant_missing` | Settings → Connected accounts |
 | The person's GitHub | `github_personal_grant_missing` | Settings → Connected accounts |
 
+With a person at the terminal, `catalyst onboard` starts each of these approvals itself and prints the exact link to approve.
+
 With `--runner yes`, setup starts the self-hosted runner and verifies enrollment, advertised capacity and team admission. This needs Docker with Compose, pinned host images and an organization key file (`CATALYST_RUNNER_ORG_KEY_FILE`). When images, a key or admission are missing, exit 11 names that gate. A failed setup step exits 10. Use `--runner no` to skip the machine's runner. Unlike the interactive optional runner step, an explicitly requested headless runner must finish before exit 0.
 
 With `--json`, stdout carries exactly one document: the onboarding receipt plus a `headless` block (`schema: "catalyst-onboard-headless/1"`). The block holds the resolved `inputs` (the key appears only as its source: `env`, `file` or `saved`), and lists of items under `missing`, `refused`, `failed`, `deferred` and `warnings`. Each item has `id`, `kind` (`input`, `grant` or `step`), `reason` and a one-line `text`, plus `flag`, `env` and `url` where they apply. Everything else goes to stderr.
@@ -183,7 +186,7 @@ Local sync is optional. Include it in the plan with `--local-sync` when you need
 ## Requirements
 
 - Node 22.15 or newer (Node 26 works), or bun 1.4 or newer. The bundle uses Node's built-in SQLite module (and, on bun, bun's own `node:sqlite`) for the optional local replica, so there is no native dependency to build; if `better-sqlite3` resolves on the machine it is used instead. `catalyst ready` names the exact reason when the runtime is too old, and `catalyst runtime install` installs a pinned Node under this CLI's own cache — without touching your machine's default Node — if you would rather not upgrade it.
-- Your personal key, minted by you at Settings → API keys. The key is the only account selector: you never type an account id. If your Linear identity is not matched yet, `login` says so; you match it yourself with `catalyst identity linear set` (an identity someone else already claims needs an admin at Settings → Members), and until then "what needs me" shows everyone's asks.
+- Your own login: a keyless `catalyst login`, or for an unattended machine a personal key you mint at Settings → API keys. The credential is the only account selector: you never type an account id. If your Linear identity is not matched yet, `login` says so; you match it yourself with `catalyst identity linear set` (an identity someone else already claims needs an admin at Settings → Members), and until then "what needs me" shows everyone's asks.
 - An agent that discovers skills. Claude Code loads the plugin; Codex, Cursor, OpenCode and the rest read the `skills/<name>/SKILL.md` files the `npx skills` installer writes.
 - Bun is optional, only if you prefer `bunx` over `npx` — bun 1.4 or newer, which is when `node:sqlite` arrives; older bun cannot run this CLI at all.
 
@@ -233,10 +236,12 @@ Some of these only read, and some write: a comment, a card move, an ask, a relea
 
 ## What a key cannot see yet
 
-Your personal key reads everything the skills need — tickets, pull requests, the eligibility explainer, the dispatch queue, fleet activity, per-ticket execution history (`catalyst explain --history <ticket>`: phase attempts, remediation rounds, park state) and coding-account status (`catalyst accounts`: provider, declared and observed state, usage limits, walls, quarantine — never a credential; enrolling or pausing one is `<your cloud>/settings/coding-accounts`). It also releases a parked or held ticket once its cause is fixed: `catalyst release <ticket> --because <what changed>` (the `unstick` skill runs it), recorded against your name and shown in the ticket's history. And it declares what your containers need: `catalyst environment` reads the account-wide declaration, `environment propose --file <path> --approve` proposes and approves it in one compare-and-set, and the values behind the names stay in the cloud — reading needs any active seat, proposing and approving need an admin or owner one. An admin or owner can put a repository's values in from the terminal. `catalyst secret import .env --repo owner/name` stores every name in the file and lists the declared names that still have no value. `catalyst secret set NAME --repo owner/name --command 'op read op://Vault/item/field'` runs the command on your machine and stores its output; with no `--command` it reads the value from stdin, or asks for it without echoing. No value is ever printed, and the cloud's audit records the command, not its output. That is the account's own declaration — a repository's own `.catalyst/catalyst.toml`, which `catalyst-onboard` already reports on, is a separate thing. `catalyst env inventory` lists the environment variable names a repository needs — never a value; `env check` checks the TOML syntax and environment variable table in `.catalyst/catalyst.toml` offline; `env migrate [catalyst.env.json]` prints a TOML environment table from a legacy declaration, with all names optional and values omitted. These commands need no login (the `what-this-repo-needs` skill walks through them). Two things it cannot do, and the skills say so by name rather than guess:
+Your personal key reads everything the skills need — tickets, pull requests, the eligibility explainer, the dispatch queue, fleet activity, per-ticket execution history (`catalyst explain --history <ticket>`: phase attempts, remediation rounds, park state) and coding-account status (`catalyst accounts`: provider, declared and observed state, usage limits, walls, quarantine — never a credential; enrolling or pausing one is `<your cloud>/settings/coding-accounts`, with no command yet). It also releases a parked or held ticket once its cause is fixed: `catalyst release <ticket> --because <what changed>` (the `unstick` skill runs it), recorded against your name and shown in the ticket's history. And it declares what your containers need: `catalyst environment` reads the account-wide declaration, `environment propose --file <path> --approve` proposes and approves it in one compare-and-set, and the values behind the names stay in the cloud — reading needs any active seat, proposing and approving need an admin or owner one. An admin or owner can put a repository's values in from the terminal. `catalyst secret import .env --repo owner/name` stores every name in the file and lists the declared names that still have no value. `catalyst secret set NAME --repo owner/name --command 'op read op://Vault/item/field'` runs the command on your machine and stores its output; with no `--command` it reads the value from stdin, or asks for it without echoing. No value is ever printed, and the cloud's audit records the command, not its output. That is the account's own declaration — a repository's own `.catalyst/catalyst.toml`, which `catalyst-onboard` already reports on, is a separate thing. `catalyst env inventory` lists the environment variable names a repository needs — never a value; `env check` checks the TOML syntax and environment variable table in `.catalyst/catalyst.toml` offline; `env migrate [catalyst.env.json]` prints a TOML environment table from a legacy declaration, with all names optional and values omitted. `env draft --write` writes a new `.catalyst/catalyst.toml` from the repository's files and from this computer — the names the repository's `.envrc` exports, and Claude Code's HTTP MCP servers with each header as a variable reference — then offers to store this computer's values; `catalyst env import` stores them later. A value is never written to the file or printed. These commands need no login, except `env import` (the `what-this-repo-needs` skill walks through them). Two things it cannot do, and the skills say so by name rather than guess:
 
 - Read pull-request labels or the reviewer's reaction. The mirror does not carry them; GitHub's own page does.
 - Compute a flow number — cycle time, throughput, or how long pull requests have been open. Nothing serves those yet, so say they are not computed rather than counting something else and calling it that.
+
+`catalyst env shell` opens this repository's environment on your computer: the image Catalyst's agents work in, the toolchain your `.catalyst/catalyst.toml` declares, and the variables it names, with values taken from your terminal or an `--env-file`. It needs Docker (Docker Desktop, OrbStack or Docker Engine) and no sign-in. The first run downloads the image, about 2.3 GB, with no credential. `catalyst env shell --check` prepares the same environment and reports each toolchain and variable without opening a shell.
 
 ## Versions and origins
 
@@ -277,7 +282,7 @@ npm uninstall -g @catalyst-cloud/cli
 
 ## If login fails
 
-- `catalyst: GET /me failed (401): credential not accepted — mint a personal key at Settings → API keys and log in again` — the key is stale, mistyped or revoked. Mint a new one, then run `login` again.
+- `catalyst: GET /me failed (401): credential not accepted. Run catalyst login to sign in again; an unattended machine needs a new personal key from Settings → API keys` — the key is stale, mistyped or revoked. Run a keyless `catalyst login`, or on an unattended machine mint a new key, then run `login` again.
 - `catalyst: GET /me failed (403): account-not-operational` — your cloud account is suspended. This is a conversation with your account's admin, not a local fix.
 - `catalyst: could not reach <url>: <detail>` — the machine cannot reach the cloud. The URL is named in the message; check `CATALYST_CLOUD_BASE_URL` or `--base-url`.
 - A line naming two contract versions after `Connected to` — your account serves a contract outside this bundle's `1.x || 2.x` range. The config is written; update the bundle before using the other skills.

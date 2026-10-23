@@ -1,4 +1,5 @@
 import type { Readable, Writable } from "node:stream";
+import { GITHUB_CONFIRM_ACCESS } from "./onboard-github-copy.js";
 import {
   COMPUTER_CHECKS,
   standalonePlan,
@@ -31,6 +32,7 @@ import {
   type OnboardProgress,
 } from "./onboard-progress.js";
 import type { ExistingOnboardTeam } from "./onboard-existing.js";
+import type { ReturningProject, ReturningChoice } from "./onboard-returning.js";
 import {
   CREATE_TEAM_CHOICE,
   suggestTeamKey,
@@ -100,6 +102,8 @@ export interface OnboardUi {
     teams: ExistingOnboardTeam[],
     create?: TeamCreateOffer,
   ): Promise<string | null>;
+  reviewProjects?(projects: readonly ReturningProject[]): Promise<ReturningChoice | null>;
+  confirmProjectCleanup?(project: ReturningProject, lines: readonly string[]): Promise<boolean>;
   /** The new team's name and key, confirmed; null to go back to the picker (or when cancelled). */
   nameNewTeam?(question: NewTeamQuestion): Promise<NewTeamAnswer | null>;
   confirmWorkflowAdoption?(
@@ -123,6 +127,7 @@ export interface OnboardUi {
   ): Promise<string | null>;
   /** "Run Catalyst's work on this machine?", default no. Null when cancelled. */
   chooseRunner?(): Promise<boolean | null>;
+  nameMachine?(defaultName: string): Promise<string | null>;
   /** CTC-4680 round 5: a browser link ran out of time. True gets a fresh link and another wait;
    *  false (stop, or Ctrl-C at the question) pauses setup so no later step runs without it. */
   retryTimedOut?(id: OnboardStepId): Promise<boolean>;
@@ -375,7 +380,7 @@ export function createClackOnboardUi(
     if (
       renderer &&
       currentStep === "linear.adopt" &&
-      text.endsWith("already has every state and label")
+      text.endsWith("has every required state and label")
     )
       return;
     if (renderer) {
@@ -383,6 +388,8 @@ export function createClackOnboardUi(
         currentStep &&
         setupBrowserInstruction(currentStep, deps.baseUrl?.())
       ) {
+        if (currentStep === "github.install" && text === GITHUB_CONFIRM_ACCESS)
+          renderer.detail(text);
         if (/no browser opened|could not open a browser/i.test(text))
           browserOpened = false;
         return;
@@ -733,6 +740,39 @@ export function createClackOnboardUi(
         ...(answer === "signin" ? { signin: true } : {}),
       };
     },
+    async reviewProjects(projects) {
+      stop();
+      if (abort.signal.aborted) return null;
+      if (!interactive) return "move-on";
+      const answer = await select({
+        ...options,
+        message: "What should setup do with this workspace's projects?",
+        initialValue: "move-on",
+        options: [
+          { value: "move-on", label: "Move on and finish this computer's setup", hint: "default" },
+          ...projects.map(p => ({ value: `repair:${p.id}`, label: `Review or repair ${p.name} (${p.key})` })),
+          ...projects.map(p => ({ value: `cleanup:${p.id}`, label: `Preview archiving ${p.name} (${p.key})` })),
+          { value: "new", label: "Create a new Catalyst project" },
+        ],
+      });
+      if (prompts.isCancel(answer)) { abort.abort(); return null; }
+      if (answer === "move-on" || answer === "new") return answer;
+      if (typeof answer === "string" && answer.startsWith("cleanup:")) return { cleanup: answer.slice(8) };
+      return typeof answer === "string" && answer.startsWith("repair:") ? { repair: answer.slice(7) } : null;
+    },
+    async confirmProjectCleanup(project, lines) {
+      stop();
+      for (const line of lines) message(line);
+      if (abort.signal.aborted) return false;
+      const answer = await select({ ...options,
+        message: `Archive ${project.name} after reviewing these changes?`,
+        initialValue: "keep",
+        options: [{ value: "keep", label: "Keep the project and finish this computer's setup" },
+          { value: "archive", label: "Archive this project" }],
+      });
+      if (prompts.isCancel(answer)) { abort.abort(); return false; }
+      return answer === "archive";
+    },
     async chooseTeam(teams, create) {
       stop();
       // Creating needs a name prompt; a port without one offers only the existing teams.
@@ -953,6 +993,23 @@ export function createClackOnboardUi(
         return null;
       }
       return typeof answer === "string" ? answer : null;
+    },
+    async nameMachine(defaultName) {
+      if (abort.signal.aborted) return null;
+      const answer = await text({
+        ...options,
+        message: "Name for this machine",
+        initialValue: defaultName,
+        validate: (value) =>
+          /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(value ?? "")
+            ? undefined
+            : "Use 1 to 63 letters, digits, dots, underscores or hyphens, starting with a letter or digit.",
+      });
+      if (typeof answer !== "string") {
+        abort.abort();
+        return null;
+      }
+      return answer;
     },
     async chooseRunner() {
       if (abort.signal.aborted) return null;
@@ -1350,6 +1407,8 @@ export function createClackOnboardUi(
             : "waiting for you, up to 10 minutes",
         );
         renderer.action(browser.instruction);
+        if (currentStep === "github.install")
+          renderer.detail(GITHUB_CONFIRM_ACCESS);
         if (browser.url) renderer.detail(renderer.link(browser.url));
         renderer.detail(
           renderer.dim(
@@ -1438,6 +1497,7 @@ export function createClackOnboardUi(
     delete ui.chooseFirstRepository;
     delete ui.reviewSettings;
     delete ui.chooseRunner;
+    delete ui.nameMachine;
     delete ui.chooseFirstTicket;
     delete ui.retryTimedOut;
     delete ui.confirmWorkflowAdoption;

@@ -342,9 +342,49 @@ describe("headless against a fixture cloud", () => {
         id: "account_key",
         reason: "account_key_rejected",
         url: `${server.url}/settings/api-keys`,
+        text: expect.stringContaining("CATALYST_CLOUD_TOKEN"),
       }),
     ]);
     expect(f.everything()).not.toContain(SECRET);
+  });
+
+  test("a rejected key file names its selector without echoing its path or value", async () => {
+    const f = cloud({ CATALYST_CLOUD_TOKEN_FILE: "" });
+    const path = writeKeyFile(f.home, SECRET);
+    f.ctx.env.CATALYST_CLOUD_TOKEN_FILE = path;
+    expect(await f.run(["onboard", "--headless", "--json"])).toBe(11);
+    const item = f.doc().headless.missing[0];
+    expect(item.reason).toBe("account_key_rejected");
+    expect(item.text).toContain("CATALYST_CLOUD_TOKEN_FILE");
+    expect(f.everything()).not.toContain(path);
+    expect(f.everything()).not.toContain(SECRET);
+  });
+
+  test("a rejected environment key identifies its source and points to the saved personal login", async () => {
+    const f = cloud({ CATALYST_CLOUD_TOKEN: SECRET });
+    writeConfig(f.home, {
+      baseUrl: server.url, key: FIXTURE_USER_KEY,
+      account: FIXTURE_ME_BODY.account, slug: FIXTURE_ME_BODY.slug, name: FIXTURE_ME_BODY.name,
+      permissions: [], principal: "session",
+      user: { id: "d1-user-tony", label: "Tony", email: "tony@example.test", role: "admin", linearUserId: "linear-user-tony" },
+      joinedAt: "2026-10-01T00:00:00Z", lastSkillBundleVersion: "0.14.10",
+    });
+    const before = readFileSync(configPathFor(f.home), "utf8");
+    expect(await f.run(["onboard", "--headless", "--json"])).toBe(11);
+    const item = f.doc().headless.missing[0];
+    expect(item.reason).toBe("account_key_rejected");
+    expect(item.text).toContain("CATALYST_CLOUD_TOKEN");
+    expect(item.text).toContain("saved personal login");
+    expect(item.text).toContain("Unset CATALYST_CLOUD_TOKEN");
+    expect(f.everything()).not.toContain(SECRET);
+    expect(f.everything()).not.toContain(FIXTURE_USER_KEY);
+    expect(readFileSync(configPathFor(f.home), "utf8")).toBe(before);
+
+    delete f.ctx.env.CATALYST_CLOUD_TOKEN;
+    f.out.length = 0;
+    expect(await f.run(["onboard", "--headless", "--json"])).toBe(11);
+    expect(f.doc().headless.inputs.accountKey).toBe("saved");
+    expect(f.doc().steps.find((step: { id: string }) => step.id === "signin")?.state).toBe("done");
   });
 
   test("a key for another person than the saved login is refused (exit 12) and the saved login is kept", async () => {

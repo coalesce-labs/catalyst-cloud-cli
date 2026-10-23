@@ -301,8 +301,8 @@ test("optional checkout waits do not promise a continuation setup cannot perform
   expect(pendingContinuation(j)).toBeNull();
 });
 
-test.each([undefined, "ADV", "TEAM / A"])(
-  "workflow remedy uses the real team adoption route (%s)",
+test.each([undefined, "ADV"])(
+  "workflow remedy is the team adoption command, not a page (%s)",
   async (teamKey) => {
     const { onboardJsonView } = await import("../src/setup-onboard-copy.js");
     const j = journal();
@@ -312,15 +312,11 @@ test.each([undefined, "ADV", "TEAM / A"])(
       j.steps.find((s) => s.id === "linear.adopt")!,
       { state: "waiting" },
     );
-    const path = teamKey
-      ? `/settings/linear-teams/${encodeURIComponent(teamKey)}/adopt`
-      : "/settings/linear-teams";
-    expect(onboardJsonView(j, "https://cloud.test").actions[0]!.url).toBe(
-      `https://cloud.test${path}`,
-    );
+    const command = `catalyst team adopt ${teamKey ?? "<TEAM KEY>"}`;
+    expect(onboardJsonView(j, "https://cloud.test").actions[0]!.url).toBeUndefined();
     expect(
       setupFinalScreen(j, "https://cloud.test").actions[0]!.text,
-    ).toContain(path);
+    ).toContain(command);
   },
 );
 test.each(["member_scope", "runner_identity_unverified"])(

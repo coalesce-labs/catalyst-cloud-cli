@@ -644,11 +644,15 @@ test("missing AI accounts name the saved workspace's AI accounts page and an API
   expect(warned("account_enrollment_required")).not.toContain("undefined");
 });
 
-test("closed runner admission names a self-hosted host or cloud runners from Catalyst", () => {
-  const text = warned("capacity_admission_unverified", { id: "capacity" });
+test("closed runner admission names the enroll command for this computer and how to ask for cloud runners", () => {
+  const text = warned("capacity_admission_unverified", { id: "capacity", journal: adoptedTeam() });
   expect(text).toContain("No runner is allowed to take work");
-  expect(text).toContain("Enroll a self-hosted runner host");
-  expect(text).toContain("ask Catalyst to enable cloud runners");
+  expect(text).toContain("catalyst onboard --runner --team ENG");
+  expect(text).toContain("ask Catalyst support to turn on cloud runners");
+  // CTC-6180 review: with no team key the printed command is still runnable as is.
+  const unknown = warned("capacity_admission_unverified", { id: "capacity" });
+  expect(unknown.split("\n").at(-1)).toBe("catalyst onboard --runner");
+  expect(unknown).not.toContain("<TEAM KEY>");
 });
 
 test("the daily update explains the service manager it needs and that it is optional", () => {
@@ -969,3 +973,19 @@ test("CTC-4680 round 5: a timed-out link asks to try again, and stopping pauses 
   expect(await cancelled.ui.retryTimedOut!("linear.workspace")).toBe(false);
   expect(cancelled.ui.signal.aborted).toBe(true);
 });
+
+ test("returning workspace choice defaults to moving on instead of the first project", async () => {
+   const f = fixture("move-on");
+   expect(await f.ui.reviewProjects!([{ id: "team-cloud", key: "CTC", name: "Cloud", status: "Ready" }, { id: "team-sdk", key: "SDK", name: "SDK", status: "Merge queue needs attention" }])).toBe("move-on");
+   expect(f.selections[0]!.initialValue).toBe("move-on");
+   expect(f.selections[0]!.options.map(o => o.value)).toEqual(["move-on", "repair:team-cloud", "repair:team-sdk", "cleanup:team-cloud", "cleanup:team-sdk", "new"]);
+   f.ui.dispose();
+ });
+
+ test("project cleanup shows its preview and defaults to keeping the project", async () => {
+   const f = fixture("keep");
+   expect(await f.ui.confirmProjectCleanup!({ id: "team-sdk", key: "SDK", name: "SDK", status: "Ready" }, ["Stop mirroring org/sdk."])).toBe(false);
+   expect(f.events.find(e => e.text === "Stop mirroring org/sdk.")).toBeDefined();
+   expect(f.selections[0]!.initialValue).toBe("keep");
+   f.ui.dispose();
+ });

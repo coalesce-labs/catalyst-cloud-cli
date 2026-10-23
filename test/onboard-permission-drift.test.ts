@@ -22,6 +22,18 @@ const settings =
   "https://github.com/organizations/acme/settings/installations/123";
 
 describe("the action line for an outdated connection", () => {
+  test("explains an existing install and this account's Confirm access code before its review link", () => {
+    const text = onboardReasonText({
+      id: "github.install", state: "waiting", reason: "github_app_permissions_outdated",
+      evidence: { installation: "123", org: "acme", missing: "actions (write)", url: review, actor: "github-org-admin" },
+    });
+    expect(text).toContain("existing GitHub App installation");
+    expect(text).toContain("Accept new permissions");
+    expect(text).toContain("Confirm access");
+    expect(text).toContain("two-factor code for the GitHub account you are signed in to");
+    expect(text.indexOf("Confirm access")).toBeLessThan(text.indexOf(review));
+  });
+
   test("GitHub App permissions: the org, the permissions, the direct review URL, and that an org admin takes it", () => {
     const text = onboardReasonText({
       id: "github.install",
@@ -37,7 +49,7 @@ describe("the action line for an outdated connection", () => {
       },
     });
     expect(text).toBe(
-      `GitHub App needs updated permissions on acme: issues (write), pull_requests (write). An organization owner on GitHub reviews and accepts the request at ${review}, then run catalyst onboard.`,
+      `The existing GitHub App installation on acme needs updated permissions accepted: issues (write), pull_requests (write). GitHub may show Confirm access. Use the two-factor code for the GitHub account you are signed in to. An organization owner on GitHub chooses Review permissions, then Accept new permissions at ${review}. Run catalyst onboard afterward.`,
     );
   });
 
@@ -58,7 +70,7 @@ describe("the action line for an outdated connection", () => {
         },
       }),
     ).toContain(
-      `The owner of the ryan GitHub account reviews and accepts the request at ${url}`,
+      `The owner of the ryan GitHub account chooses Review permissions, then Accept new permissions at ${url}`,
     );
   });
 
@@ -160,7 +172,7 @@ describe("the action line for an outdated connection", () => {
         reason: "github_app_permissions_outdated",
       }),
     ).toBe(
-      "GitHub App needs updated permissions. An organization owner on GitHub accepts the pending request on the App's installation page, then run catalyst onboard.",
+      "The existing GitHub App installation needs updated permissions accepted. GitHub may show Confirm access. Use the two-factor code for the GitHub account you are signed in to. An organization owner on GitHub opens the App's installation page, chooses Review permissions, then Accept new permissions. Run catalyst onboard afterward.",
     );
     const text = onboardReasonText({
       id: "github.install",

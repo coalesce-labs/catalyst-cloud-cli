@@ -1,4 +1,5 @@
 import { finishOnTheWeb } from "./consent-browser.js";
+import { GITHUB_CONFIRM_ACCESS } from "./onboard-github-copy.js";
 import { loadConfig, normalizeBaseUrl, type Ctx } from "./config.js";
 import type {
   OnboardAdapter,
@@ -552,6 +553,7 @@ export function githubInstallationAdapter(
           reason: "github_installation_admin_required",
         };
       // The signed URL is transient credential material: only the browser receives it.
+      ctx.stderr(GITHUB_CONFIRM_ACCESS);
       let browserUnavailable = false;
       try {
         await options.openBrowser(url, signal);

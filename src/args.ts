@@ -51,6 +51,13 @@ const GLOBAL_FLAGS: FlagTable = {
 
 /** Per-verb flag tables. A verb absent here accepts only the global flags. */
 export const FLAG_TABLES: Record<string, FlagTable> = {
+  hosts: { yes: { value: false, help: "confirm removal without a terminal" } },
+  runner: {
+    check: { value: false, help: "read the approved release and say what would change, without changing it" },
+    auto: { value: false, help: "one-line output for the scheduled run" },
+    dir: { value: true, help: "the runner directory (default: the one setup created)" },
+    fleet: { value: false, help: "update a multi-team supervisor fleet's compose.json in --dir" },
+  },
   login: {
     "start-replica": {
       value: false,
@@ -72,6 +79,10 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
   },
   install: {},
   onboard: {
+    "machine-name": {
+      value: true,
+      help: "name this self-hosted machine (default: its hostname)",
+    },
     verbose: { value: false, help: "show granted permissions for connected steps in interactive setup" },
     team: {
       value: true,
@@ -303,7 +314,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     option: {
       value: true,
       repeat: true,
-      help: "raise: an option (repeatable)",
+      help: "raise: an option (repeatable); answer: the letter of the option the owner chose (leave out for free text)",
     },
     default: { value: true, help: "raise: the default if silent" },
     blocks: {
@@ -315,13 +326,45 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       value: false,
       help: "raise: declare that nothing is blocked",
     },
+    "gates-pr": {
+      value: true,
+      repeat: true,
+      help: "raise: a PR whose hold the answer releases (repeatable; needs --released-by)",
+    },
+    "gates-label": {
+      value: true,
+      repeat: true,
+      help: "raise: the hold label the answer removes: hold or hold:preview (repeatable; default hold)",
+    },
+    "released-by": {
+      value: true,
+      repeat: true,
+      help: "raise: an option letter whose answer releases the hold (repeatable)",
+    },
+    "gates-repo": {
+      value: true,
+      help: "raise: the --gates-pr repository as owner/name (default: the account's only repository)",
+    },
     anyone: {
       value: false,
       help: "list: every open ask in the tenant, not only the ones assigned to you",
     },
     "ask-key": { value: true, help: "raise: idempotency key" },
     answer: { value: true, help: "accept: the answering comment id" },
-    role: { value: true, help: "accept: the role recording the answer" },
+    role: { value: true, help: "accept/answer: the role recording the answer" },
+    proxy: {
+      value: false,
+      help: "answer: record an answer the ask's owner gave you in chat (required)",
+    },
+    quote: { value: true, help: "answer: the owner's exact words" },
+    "said-in": {
+      value: true,
+      help: "answer: the chat session or channel id where the owner said it",
+    },
+    "said-at": {
+      value: true,
+      help: "answer: when the owner said it, as an ISO-8601 time (default now)",
+    },
   },
   ready: {
     onboarding: {
@@ -337,11 +380,20 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       help: "skip the published-release check (no network)",
     },
   },
-  accounts: {},
+  accounts: {
+    all: { value: false, help: "also list removed accounts, which are kept for history and take no work" },
+  },
+  seat: {
+    size: { value: true, help: "model size: big or med" },
+    stage: { value: true, help: "sized relay stage; defaults from size" },
+    harness: { value: true, help: "comma-separated runnable harnesses" },
+    "session-id": { value: true, help: "stable id for this local session; generated when omitted" },
+    "key-env": { value: true, help: "read the bearer from this environment variable, never argv" },
+  },
   env: {
     root: {
       value: true,
-      help: "draft: repository directory (default: current directory)",
+      help: "draft, import, shell: repository directory (default: current directory; shell: the current repository's top level)",
     },
     write: {
       value: false,
@@ -350,6 +402,31 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     diff: {
       value: false,
       help: "draft: show the generated TOML as an additions-only diff",
+    },
+    "import-values": {
+      value: false,
+      help: "draft: after --write, store this computer's values for the declared names without asking",
+    },
+    repo: {
+      value: true,
+      help: "draft --import-values, import: the repository (owner/name); default: this checkout's GitHub origin",
+    },
+    yes: {
+      value: false,
+      help: "import: store without asking (needed without a terminal)",
+    },
+    "env-file": {
+      value: true,
+      repeat: true,
+      help: "shell: read declared variables' values from this dotenv file (repeatable; your terminal's own values win)",
+    },
+    image: {
+      value: true,
+      help: "shell: open this digest-pinned image instead of Catalyst's (it must carry bash, and mise when toolchains are declared)",
+    },
+    check: {
+      value: false,
+      help: "shell: prepare the environment and report it, without opening a shell",
     },
   },
   var: {
@@ -494,9 +571,18 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       help: "with --class: at most this many tickets (the cloud caps it at 25)",
     },
   },
+  stage: {
+    artifact: { value: true, help: "done/fail: path to the phase artifact" },
+    evidence: { value: true, help: "done: JSON file with phase-specific receipt evidence" },
+    summary: { value: true, help: "done/fail: concise outcome summary" },
+    assertion: { value: true, help: "renew: work completed since the previous renewal" },
+  },
 };
 
 export const VERB_USAGE: Record<string, string> = {
+  hosts:
+    "hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name> [--json]",
+  runner: "runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off]",
   setup:
     "setup [onboard options]   (sets up Catalyst step by step; same as catalyst onboard) | setup --engine <file> --engine-sha256 <hex> [-- <install options>]   (run by install.sh; install.sh --help lists the options)",
   login:
@@ -523,12 +609,13 @@ export const VERB_USAGE: Record<string, string> = {
     "watch [--team K] [--ticket T]... [--project P] [--exec CMD] [--cursor-file <path>] [--from cursor|head]",
   write:
     "write <comment <ticket> --body|--stdin [--parent] [--bookkeeping] [--as-user] | state <ticket> --slot|--state-id|--state-type | label <ticket> --add... --remove... | create --team --title [--description|--stdin] [--label] [--priority] | reaction <ticket>|--comment <id> --emoji <e> | attachment <ticket> --title --url | session <ticket> [--title] [--plan-file] [--activity]>",
-  ask: "ask <raise --team --title [--context] [--option]... [--default] --blocks <ticket>...|--nothing-to-block [--ask-key] | accept <askTicket> --answer <commentId> --role <role> | list [--anyone] [--json]>",
+  ask: "ask <raise --team --title [--context] [--option]... [--default] --blocks <ticket>...|--nothing-to-block [--ask-key] [--gates-pr <n>... --released-by <letter>... [--gates-label hold|hold:preview]... [--gates-repo <owner/name>]] | accept <askTicket> --answer <commentId> --role <role> | answer <askTicket> --proxy --quote <owner's exact words> [--option <letter>] --said-in <session or channel id> [--said-at <ISO-8601 time>] [--role <role>] | proxy [status|on|off] | disown <askTicket> | list [--anyone]> [--json]",
   ready: "ready [--onboarding] [--local-sync] [--json] [--offline]",
-  accounts: "accounts [--json]",
-  mcp: "mcp <add <name> --url URL <--auth none|--bearer SECRET_NAME|--header NAME=SECRET_NAME...>|list|remove <name>> [--json]",
+  accounts: "accounts [--all] [--json]",
+  seat: "seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE] [--key-env NAME]",
+  mcp: "mcp <add <name> --url URL <--auth none|--bearer SECRET_NAME|--header NAME=SECRET_NAME...>|list|remove <name>|status <name>> [--json]",
   team: "team <list|check <KEY>|check --all|map <KEY> [--stage role=StateName]... [--yes --plan-hash H]|adopt <KEY> [--undo] [--yes --plan-hash H]|migrate <KEY> [--choice sourceId=destinationId]... [--retire] [--yes --plan-hash H]|checklist <KEY>> [--json]",
-  env: "env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write]> [--json]   (THIS repository, offline — no login, no network)",
+  env: "env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write [--import-values]] | import [--root DIR] [--repo owner/name] [--yes] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (THIS repository; no login, except import and --import-values, which sign in and store values — shell needs Docker and downloads Catalyst's image once)",
   environment:
     "environment [read] [--json] | environment propose --file <path>|--stdin [--expect-revision N] [--approve] [--json] | environment approve [--revision N --hash H] [--json]   (your ACCOUNT's declaration; needs login)",
   secret:
@@ -544,6 +631,8 @@ export const VERB_USAGE: Record<string, string> = {
     "connections personal <linear|github> <start|status> [--wait <seconds>] [--json]",
   release:
     "release <ticket> --because <what changed> [--retry-unchanged] [--dry-run] [--json] | release --class <failure-class> --team <K> --because <what changed> [--retry-unchanged] [--dry-run] [--limit N] [--json]",
+  stage:
+    "stage start|renew|done|fail <ticket> <phase> [--artifact <path>] [--evidence <json>] [--summary <text>] [--assertion <work done>]",
 };
 
 export function parseArgs(argv: string[]): ParsedArgs {

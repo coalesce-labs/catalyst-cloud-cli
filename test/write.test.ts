@@ -1,12 +1,16 @@
 // write.test.ts — every write reads the route table (the fixture's unusual prefix proves it),
 // --bookkeeping prefixes the contract's marker, state moves resolve by slot and by state type, labels
 // resolve by name, a 429 names hostDailyWriteBudget, and the ask verbs post what the route expects.
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { writeFileSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { main } from "../src/cli";
 import { rankAsks } from "../src/ask";
 import { firstStateOfType } from "../src/write";
-import { FIXTURE_ROUTE_PREFIX } from "./fixture-contract";
+import { buildFixtureContract, FIXTURE_ROUTE_PREFIX } from "./fixture-contract";
 import { fixtureIssues, startMeFixture, type FixtureServer } from "./fixture";
 import { makeCtx, seedJoined, tempHome, type TestCtx } from "./helpers";
 
@@ -25,6 +29,7 @@ beforeEach(async () => {
   ctx = makeCtx(home);
   server.writes.length = 0;
   server.budgetExhausted = false;
+  server.agentWriteReply = undefined;
   server.issues = fixtureIssues();
   await seedJoined(home, server);
 });
@@ -62,11 +67,11 @@ describe("write", () => {
     expect(c.err.join("\n")).toMatch(/not mapped/);
     expect(await main(["write", "state", "ENG-1", "--state-type", "frozen"], makeCtx(home))).toBe(2);
   });
-  test("label --add <name> posts the resolved id; --remove posts a second call; an absent label refuses", async () => {
-    expect(await main(["write", "label", "ENG-1", "--add", "catalyst-ask", "--remove", "some-raw-id"], ctx)).toBe(0);
+  test("label --add <name> posts the name; --remove posts a second call; an absent label refuses", async () => {
+    expect(await main(["write", "label", "ENG-1", "--add", "catalyst-ask", "--remove", LABEL_UUID], ctx)).toBe(0);
     expect(server.writes.map((w) => w.body)).toEqual([
-      { issueId: "lin-eng-1", labelIds: ["label-ask-unscoped"], mode: "add" },
-      { issueId: "lin-eng-1", labelIds: ["some-raw-id"], mode: "remove" },
+      { issueId: "lin-eng-1", labelNames: ["catalyst-ask"], mode: "add" },
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], mode: "remove" },
     ]);
     expect(await main(["write", "label", "ENG-1"], makeCtx(home))).toBe(1);
     const c = makeCtx(home);
@@ -75,13 +80,13 @@ describe("write", () => {
   });
   test("create, reaction, attachment and session post their bodies", async () => {
     expect(await main(["write", "create", "--team", "ENG", "--title", "New", "--label", "catalyst-ask", "--priority", "2"], ctx)).toBe(0);
-    expect(server.writes[0]!.body).toEqual({ teamId: "team-eng", title: "New", labelIds: ["label-ask-unscoped"], priority: 2 });
+    expect(server.writes[0]!.body).toEqual({ teamId: "team-eng", title: "New", labelNames: ["catalyst-ask"], priority: 2 });
     expect(await main(["write", "reaction", "ENG-1", "--emoji", "👀"], makeCtx(home))).toBe(0);
     expect(server.writes[1]!.body).toEqual({ emoji: "👀", issueId: "lin-eng-1" });
     expect(await main(["write", "reaction", "--comment", "c-9", "--emoji", "👍"], makeCtx(home))).toBe(0);
     expect(server.writes[2]!.body).toEqual({ emoji: "👍", commentId: "c-9" });
     expect(await main(["write", "attachment", "ENG-1", "--title", "PR", "--url", "https://x/1"], makeCtx(home))).toBe(0);
-    expect(server.writes[3]!.body).toEqual({ issueId: "lin-eng-1", title: "PR", url: "https://x/1" });
+    expect(server.writes[3]!.body).toEqual({ issueId: "lin-eng-1", title: "PR", url: "https://x/1", metadata: {} });
     writeFileSync(`${home}/plan.json`, JSON.stringify([{ content: "research", status: "inProgress" }]));
     expect(await main(["write", "session", "ENG-1", "--title", "Relay", "--plan-file", `${home}/plan.json`, "--activity", "started"], makeCtx(home))).toBe(0);
     expect(server.writes[4]!.body).toEqual({ issueId: "lin-eng-1", title: "Relay", plan: [{ content: "research", status: "inProgress" }], activity: "started" });
@@ -92,6 +97,21 @@ describe("write", () => {
     expect(await main(["write", "delegate"], makeCtx(home))).toBe(1);
     expect(await main(["write", "wat"], makeCtx(home))).toBe(1);
     expect(await main(["write"], makeCtx(home))).toBe(1);
+  });
+  test("attachment satisfies the cloud's required metadata object contract", async () => {
+    server.agentWriteReply = (name, body) => {
+      if (name !== "attachment") return undefined;
+      const metadata = (body as { metadata?: unknown }).metadata;
+      if (typeof metadata === "object" && metadata !== null && !Array.isArray(metadata)) return undefined;
+      return { status: 400, body: { outcome: "rejected", reason: "metadata must be a JSON object" } };
+    };
+    expect(await main(["write", "attachment", "ENG-1", "--title", "Browser proof", "--url", "https://x/verify/ticket/ENG-1"], ctx)).toBe(0);
+    expect(server.writes[0]!.body).toEqual({
+      issueId: "lin-eng-1",
+      title: "Browser proof",
+      url: "https://x/verify/ticket/ENG-1",
+      metadata: {},
+    });
   });
   test("an unknown ticket is exit 2; a 429 exits 2 naming hostDailyWriteBudget", async () => {
     expect(await main(["write", "comment", "ENG-404", "--body", "x"], ctx)).toBe(2);
@@ -109,6 +129,158 @@ describe("write", () => {
     expect(code).toBe(0);
     expect(server.writes).toHaveLength(1);
     expect(server.writes[0]!.headers.authorization).toBe("Bearer fixture-user-key");
+  });
+});
+
+// CTC-5871 — the mirror's own rule (CTC-5566): a labelIds entry that is not a UUID is a 400 naming
+// labelNames. The mock answers exactly that, so the pre-fix CLI (every value in labelIds) goes red here.
+const LABEL_UUID = "0f8e5a3c-1b2d-4c6e-9a7b-3d5f7e9a1c2b";
+const MIRROR_LABEL_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function mirrorLabelRule(name: string, body: unknown): { status: number; body: unknown } | undefined {
+  if (name !== "issue-label" && name !== "issue-create") return undefined;
+  const ids = ((body as { labelIds?: string[] }).labelIds ?? []).filter((id) => !MIRROR_LABEL_ID_SHAPE.test(id));
+  if (ids.length === 0) return undefined;
+  return { status: 400, body: { outcome: "rejected", reason: `labelIds entry "${ids[0]}" is not a label ID (a UUID); send a label by its name in labelNames` } };
+}
+
+describe("write labels by name or id (CTC-5871)", () => {
+  beforeEach(() => {
+    server.agentWriteReply = mirrorLabelRule;
+  });
+  test("create --label Bug sends Bug in labelNames and succeeds", async () => {
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--priority", "4", "--label", "Bug", "--description", "d", "--json"], ctx)).toBe(0);
+    expect(server.writes[0]!.body).toEqual({ teamId: "team-eng", title: "T", description: "d", labelNames: ["Bug"], priority: 4 });
+    expect(JSON.parse(ctx.out.join("\n"))).toMatchObject({ id: "lin-issue-create-1" });
+  });
+  test("label --add Bug sends Bug in labelNames; --remove Bug does the same with mode remove", async () => {
+    expect(await main(["write", "label", "ENG-1", "--add", "Bug", "--remove", "Feature"], ctx)).toBe(0);
+    expect(server.writes.map((w) => w.body)).toEqual([
+      { issueId: "lin-eng-1", labelNames: ["Bug"], mode: "add" },
+      { issueId: "lin-eng-1", labelNames: ["Feature"], mode: "remove" },
+    ]);
+    expect(ctx.out).toEqual(["label: ok"]);
+  });
+  test("a UUID goes in labelIds on create, add and remove", async () => {
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--label", LABEL_UUID.toUpperCase()], ctx)).toBe(0);
+    expect(server.writes[0]!.body).toEqual({ teamId: "team-eng", title: "T", labelIds: [LABEL_UUID.toUpperCase()] });
+    expect(await main(["write", "label", "ENG-1", "--add", LABEL_UUID, "--remove", LABEL_UUID], makeCtx(home))).toBe(0);
+    expect(server.writes.slice(1).map((w) => w.body)).toEqual([
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], mode: "add" },
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], mode: "remove" },
+    ]);
+  });
+  test("a contract-known name goes in labelNames on create, add and remove", async () => {
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--label", "catalyst-ask"], ctx)).toBe(0);
+    expect(server.writes[0]!.body).toEqual({ teamId: "team-eng", title: "T", labelNames: ["catalyst-ask"] });
+    expect(await main(["write", "label", "ENG-1", "--add", "catalyst-ask", "--remove", "catalyst-ask"], makeCtx(home))).toBe(0);
+    expect(server.writes.slice(1).map((w) => w.body)).toEqual([
+      { issueId: "lin-eng-1", labelNames: ["catalyst-ask"], mode: "add" },
+      { issueId: "lin-eng-1", labelNames: ["catalyst-ask"], mode: "remove" },
+    ]);
+  });
+  test("mixed values split: UUID → labelIds, every name (contract-known or not) → labelNames", async () => {
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--label", "Bug", "--label", "catalyst-ask", "--label", LABEL_UUID, "--label", "Customer"], ctx)).toBe(0);
+    expect(server.writes[0]!.body).toEqual({
+      teamId: "team-eng",
+      title: "T",
+      labelIds: [LABEL_UUID],
+      labelNames: ["Bug", "catalyst-ask", "Customer"],
+    });
+    expect(await main(["write", "label", "ENG-1", "--add", "catalyst-ask", "--add", "Bug", "--add", LABEL_UUID, "--remove", LABEL_UUID, "--remove", "catalyst-ask", "--remove", "Feature"], makeCtx(home))).toBe(0);
+    expect(server.writes.slice(1).map((w) => w.body)).toEqual([
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], labelNames: ["catalyst-ask", "Bug"], mode: "add" },
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], labelNames: ["catalyst-ask", "Feature"], mode: "remove" },
+    ]);
+  });
+  test("a rejected create exits 2; --json prints one JSON error object on stdout and keeps stderr", async () => {
+    server.agentWriteReply = () => ({ status: 400, body: { outcome: "rejected", reason: "label Bug is not in team ENG" } });
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--label", "Bug", "--json"], ctx)).toBe(2);
+    expect(ctx.out).toHaveLength(1);
+    expect(JSON.parse(ctx.out[0]!)).toEqual({
+      ok: false,
+      command: "write create",
+      error: { code: "http", status: 400, message: `POST ${FIXTURE_ROUTE_PREFIX}/issue-create failed (400): label Bug is not in team ENG` },
+    });
+    expect(ctx.err.join("\n")).toMatch(/issue-create failed \(400\): label Bug is not in team ENG/);
+    const human = makeCtx(home);
+    expect(await main(["write", "create", "--team", "ENG", "--title", "T", "--label", "Bug"], human)).toBe(2);
+    expect(human.out).toEqual([]);
+    expect(human.err.join("\n")).toMatch(/issue-create failed \(400\)/);
+  });
+  test("a rejected add or remove exits 2 with a JSON error on stdout", async () => {
+    server.agentWriteReply = (name, body) => ((body as { mode?: string }).mode === "remove" ? { status: 400, body: { outcome: "rejected", reason: "no such label" } } : undefined);
+    expect(await main(["write", "label", "ENG-1", "--add", "Bug", "--remove", "Nope", "--json"], ctx)).toBe(2);
+    expect(server.writes).toHaveLength(2);
+    expect(ctx.out).toHaveLength(1);
+    expect(JSON.parse(ctx.out[0]!)).toMatchObject({ ok: false, command: "write label", error: { code: "http", status: 400 } });
+    server.agentWriteReply = () => ({ status: 400, body: { outcome: "rejected", reason: "no such label" } });
+    const c = makeCtx(home);
+    expect(await main(["write", "label", "ENG-1", "--add", "Bug", "--json"], c)).toBe(2);
+    expect(JSON.parse(c.out[0]!)).toMatchObject({ ok: false, command: "write label", error: { message: expect.stringMatching(/no such label/) } });
+  });
+  test("a 200 whose body says the label write failed still exits 2", async () => {
+    server.agentWriteReply = () => ({ status: 200, body: { outcome: "failed", code: "operation_failed", reason: "one or more label writes failed", results: [] } });
+    const c = makeCtx(home);
+    expect(await main(["write", "label", "ENG-1", "--add", "Bug", "--json"], c)).toBe(2);
+    expect(JSON.parse(c.out[0]!)).toMatchObject({ ok: false, error: { code: "write-failed", status: 200, message: expect.stringMatching(/one or more label writes failed/) } });
+    const h = makeCtx(home);
+    expect(await main(["write", "label", "ENG-1", "--remove", "Bug"], h)).toBe(2);
+    expect(h.err.join("\n")).toMatch(/outcome "failed"/);
+  });
+});
+
+// CTC-2534 — the catalyst-linear wrapper end to end: scripts/label.mjs runs as a real node process
+// against a stand-in CLI that records its argv (no tenant is reached), and that argv then drives
+// `main` against the mock mirror. So a value goes by the route the wrapper's help says it goes by.
+const LABEL_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "skills", "catalyst-linear", "scripts", "label.mjs");
+function runLabelScript(args: string[]): { status: number | null; stdout: string; argv: string[][] } {
+  const scriptHome = mkdtempSync(join(tmpdir(), "label-script-"));
+  const log = join(scriptHome, "calls.log");
+  const cli = join(scriptHome, "fake-cli.mjs");
+  writeFileSync(cli, `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nprocess.stdout.write("{}\\n");\n`);
+  mkdirSync(join(scriptHome, ".config", "catalyst-cloud"), { recursive: true });
+  writeFileSync(
+    join(scriptHome, ".config", "catalyst-cloud", "customer.json"),
+    JSON.stringify({ baseUrl: "https://cloud.example", account: "tenant-fixture", key: "ctc_user_fixture", cliPath: cli }),
+  );
+  const r = spawnSync(process.execPath, [LABEL_SCRIPT, ...args], {
+    encoding: "utf8",
+    timeout: 20_000,
+    env: { ...process.env, CATALYST_SKILLS_HOME: scriptHome, HOME: scriptHome },
+  });
+  const argv = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as string[]) : [];
+  return { status: r.status, stdout: r.stdout, argv };
+}
+
+describe("catalyst-linear label.mjs (CTC-2534)", () => {
+  beforeEach(() => {
+    server.agentWriteReply = mirrorLabelRule;
+  });
+  test("custom name, contract-known name and UUID on add and remove reach the mirror by the right route", async () => {
+    const r = runLabelScript(["ENG-1", "--add", "Bug", "--add", "catalyst-ask", "--add", LABEL_UUID, "--remove", "Customer", "--remove", LABEL_UUID]);
+    expect(r.status).toBe(0);
+    expect(r.argv).toHaveLength(1);
+    expect(await main(r.argv[0]!, ctx)).toBe(0);
+    expect(server.writes.map((w) => w.body)).toEqual([
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], labelNames: ["Bug", "catalyst-ask"], mode: "add" },
+      { issueId: "lin-eng-1", labelIds: [LABEL_UUID], labelNames: ["Customer"], mode: "remove" },
+    ]);
+  });
+  test("a Catalyst label the contract lists as absent refuses before any write", async () => {
+    const r = runLabelScript(["ENG-1", "--add", "catalyst-not-an-ask", "--add", "Bug"]);
+    expect(r.status).toBe(0);
+    expect(await main(r.argv[0]!, ctx)).toBe(2);
+    expect(ctx.err.join("\n")).toMatch(/absent/);
+    expect(server.writes).toEqual([]);
+  });
+  test("--help describes the route each value takes: a UUID as an id, any other value as a name", () => {
+    const r = runLabelScript(["--help"]);
+    expect(r.status).toBe(0);
+    expect(r.argv).toEqual([]);
+    const help = r.stdout.replace(/\s+/g, " ");
+    expect(help).toMatch(/UUID is sent as a label id/);
+    expect(help).toMatch(/Any other value, .*custom labels.* is sent as a label name/);
+    expect(help).not.toMatch(/other value is sent as a label id/);
   });
 });
 
@@ -281,5 +453,67 @@ describe("more ask branches", () => {
     ];
     const ranked = rankAsks(issues, server.contract, () => true);
     expect(ranked).toEqual([{ identifier: "ENG-5", title: "q", state: "Todo", blocks: ["ENG-1", "ENG-2"], score: 2, assigneeId: null }]);
+  });
+});
+
+// CTC-5044 — an ask can name the PR hold its answer releases. The cloud removes the named labels when
+// the ask is answered with a releasing letter, so the CLI refuses what the route would refuse (an
+// unknown label, a letter that is not one of the options) before anything is posted.
+describe("ask raise --gates-pr (CTC-5044)", () => {
+  const base = ["ask", "raise", "--team", "ENG", "--title", "Ship it?", "--context", "c", "--option", "Release the hold", "--option", "Keep it held", "--default", "B", "--blocks", "ENG-1"];
+  const oneRepo = async () => {
+    const doc = buildFixtureContract();
+    doc.merge.repositories = [doc.merge.repositories[0]!];
+    server.contract = doc;
+    home = tempHome();
+    ctx = makeCtx(home);
+    await seedJoined(home, server);
+  };
+  afterEach(() => {
+    server.contract = buildFixtureContract();
+  });
+
+  test("the flags parse into gates: repo, every PR, every label, every releasing letter", async () => {
+    const code = await main([...base, "--gates-repo", "hagale/web", "--gates-pr", "5412", "--gates-pr", "5413", "--gates-label", "hold", "--gates-label", "hold:preview", "--released-by", "A"], ctx);
+    expect(code).toBe(0);
+    expect(server.writes[0]!.body).toMatchObject({ gates: { repo: "hagale/web", pr: [5412, 5413], labels: ["hold", "hold:preview"], releasedBy: ["A"] } });
+  });
+  test("one PR is a number, the label defaults to hold, a lowercase letter is uppercased, and the repo defaults to the account's only one", async () => {
+    await oneRepo();
+    expect(await main([...base, "--gates-pr", "5412", "--released-by", "a"], ctx)).toBe(0);
+    expect((server.writes[0]!.body as Record<string, unknown>).gates).toEqual({ repo: "hagale/api", pr: 5412, labels: ["hold"], releasedBy: ["A"] });
+  });
+  test("without --gates-pr the body carries no gates and is the same as before", async () => {
+    expect(await main(base, ctx)).toBe(0);
+    expect(server.writes[0]!.body).toEqual({ title: "Ship it?", teamId: "team-eng", context: "c", options: ["Release the hold", "Keep it held"], defaultIfSilent: "B", blocks: ["lin-eng-1"] });
+  });
+  test("a releasing letter that is not one of the options is refused and posts nothing", async () => {
+    expect(await main([...base, "--gates-repo", "hagale/web", "--gates-pr", "5412", "--released-by", "C"], ctx)).toBe(1);
+    expect(ctx.err.join("\n")).toMatch(/--released-by C is not one of this ask's options \(A, B\)/);
+    expect(server.writes).toHaveLength(0);
+  });
+  test("an unknown label is refused by name and posts nothing", async () => {
+    expect(await main([...base, "--gates-repo", "hagale/web", "--gates-pr", "5412", "--gates-label", "hold:hand-steps", "--released-by", "A"], ctx)).toBe(1);
+    expect(ctx.err.join("\n")).toMatch(/--gates-label hold:hand-steps .*hold, hold:preview/);
+    expect(server.writes).toHaveLength(0);
+  });
+  test("--gates-pr needs --released-by; gates flags without --gates-pr are refused; a PR must be a positive integer", async () => {
+    expect(await main([...base, "--gates-repo", "hagale/web", "--gates-pr", "5412"], ctx)).toBe(1);
+    expect(ctx.err.join("\n")).toMatch(/--released-by/);
+    const c2 = makeCtx(home);
+    expect(await main([...base, "--released-by", "A"], c2)).toBe(1);
+    expect(c2.err.join("\n")).toMatch(/only with --gates-pr/);
+    const c3 = makeCtx(home);
+    expect(await main([...base, "--gates-repo", "hagale/web", "--gates-pr", "#12", "--released-by", "A"], c3)).toBe(1);
+    expect(c3.err.join("\n")).toMatch(/--gates-pr must be a PR number/);
+    expect(server.writes).toHaveLength(0);
+  });
+  test("the repo must be named when the account has several, and must be one the account registers", async () => {
+    expect(await main([...base, "--gates-pr", "5412", "--released-by", "A"], ctx)).toBe(1);
+    expect(ctx.err.join("\n")).toMatch(/--gates-repo <owner\/name>.*hagale\/api, hagale\/web/);
+    const c2 = makeCtx(home);
+    expect(await main([...base, "--gates-repo", "hagale/nope", "--gates-pr", "5412", "--released-by", "A"], c2)).toBe(1);
+    expect(c2.err.join("\n")).toMatch(/hagale\/nope is not a repository this account registers/);
+    expect(server.writes).toHaveLength(0);
   });
 });

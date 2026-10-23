@@ -1,10 +1,9 @@
 // CTC-4680: every team row `catalyst ready` prints is plain words: no check id, reason code, API
-// route or "tenant", and every fix is a full URL or a step in Linear's own settings.
+// route or "tenant", and every fix is a catalyst command, a full URL or a step in Linear's own settings.
 import { describe, expect, test } from "vitest";
 import {
   dispatchGateCopy,
   teamCheckCopy,
-  teamPage,
   whoFixes,
 } from "../src/ready-copy.js";
 
@@ -55,9 +54,15 @@ describe("team checks", () => {
         assertPlain(whoFixes(id));
       });
 
-  test("a mapping failure links the team's own map page", () => {
-    expect(teamCheckCopy(BASE, "ADV", "mapping_total", "fail", null).fix).toContain(
-      "https://staging.catalystcloud.dev/settings/linear-teams/ADV/map",
+  test("a mapping failure names the map command, not a page", () => {
+    const fix = teamCheckCopy(BASE, "ADV", "mapping_total", "fail", null).fix;
+    expect(fix).toContain("catalyst team map ADV");
+    expect(fix).not.toContain("/settings/");
+  });
+
+  test("a check with a command offers it before its page", () => {
+    expect(teamCheckCopy(BASE, "ADV", "webhook_covers_team", "fail", null).fix).toMatch(
+      /^an owner or admin registers the repository with catalyst onboard --team ADV --repo <owner\/name>, or open https:\/\/staging\.catalystcloud\.dev\/settings\/projects$/,
     );
   });
 
@@ -70,7 +75,7 @@ describe("team checks", () => {
   test("an unknown check id still reads as words", () => {
     const row = teamCheckCopy(BASE, "ADV", "brand_new_check", "fail", null);
     expect(row.line).toBe("team ADV: Brand new check needs attention.");
-    expect(row.fix).toBe("open https://staging.catalystcloud.dev/settings/linear-teams/ADV");
+    expect(row.fix).toBe("run catalyst team check ADV to see why");
   });
 });
 
@@ -80,7 +85,7 @@ describe("dispatch gate", () => {
     expect(row.line).toBe(
       "team ADV: Catalyst doesn't know which ADV stages to use for starting work, pull requests, Done and Canceled. Until it does, it starts no ADV tickets.",
     );
-    expect(row.fix).toBe(`pick them at ${teamPage(BASE, "ADV", "map")}`);
+    expect(row.fix).toBe("run catalyst team map ADV");
   });
 
   test("an unresolved mapping says Catalyst is catching up, not 'map your stages'", () => {
@@ -88,8 +93,8 @@ describe("dispatch gate", () => {
     assertPlain(row.line);
     expect(row.line).toContain("in its copy of ADV yet");
     expect(row.fix).toContain("run catalyst ready again in a minute");
-    expect(row.fix).toContain("https://staging.catalystcloud.dev/settings/linear-teams/ADV");
-    expect(row.fix).not.toMatch(/Map my stages/);
+    expect(row.fix).toContain("run catalyst team check ADV");
+    expect(row.fix).not.toMatch(/Map my stages|Re-check/);
   });
 
   test("an open gate is one short line", () => {

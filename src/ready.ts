@@ -48,7 +48,7 @@ import {
   type OnboardingReadyDeps,
 } from "./onboard-ready.js";
 import { selectedOnboardTeam } from "./onboard-existing.js";
-import { dispatchGateCopy, teamCheckCopy, teamPage, valuesFix, whoFixes } from "./ready-copy.js";
+import { dispatchGateCopy, teamCheckCopy, valuesFix, whoFixes } from "./ready-copy.js";
 import { onboardStatePath, readOnboardJournal } from "./onboard.js";
 
 export { semverOlder };
@@ -498,7 +498,7 @@ export async function readyReport(
             team.readiness.status === "degraded"
               ? `team ${label}: works, with some optional settings still missing`
               : `team ${label}: not ready for work yet`,
-          fix: `open ${teamPage(base, label)}`,
+          fix: `run catalyst team check ${label} to see what is missing`,
           who: whoFixes("mapping_total"),
         });
       }

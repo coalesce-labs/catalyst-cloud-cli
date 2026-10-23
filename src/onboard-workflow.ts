@@ -192,18 +192,46 @@ export function observeOnboardWorkflow(
   };
 }
 
-const label = (text: string) =>
+const plainText = (text: string) =>
   text
     .replace(
       /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g,
       "",
     )
-    .trim()
-    .slice(0, 80);
+    .trim();
+const label = (text: string) => plainText(text).slice(0, 80);
 const listed = (names: readonly string[]) =>
   names.length > 10
     ? `${names.slice(0, 10).join(", ")}, and ${names.length - 10} more`
     : names.join(", ");
+
+function unfinishedLabelLines(plan: Pick<TeamAdoptResult, "labels"> & Partial<Pick<TeamAdoptResult, "labelsNotCreated">>): string[] {
+  return [
+    ...plan.labels.filter((row) => row.outcome === "refused").map(
+      (row) => {
+        const name = plainText(row.name);
+        const reason = plainText(row.reason ?? "Linear did not supply a reason.");
+        const guidance = name === "review-followup"
+          ? "Optional for the cloud workflow; no action is needed to finish setup."
+          : [
+            name === "catalyst-not-an-ask"
+              ? "Required for the cloud workflow. Without this label, work held by the ask-shape check cannot be released."
+              : "Only missing required labels block workflow readiness.",
+            "Ask a Linear workspace administrator to resolve the reported refusal and make this label available to the team, then run catalyst onboard.",
+          ].join(" ");
+        return `Linear refused label: ${name}. ${reason} ${guidance}`;
+      },
+    ),
+    ...(plan.labelsNotCreated ?? []).map(
+      (row) => {
+        const entry = object(row);
+        const name = typeof entry?.name === "string" ? plainText(entry.name) : "";
+        const reason = typeof entry?.reason === "string" ? plainText(entry.reason) : "";
+        return `Label not added: ${name || "Unnamed label"}. ${reason || "The server did not supply a reason; run catalyst onboard again to retry."}`;
+      },
+    ),
+  ];
+}
 
 /** The adopt preview in plain words: stages and labels it creates or keeps. Linear's names are data. */
 export function adoptPlanLines(
@@ -220,7 +248,6 @@ export function adoptPlanLines(
       ["Linear refused stages", group(plan.stages, "refused")],
       ["Create labels", group(plan.labels, "would-create")],
       ["Labels already present", group(plan.labels, "already-present")],
-      ["Linear refused labels", group(plan.labels, "refused")],
     ] as const
   )
     .filter(([, names]) => names.length > 0)
@@ -229,7 +256,7 @@ export function adoptPlanLines(
       
       plan.unfilledLoadBearing?.length ? [`Required work stages still missing: ${plan.unfilledLoadBearing.length}`] : [],
       (plan.provenanceGaps?.length ?? 0) + (plan.labelProvenanceGaps?.length ?? 0) ? ["Some existing states or labels have no recorded creator; setup keeps them"] : [],
-      plan.labelsNotCreated?.length ? [`Labels that cannot be added: ${plan.labelsNotCreated.length}`] : [],
+      unfinishedLabelLines(plan),
     );
 }
 
@@ -517,7 +544,7 @@ export function onboardWorkflowVerificationAdapter(
       },
       () =>
         input.message?.(
-          `${onboardTeamKey(journal) ?? "This team"} already has every state and label`,
+          `${onboardTeamKey(journal) ?? "This team"} has every required state and label`,
         ),
     );
   if (!adopts) return { check };
@@ -577,7 +604,10 @@ export function onboardWorkflowVerificationAdapter(
               rows.filter((row) => row.outcome === "created").length;
             const stages = created(reply.stages),
               labels = created(reply.labels);
-            summary = `Applied the Catalyst workflow to ${key}: created ${stages} ${stages === 1 ? "stage" : "stages"} and ${labels} ${labels === 1 ? "label" : "labels"}.`;
+            summary = [
+              `Applied the Catalyst workflow to ${key}: created ${stages} ${stages === 1 ? "stage" : "stages"} and ${labels} ${labels === 1 ? "label" : "labels"}.`,
+              ...unfinishedLabelLines(reply),
+            ].join("\n");
             return { state: "done" };
           },
           () => input.message?.(summary),

@@ -281,7 +281,18 @@ function remove(
               ["--user", "disable", "--now", item.name],
               "systemctl --user disable --now",
             );
-      if (why !== null) return why;
+      if (why !== null) {
+        if (platform !== "darwin") return why;
+        // A nonzero bootout may mean the exact owned service was already unloaded.
+        // Prove the scheduler domain works before interpreting its absence response.
+        const domain = run("launchctl", ["print", `gui/${uid}`]);
+        const service = run("launchctl", ["print", `gui/${uid}/${item.name}`]);
+        if (
+          domain.status !== 0 ||
+          service.status !== 113 ||
+          !/could not find service|could not find specified service/i.test(service.stderr || service.stdout)
+        ) return `${why}. Check launchctl print gui/${uid}/${item.name}, fix the reported scheduler error, then run catalyst legacy --remove.`;
+      }
       unlinkSync(item.path);
       return null;
     }

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.catalystcloud.runner.darwin-thoughts-custody</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string><string>-i</string><string>PATH=/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>@@NODE_EXECUTABLE@@</string><string>@@WATCHDOG_FILE@@</string>
+    <string>@@PRODUCER_FILE@@</string><string>@@CONFIG_FILE@@</string>
+  </array>
+  <key>WorkingDirectory</key><string>/</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>2</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>LimitLoadToSessionType</key><string>Background</string>
+  <key>AbandonProcessGroup</key><false/>
+  <key>ExitTimeOut</key><integer>3</integer>
+  <key>Umask</key><integer>63</integer>
+</dict>
+</plist>

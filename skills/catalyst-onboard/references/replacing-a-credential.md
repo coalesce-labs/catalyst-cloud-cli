@@ -1,6 +1,6 @@
 # Replacing an AI account's credential
 
-When the script prints "<provider> account <slot> needs a new credential" (quarantined, expired, revoked, or three or more polls failed on the credential), replace that account's credential on its own page. Do not enroll a second account. It would be a duplicate beside the dead one. A workspace owner or admin does it in the browser, from the link the script prints; the person copies and pastes the credential, and you never read, print or paste it.
+When the script prints "<provider> account <slot> needs a new credential" (quarantined, expired, revoked, or three or more polls failed on the credential), replace that account's credential on its own page. Do not enroll a second account. It would be a duplicate beside the dead one. No command replaces a credential yet, so a workspace owner or admin does it in the browser, from the link the script prints; the person copies and pastes the credential, and you never read, print or paste it.
 
 ## The steps
 

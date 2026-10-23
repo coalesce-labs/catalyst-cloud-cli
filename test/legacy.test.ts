@@ -514,7 +514,7 @@ describe("removal", () => {
     expect(await main(["legacy", "--remove", "--yes"], ctx, deps())).toBe(1);
     const text = ctx.out.join("\n");
     expect(text).toContain(
-      "still present: job com.catalyst.agent (launchctl bootout failed: boom)",
+      "still present: job com.catalyst.agent (launchctl bootout failed: boom. Check launchctl print",
     );
     expect(
       existsSync(
@@ -534,6 +534,39 @@ describe("removal", () => {
     expect(ctx.out.at(-1)).toMatch(
       /^re-checked: 1 item of the old runtime remains/,
     );
+  });
+
+  test("an already-unloaded owned job is retired only after a positive scheduler-domain probe", async () => {
+    oldMachine();
+    const absentRun: LegacyRun = (cmd, args) => {
+      if (cmd === "launchctl" && args[0] === "bootout" && args[1] === "gui/501/com.catalyst.agent")
+        return { status: 3, stdout: "", stderr: "Boot-out failed: 3: No such process" };
+      if (cmd === "launchctl" && args[0] === "print" && args[1] === "gui/501/com.catalyst.agent")
+        return { status: 113, stdout: "", stderr: 'Could not find service "com.catalyst.agent" in domain for user gui: 501' };
+      return run(cmd, args);
+    };
+    expect(await main(["legacy", "--remove", "--yes"], ctx, deps({ run: absentRun }))).toBe(0);
+    expect(existsSync(join(home, "Library/LaunchAgents/com.catalyst.agent.plist"))).toBe(false);
+    expect(calls).toContain("launchctl print gui/501");
+    expect(existsSync(join(home, "Library/LaunchAgents/dev.catalystcloud.housekeeping.plist"))).toBe(true);
+    expect(existsSync(join(home, ".config/catalyst/config.json"))).toBe(true);
+    expect(await main(["legacy", "--remove", "--yes"], ctx, deps({ run: absentRun }))).toBe(0);
+  });
+
+  test("an absent-service message with an inaccessible domain keeps the owned plist", async () => {
+    oldMachine();
+    const refusedRun: LegacyRun = (cmd, args) => {
+      if (cmd === "launchctl" && args[0] === "bootout" && args[1] === "gui/501/com.catalyst.agent")
+        return { status: 3, stdout: "", stderr: "No such process" };
+      if (cmd === "launchctl" && args[0] === "print")
+        return args[1] === "gui/501"
+          ? { status: 1, stdout: "", stderr: "Operation not permitted" }
+          : { status: 113, stdout: "", stderr: "Could not find service" };
+      return run(cmd, args);
+    };
+    expect(await main(["legacy", "--remove", "--yes"], ctx, deps({ run: refusedRun }))).toBe(1);
+    expect(existsSync(join(home, "Library/LaunchAgents/com.catalyst.agent.plist"))).toBe(true);
+    expect(ctx.out.join("\n")).toContain("Check launchctl print gui/501/com.catalyst.agent");
   });
 
   test("on a terminal, --remove asks once; no removes nothing, yes removes", async () => {

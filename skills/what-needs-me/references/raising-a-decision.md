@@ -4,7 +4,7 @@ The body, headings, option format and option cap come from the contract's `askTe
 
 ## When to file one
 
-File an ask when active work is gated on a product call, a priority call between two things that cannot both go first, an approval, or an action only the human can take (a click in settings, a credential, a payment). File it **before** proceeding on the default. A TODO line, board row, handoff note or chat question may point at the ask's identifier, never replace it.
+File an ask when active work is gated on a product call, a priority call between two things that cannot both go first, an approval, or an action only the human can take (a sign-in or consent, a credential, a payment). A settings change a command can make is yours to offer, not an ask. File it **before** proceeding on the default. A TODO line, board row, handoff note or chat question may point at the ask's identifier, never replace it.
 
 Brainstorming, design back-and-forth, a question the human asked first, a retry-or-abandon call a project owner can make, and a system-level failure (one status line; the tickets retry on their own) are not asks.
 
@@ -17,6 +17,17 @@ Brainstorming, design back-and-forth, a question the human asked first, a retry-
 5. **What it blocks** (`--blocks`, repeated): every ticket held until the answer lands, related atomically with the ask. An ask that holds nothing is refused unless you pass `--nothing-to-block` on purpose, because it never surfaces in Waiting on me. Name every held ticket: the inbox ranks by that count (`references/reading-the-inbox.md`), so an ask that names one ticket when it really holds a project sinks below one holding two chores.
 
 `--ask-key` is an idempotency key: a re-run with the same key does not file a second ask.
+
+## When the answer releases a PR hold
+
+When the decision is whether a held PR may merge, name the PR so the answer lifts the hold itself:
+
+- `--gates-pr <n>` (repeated): each PR the answer releases.
+- `--released-by <letter>` (repeated, required with `--gates-pr`): the option letters that release it. Options are lettered A, B, C in the order you gave them, and a letter outside that range is refused.
+- `--gates-label hold|hold:preview` (repeated, default `hold`): the labels the answer removes. No other label is accepted.
+- `--gates-repo <owner/name>`: the PR's repository. It defaults to the account's repository when the account registers exactly one, and must be one the account registers.
+
+An answer with any other letter leaves the labels in place.
 
 ## One ask per decision
 

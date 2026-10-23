@@ -17,7 +17,7 @@ Run `catalyst explain <ticket>` and look the reason up in the `whats-happening` 
 - **It releases itself:** wait for the outcome card.
 - **The person, with their own login, acts:** do it when the move is yours (re-dispatch, a comment that clears a no-change or validate-budget hold, a question routed to `what-needs-me`), and file an ask when it is theirs.
 - **A park or hold a release clears:** once its cause is fixed, the `unstick` skill releases it (`catalyst release <ticket> --because <what changed>`). A round-threshold hold and a review that will not converge refuse that release; the table says what clears each.
-- **An owner or admin, in settings, or an operator:** one ask per repository or setting.
+- **An owner or admin, in settings, or an operator:** when the person holds that seat and a command can make the change, offer to run it; otherwise one ask per repository or setting.
 - **Finished:** close the loop in the summary.
 
 Quote a reason the table does not know as the explainer spelled it.

@@ -45,7 +45,10 @@ const settingsPaths = [
     route: "/settings/projects/$projectId/repositories/$repoId/code-reviews",
   },
   { labels: ["Settings", "Integrations"], route: "/settings/connections" },
-  { labels: ["Settings", "Linear teams"], route: "/settings/linear-teams" },
+  {
+    labels: ["Settings", "Your projects", "the project", "Linear workflow for"],
+    route: "/settings/linear-teams/$teamKey",
+  },
   { labels: ["Settings", "Members"], route: "/settings/members" },
   { labels: ["Settings", "AI accounts"], route: "/settings/coding-accounts" },
   { labels: ["Settings", "API keys"], route: "/settings/api-keys" },
@@ -120,7 +123,7 @@ describe("onboarding UI path copy", () => {
       const content = readFileSync(file, "utf8");
       return [
         ...content.matchAll(
-          /Settings → (?:Repositories|Connections|Linear Teams)(?: →|[,.;])/g,
+          /Settings → (?:Repositories|Connections|Linear [Tt]eams)(?: →|[,.;])/g,
         ),
         ...content.matchAll(/\/settings\/repositories(?:\/|\b)/g),
       ].map((match) => `${relative(root, file)}: ${match[0]}`);
@@ -133,7 +136,7 @@ describe("onboarding UI path copy", () => {
       "/settings/projects",
       "/settings/projects/$projectId/repositories/$repoId/environment/declaration",
       "/settings/connections",
-      "/settings/linear-teams",
+      "/settings/linear-teams/$teamKey",
     ]) {
       expect(
         settingsPaths.some((entry) => entry.route === required),

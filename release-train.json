@@ -1,0 +1,79 @@
+{
+  "releaseLine": "0.16",
+  "state": "aligned",
+  "approval": {
+    "decision": "CTC-5137",
+    "url": "https://linear.app/coalesce-labs/issue/CTC-5137",
+    "answeredBy": "Ryan Rozich",
+    "answeredAt": "2026-10-06T20:23:03.482Z",
+    "option": "A"
+  },
+  "members": {
+    "cli": {
+      "repository": "catalyst-cloud-skills",
+      "path": "package.json",
+      "tag": "skills-bundle-v{version}",
+      "publish": true
+    },
+    "forwarder": {
+      "repository": "catalyst-cloud-skills",
+      "path": "packages/catalyst-skills/package.json",
+      "tag": "skills-bundle-v{version}",
+      "publish": true
+    },
+    "plugin": {
+      "repository": "catalyst-cloud-skills",
+      "path": ".claude-plugin/plugin.json",
+      "tag": "skills-bundle-v{version}",
+      "publish": true
+    },
+    "sdk": {
+      "repository": "catalyst-cloud-sdk",
+      "path": "package.json",
+      "tag": "v{version}",
+      "publish": true
+    },
+    "sdk-replica-node": {
+      "repository": "catalyst-cloud-sdk",
+      "path": "modules/replica-node/package.json",
+      "tag": "v{version}",
+      "publish": true
+    },
+    "sdk-replica-browser": {
+      "repository": "catalyst-cloud-sdk",
+      "path": "modules/replica-browser/package.json",
+      "tag": "v{version}",
+      "publish": true
+    },
+    "schema": {
+      "repository": "catalyst-cloud",
+      "path": "packages/schema/package.json",
+      "tag": null,
+      "publish": true
+    },
+    "replicate": {
+      "repository": "catalyst-cloud",
+      "path": "packages/replicate/package.json",
+      "tag": null,
+      "publish": true
+    },
+    "read-model": {
+      "repository": "catalyst-cloud",
+      "path": "packages/read-model/package.json",
+      "tag": null,
+      "publish": true
+    },
+    "design": {
+      "repository": "catalyst-cloud",
+      "path": "packages/design/package.json",
+      "tag": null,
+      "publish": false
+    },
+    "installer": {
+      "repository": "catalyst-cloud",
+      "path": "packages/install-script/src/install-script.ts",
+      "tag": null,
+      "publish": true
+    }
+  }
+}

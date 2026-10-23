@@ -196,7 +196,7 @@ describe("refusals are the cloud's, in words a person can act on", () => {
   test("a repository outside the tenant is named", async () => {
     const code = await main(["secret", "import", envFile(["A_TOKEN=x"]), "--repo", "someone/else"], ctx);
     expect(code).toBe(1);
-    expect(ctx.out[0]).toBe("refused (404): someone/else is not a repository of this tenant (register it in the app first)");
+    expect(ctx.out[0]).toBe("refused (404): someone/else is not a repository of this workspace. Register it first with catalyst onboard --team <KEY> --repo someone/else");
   });
 
   test("usage: --repo is required and must be owner/name; NAME must be env-shaped", async () => {
@@ -377,7 +377,7 @@ describe("refusals the fixture store cannot reach, forced on the wire", () => {
       "not stored: lower (not an env-style name (A-Z, 0-9 and _, starting with a letter))",
       "not stored: EMPTY (the value is empty)",
       "not stored: PLAIN (already a plain environment variable; a name is a secret or a variable, never both)",
-      "not stored: CFG (the existing entry is a readable config value; change it in the app)",
+      "not stored: CFG (the existing entry is a plain variable; change it with catalyst var set)",
       "not stored: BAD_KEY (the value failed this kind's check)",
       "not stored: ODD (some_future_reason)",
     ]);

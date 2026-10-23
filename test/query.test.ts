@@ -183,6 +183,17 @@ describe("subcommands", () => {
     expect(Array.isArray(fromReplica.comments)).toBe(true);
     expect(Array.isArray(fromApi.comments)).toBe(true);
   });
+  test("API detail reports the open inbound ask and excludes the completed ask", async () => {
+    await seedJoined(home, server);
+    expect(await main(["query", "issue", "ENG-1", "--source", "api", "--json"], ctx)).toBe(0);
+    const detail = JSON.parse(ctx.out.join("\n"));
+    expect(detail.blocked_by).toEqual([
+      expect.objectContaining({ identifier: "ENG-7", is_ask: true, unresolved: false }),
+    ]);
+    const unblocked = makeCtx(home);
+    expect(await main(["query", "issue", "OPS-1", "--source", "api", "--json"], unblocked)).toBe(0);
+    expect(JSON.parse(unblocked.out.join("\n")).blocked_by).toEqual([]);
+  });
   test("an unknown issue is exit 1 from either source", async () => {
     await seedJoined(home, server);
     await seedReplica(home, {

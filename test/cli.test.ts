@@ -10,6 +10,7 @@ import { loadSdk, resetSdkCache } from "../src/sdk";
 import { installTsDepsLoader, makeHooks } from "../src/ts-deps-loader";
 import { startMeFixture, type FixtureServer } from "./fixture";
 import { joinedConfig, makeCtx, seedJoined, tempHome, type TestCtx } from "./helpers";
+import { PROVENANCE_MARKER } from "../src/skill-shape";
 
 let server: FixtureServer;
 let home: string;
@@ -47,6 +48,25 @@ describe("dispatcher", () => {
     const c2 = makeCtx(home);
     expect(await main(["notice"], c2)).toBe(0);
     expect(c2.out.some((l) => l.startsWith("[catalyst] updated 0.0.1"))).toBe(true);
+  });
+  test("an installer-owned CLI probe preserves an old stamped skill until the installer replaces it", async () => {
+    const skill = join(defaultSkillsDirFor(home), "catalyst-onboard");
+    mkdirSync(skill, { recursive: true });
+    const old = `---\nname: catalyst-onboard\n---\n<!-- ${PROVENANCE_MARKER}@0.0.1 -->\nOld installer copy\n`;
+    writeFileSync(join(skill, "SKILL.md"), old);
+    writeFileSync(join(skill, "fixture.txt"), "old bytes\n");
+    saveConfig(home, joinedConfig(server, { lastSkillBundleVersion: "0.0.1" }));
+
+    const owned = makeCtx(home, { env: { CATALYST_SKILLS_OFFLINE: "1", CATALYST_INSTALL_SKILLS_OWNER: "1" } });
+    expect(await main(["capabilities", "--json"], owned)).toBe(0);
+    expect(readFileSync(join(skill, "SKILL.md"), "utf8")).toBe(old);
+    expect(readFileSync(join(skill, "fixture.txt"), "utf8")).toBe("old bytes\n");
+    await main(["ready", "--json"], makeCtx(home, { env: { CATALYST_SKILLS_OFFLINE: "1", CATALYST_INSTALL_SKILLS_OWNER: "1" } }));
+    expect(readFileSync(join(skill, "SKILL.md"), "utf8")).toBe(old);
+
+    saveConfig(home, joinedConfig(server, { lastSkillBundleVersion: "0.0.1" }));
+    expect(await main(["capabilities", "--json"], makeCtx(home))).toBe(0);
+    expect(readFileSync(join(skill, "SKILL.md"), "utf8")).not.toBe(old);
   });
   test("status names the credential: 'personal key' for a key config, 'your login (expires …)' for an oauth one", async () => {
     await seedJoined(home, server, { config: { user: undefined } });

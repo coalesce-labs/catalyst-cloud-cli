@@ -118,11 +118,11 @@ export function valuesFacts(value: unknown): ValuesFacts {
   };
 }
 
-/** Where the named variables get their values. Names only: nothing here reads or prints a value. */
-function setValuesFix(baseUrl: string | undefined, names: readonly string[]): string {
-  return baseUrl
-    ? `set ${names.join(", ")} on the repository's Environment page: open ${origin(baseUrl)}/settings/projects, then the project, then the repository`
-    : `set ${names.join(", ")} on the repository's Environment page in Catalyst's project settings`;
+/** How the named variables get their values: the CLI's own verbs, which read each value from a
+ *  hidden prompt. Names only: nothing here reads or prints a value. */
+function setValuesFix(names: readonly string[]): string {
+  const name = names.length === 1 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(names[0]!) ? names[0] : "NAME";
+  return `set ${names.join(", ")} with catalyst var set ${name} --repo <owner/name> (catalyst secret set ${name} --repo <owner/name> for a secret)`;
 }
 
 function nameList(v: unknown): string[] {
@@ -158,14 +158,14 @@ function unresolvedLine(u: { name: string; references: string[] }): string {
  *  keeps the generic line. Shared with setup's values step, which has no web address when the
  *  saved login has none. */
 export function valuesFix(
-  base: string | undefined,
+  _base: string | undefined,
   c: Pick<ContractReadinessCheck, "names" | "unresolved" | "repos">,
 ): string | null {
   const unresolved = unresolvedList(c.unresolved);
   const unresolvedNames = new Set(unresolved.map((u) => u.name));
   const names = nameList(c.names).filter((n) => !unresolvedNames.has(n));
   const parts: string[] = [];
-  if (names.length > 0) parts.push(setValuesFix(base, names));
+  if (names.length > 0) parts.push(setValuesFix(names));
   for (const u of unresolved) parts.push(unresolvedLine(u));
   for (const note of Array.isArray(c.repos) ? c.repos : []) {
     if (
@@ -187,10 +187,6 @@ export function valuesFix(
 }
 
 
-/** The team's own page in Catalyst settings, optionally one of its sub-pages (`map`, `adopt`). */
-export function teamPage(baseUrl: string, key: string, sub?: "map" | "adopt"): string {
-  return `${origin(baseUrl)}/settings/linear-teams/${encodeURIComponent(key)}${sub ? `/${sub}` : ""}`;
-}
 
 export interface PlainRow {
   line: string;
@@ -216,18 +212,18 @@ export function dispatchGateCopy(
   if (status === "mapping_missing")
     return {
       line: `team ${key}: Catalyst doesn't know which ${key} stages to use for ${slots}. Until it does, it starts no ${key} tickets.`,
-      fix: `pick them at ${teamPage(baseUrl, key, "map")}`,
+      fix: `run catalyst team map ${key}`,
     };
   if (status === "mapping_state_unresolved")
     // The gate reads Catalyst's own copy of the team, which can lag Linear by a minute after a team
     // is created or its workflow is set up (CTC-4680 Rerun A). Say that, not "map your stages".
     return {
       line: `team ${key}: Catalyst can't find the stages it uses for ${slots} in its copy of ${key} yet. Until it can, it starts no ${key} tickets.`,
-      fix: `if you just set up ${key}, run catalyst ready again in a minute. If this stays, press Re-check at ${teamPage(baseUrl, key)}`,
+      fix: `if you just set up ${key}, run catalyst ready again in a minute. If this stays, run catalyst team check ${key}`,
     };
   return {
     line: `team ${key}: Catalyst can't start ${key} tickets yet.`,
-    fix: `open ${teamPage(baseUrl, key)} to see why`,
+    fix: `run catalyst team check ${key} to see why`,
   };
 }
 
@@ -288,6 +284,14 @@ const CHECK_PAGES: Record<string, string> = {
   thoughts_reachable: "/settings/projects",
 };
 
+/** The command that fixes a check, offered before its page. A check with no command keeps the page. */
+const CHECK_COMMANDS: Record<string, (key: string) => string> = {
+  webhook_covers_team: (key) => `an owner or admin registers the repository with catalyst onboard --team ${key} --repo <owner/name>`,
+  hosts_current: () => "run catalyst onboard --runner on the machine that runs the work",
+  tools_resolvable: () => "set the missing secret with catalyst secret set NAME --repo <owner/name>, or fix the repository's .catalyst/catalyst.toml",
+  reviewer_required: () => "relax the merge policy with catalyst var set CATALYST_MERGE_EVIDENCE_POLICY --repo <owner/name> (if .catalyst/catalyst.toml declares the policy, change it there instead, because the declaration wins), or configure a reviewer",
+};
+
 const AGAIN = "run catalyst ready again in a few minutes";
 
 /** One failing or unknown team check, in plain words. `valuesFix` is the variable-naming fix the
@@ -318,17 +322,17 @@ export function teamCheckCopy(
   switch (id) {
     case "oauth_scope":
       return unknown
-        ? { line: team("Catalyst couldn't check its Linear connection."), fix: `check that Linear is connected at ${base}/settings/connections` }
+        ? { line: team("Catalyst couldn't check its Linear connection."), fix: "run catalyst onboard to check the Linear connection" }
         : {
             line: team("Catalyst's Linear connection is missing a permission it needs."),
-            fix: `reconnect Linear at ${base}/settings/connections?reauthorize=linear`,
+            fix: "run catalyst onboard and have an owner or admin approve the Linear link it prints",
           };
     case "token_live":
       return unknown
         ? { line: team("Catalyst couldn't reach Linear to check its connection."), fix: AGAIN }
         : {
             line: team("Linear stopped accepting Catalyst's connection. It was revoked or expired."),
-            fix: `reconnect Linear at ${base}/settings/connections`,
+            fix: "run catalyst onboard and have an owner or admin approve the Linear link it prints",
           };
     case "team_visible":
       return unknown
@@ -345,16 +349,16 @@ export function teamCheckCopy(
       if (id === "mapped_states_exist")
         return {
           line: team(`A stage Catalyst uses in ${key} was deleted or renamed in Linear.`),
-          fix: `pick its replacement at ${teamPage(baseUrl, key, "map")}`,
+          fix: `pick its replacement with catalyst team map ${key}`,
         };
       if (id === "mapping_total")
         return {
           line: team(`${key}'s stages aren't all mapped yet, so Catalyst doesn't know where to move its tickets.`),
-          fix: `map them at ${teamPage(baseUrl, key, "map")}, or set up Catalyst's workflow at ${teamPage(baseUrl, key, "adopt")}`,
+          fix: `map them with catalyst team map ${key}, or set up Catalyst's workflow with catalyst team adopt ${key}`,
         };
       return {
         line: team(`A stage mapped in ${key} is the wrong kind, for example a Done stage that Linear treats as in progress.`),
-        fix: `choose the right stages at ${teamPage(baseUrl, key, "map")}`,
+        fix: `choose the right stages with catalyst team map ${key}`,
       };
     case "required_values":
       return unknown
@@ -364,22 +368,25 @@ export function teamCheckCopy(
           }
         : {
             line: team(`A variable ${key}'s repository needs has no value, so Catalyst can't run its work.`),
-            fix: valuesFix ?? `add the missing values on the repository's Environment page: open ${base}/settings/projects, then the project, then the repository`,
+            fix: valuesFix ?? setValuesFix(["the missing values"]),
           };
     case "coding_account_enrolled":
       return unknown
         ? { line: team("Catalyst couldn't check your AI accounts."), fix: AGAIN }
         : {
             line: team("Catalyst has no AI account to do the work with."),
-            fix: `run catalyst setup to add one, or add it at ${base}/settings/coding-accounts`,
+            fix: `an owner or admin adds one at ${base}/settings/coding-accounts; there is no command for that yet`,
           };
   }
   const name = CHECK_NAMES[id] ?? id.replaceAll("_", " ");
-  const page = CHECK_PAGES[id] ?? `/settings/linear-teams/${encodeURIComponent(key)}`;
+  const page = CHECK_PAGES[id];
+  const command = CHECK_COMMANDS[id]?.(key);
   return unknown
     ? { line: team(`Catalyst hasn't checked ${name} yet.`), fix: AGAIN }
     : {
         line: team(`${name.charAt(0).toUpperCase()}${name.slice(1)} ${PLURAL.has(id) ? "need" : "needs"} attention.`),
-        fix: `open ${base}${page}`,
+        fix: command
+          ? page ? `${command}, or open ${base}${page}` : command
+          : page ? `open ${base}${page}` : `run catalyst team check ${key} to see why`,
       };
 }

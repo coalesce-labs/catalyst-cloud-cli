@@ -91,8 +91,8 @@ const pages = (baseUrl: string) => {
     keys: `${web}/settings/api-keys`,
     connections: `${web}/a/account/connections`,
     personal: `${web}/settings/connected-accounts`,
-    teams: `${web}/settings/linear-teams`,
-    repos: `${web}/settings/repositories`,
+    teams: `${web}/settings/projects`,
+    repos: `${web}/settings/projects`,
     codingAccounts: `${web}/settings/coding-accounts`,
   };
 };
@@ -564,7 +564,13 @@ const notPersonal = (keys: string) =>
     keys,
   );
 
-function loginItem(error: unknown, baseUrl: string): { item: HeadlessItem; code: number } {
+function loginItem(
+  error: unknown,
+  baseUrl: string,
+  source: "env" | "file",
+  keyFileFlag: boolean,
+  savedPersonalLogin: boolean,
+): { item: HeadlessItem; code: number } {
   const url = pages(baseUrl);
   if (error instanceof CliError && error.code === "onboard-person-required")
     return { code: EXIT_REFUSED, item: notPersonal(url.keys) };
@@ -573,7 +579,7 @@ function loginItem(error: unknown, baseUrl: string): { item: HeadlessItem; code:
       code: EXIT_WAITING,
       item: keyItem(
         "account_key_rejected",
-        `Catalyst did not accept the supplied key. Mint a personal key at ${url.keys} and supply it again.`,
+        `Catalyst did not accept the key from ${source === "env" ? "CATALYST_CLOUD_TOKEN" : keyFileFlag ? "the file named by --key-file" : "the file named by CATALYST_CLOUD_TOKEN_FILE"}. ${savedPersonalLogin ? `This machine has a saved personal login for ${baseUrl}. ${source === "env" ? "Unset CATALYST_CLOUD_TOKEN" : keyFileFlag ? "Remove --key-file" : "Unset CATALYST_CLOUD_TOKEN_FILE"} and run the same command to try it.` : `Mint a personal key at ${url.keys} and supply it again.`}`,
         url.keys,
       ),
     };
@@ -668,6 +674,7 @@ export async function runOnboardHeadless(
     } catch {
       saved = null;
     }
+    const savedPersonalLogin = Boolean(saved?.user && normalizeBaseUrl(saved.baseUrl) === baseUrl);
     const current =
       saved?.key === plan.key && normalizeBaseUrl(saved.baseUrl) === baseUrl;
     if (!current) {
@@ -675,7 +682,7 @@ export async function runOnboardHeadless(
       try {
         me = await fetchMe(baseUrl, plan.key, ctx.fetch);
       } catch (error) {
-        const { item, code } = loginItem(error, baseUrl);
+        const { item, code } = loginItem(error, baseUrl, report.inputs.accountKey === "file" ? "file" : "env", typeof args.flags["key-file"] === "string", savedPersonalLogin);
         return early(code, item);
       }
       if (!me.user) return early(EXIT_REFUSED, notPersonal(pages(baseUrl).keys));
@@ -708,7 +715,7 @@ export async function runOnboardHeadless(
         const code = await hooks.login(plan.key, baseUrl, { ...ctx, stdout: loginOutput, stderr: loginOutput });
         if (code !== 0) throw new CliError("key login failed", "key-login-failed", EXIT_FAILED);
       } catch (error) {
-        const { item, code } = loginItem(error, baseUrl);
+        const { item, code } = loginItem(error, baseUrl, report.inputs.accountKey === "file" ? "file" : "env", typeof args.flags["key-file"] === "string", savedPersonalLogin);
         return early(code, item);
       }
     }

@@ -60,6 +60,8 @@ services:
       # The host journal and outbox. Never authoritative: deleting it costs undelivered evidence and
       # never blocks a start (docs/design/disposable-host-contracts.md, "The host journal").
       - supervisor-state:/var/lib/catalyst/supervisor
+      # Atomic host-native samples; the VM cannot measure the Mac backing Docker.raw.
+      - ${CATALYST_HOST_DISK_SAMPLE_DIR:-./host-disk}:/var/lib/catalyst/host-disk:ro
       # The per-host credential and the tenant's runner org key (CATALYST_ORG_KEY_FILE), on their own
       # volume so the delete-the-state-directory test (removing supervisor-state) never costs an
       # enrollment. The supervisor replaces the credential by rename, so the directory stays writable.
@@ -68,9 +70,9 @@ services:
       # engine resolves a bind source on the HOST. A path that exists only inside this container
       # mounts an empty directory into the phase.
       - ${CATALYST_SLOTS_DIR:-/srv/catalyst/slots}:${CATALYST_SLOTS_DIR:-/srv/catalyst/slots}
-      # Thoughts stay as today (CTC-3493): a tenant's thoughts checkout and its pool lock directory
-      # are SHARED and read-write across that tenant's session containers, and every thoughts sync
-      # runs under thoughts.lock. The supervisor keeps one subdirectory per tenant under each root,
+      # Shared tenant thoughts and pool locks. Native Linux sessions use a read-write checkout.
+      # Darwin custody sessions expose a read-only model alias and a protected root publisher alias.
+      # Every thoughts sync runs under thoughts.lock. The supervisor keeps one subdirectory per tenant under each root,
       # so two projects on one engine never share a checkout or a lock. Same path on both sides for
       # the same reason as the slots: the supervisor binds these into session containers, and the
       # engine resolves bind sources on the host. Never mounted into a setup container.
@@ -94,13 +96,29 @@ services:
       CATALYST_HOST_CREDENTIAL_FILE: ${CATALYST_HOST_CREDENTIAL_FILE:-/var/lib/catalyst/host-credential/credential}
       CATALYST_DISK_BUDGET_GIB: ${CATALYST_DISK_BUDGET_GIB:-60}
       CATALYST_WORKSPACE_STORAGE: ${CATALYST_WORKSPACE_STORAGE:-}
+      CATALYST_WORKSPACE_RETENTION_HOURS: ${CATALYST_WORKSPACE_RETENTION_HOURS:-2}
+      CATALYST_HOST_FREE_FLOOR_GIB: ${CATALYST_HOST_FREE_FLOOR_GIB:-25}
+      CATALYST_HOST_DISK_SAMPLE_FILE: ${CATALYST_HOST_DISK_SAMPLE_FILE:-}
       CATALYST_THOUGHTS_DIR: ${CATALYST_THOUGHTS_DIR:-/srv/catalyst/thoughts}
+      CATALYST_THOUGHTS_CUSTODY_AUTHORITY: ${CATALYST_THOUGHTS_CUSTODY_AUTHORITY:-}
       CATALYST_POOL_LOCK_DIR: ${CATALYST_POOL_LOCK_DIR:-/srv/catalyst/locks}
       CATALYST_ORG_KEY_FILE: ${CATALYST_ORG_KEY_FILE:-/var/lib/catalyst/host-credential/org-key}
+      # `attempt`: sessions use their grant's own credential and the host holds no org key (CTC-4921).
+      # Unset keeps an existing install on the org key until it opts in.
+      CATALYST_SESSION_CREDENTIAL: ${CATALYST_SESSION_CREDENTIAL:-org-key}
       # Every setup and session container joins this network. It must exist before the supervisor
       # takes work: missing or not isolated is not-ready, never the default bridge.
       CATALYST_SESSION_NETWORK: ${CATALYST_SESSION_NETWORK:-catalyst-session-v1}
       CATALYST_SESSION_EGRESS_ATTESTATION: ${CATALYST_SESSION_EGRESS_ATTESTATION:-/var/lib/catalyst/session-egress/attestation.json}
+      # CTC-4265: the deadline for each primary workspace clone, in integer milliseconds. Empty is
+      # 180000; outside 1000-600000 the supervisor refuses to start. It forwards the value into each
+      # session container.
+      CATALYST_GIT_CLONE_TIMEOUT_MS: ${CATALYST_GIT_CLONE_TIMEOUT_MS:-}
+      # CTC-4265: the root of operator-prepared bare Git references. Empty means no reference and a
+      # direct clone every time. This file mounts nothing for it: setting it also needs the opt-in
+      # override, `docker compose -f compose.yaml -f compose.git-reference.yaml up -d`, which mounts
+      # the root read-only at the same path. Without the override every launch logs a cache miss.
+      CATALYST_GIT_REFERENCE_DIR: ${CATALYST_GIT_REFERENCE_DIR:-}
     # SIGTERM re-adopts on the next start instead of stopping phases, so the supervisor needs only
     # long enough to flush its journal.
     stop_grace_period: 30s
