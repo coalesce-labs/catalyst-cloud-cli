@@ -25,7 +25,7 @@ Automatic waits, where no one acts: `retry_backoff`, `lease_held`, `intake_lease
 | `waiting_on` | the person, with their own login: unrepairable PR merge gate; read merge-wait comment for hold/review owed, using catalyst-github |
 | `externally_claimed` | the person, with their own login: outside worker owns it; worker/person removes local-lane label |
 | `environment_check_required` / `environment_check_failed` / `environment_check_expired` / `environment_check_hash_mismatch` | absent/failed/aged/changed environment check; a workspace owner or admin, in settings, runs or fixes it |
-| `repo_paused` | an operator resumes repository |
+| `repo_paused` | the repository is paused; `catalyst repo status` says by whom, when and why; a workspace owner or admin, in settings or with `catalyst repo resume <owner/name>`, resumes it |
 | `scope_overlap` | the person, with their own login: declared files overlap running work; choose order or wait |
 | `human_owned_pr` | the person, with their own login: only its human owner closes, merges or hands it over; release refused |
 | `review_not_converging` | the person, with their own login: read findings through catalyst-github, comment; release refused |
