@@ -21,7 +21,9 @@ export function reportCliVersion(transport: typeof fetch, version: string, origi
 
 /** Adds the header in the shape the caller used, so a transport that reads a plain record keeps
  *  reading one. A caller's own copy of the header, in any case, is replaced. */
-function withVersion(headers: HeadersInit | undefined, version: string): HeadersInit {
+type HeaderBag = NonNullable<RequestInit["headers"]>;
+
+function withVersion(headers: HeaderBag | undefined, version: string): HeaderBag {
   // A Headers from another realm or library fails instanceof, and Object.entries would read it as
   // empty and drop every header the caller sent. Anything iterable that is not an array is copied.
   if (headers instanceof Headers || (!Array.isArray(headers) && typeof (headers as Headers | undefined)?.forEach === "function")) {
@@ -30,8 +32,7 @@ function withVersion(headers: HeadersInit | undefined, version: string): Headers
     return copy;
   }
   if (Array.isArray(headers)) return [...headers.filter(([name]) => name.toLowerCase() !== HEADER), [HEADER, version]];
-  const record: Record<string, string> = {};
-  for (const [name, value] of Object.entries(headers ?? {})) if (name.toLowerCase() !== HEADER) record[name] = value;
+  const record = Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => name.toLowerCase() !== HEADER));
   record[HEADER] = version;
   return record;
 }

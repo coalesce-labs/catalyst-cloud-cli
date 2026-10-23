@@ -80,7 +80,7 @@ describe("installed CLI release reporting", () => {
       forEach(fn: (value: string, name: string) => void) { this.map.forEach((value, name) => fn(value, name)); }
       *[Symbol.iterator]() { yield* this.map.entries(); }
     }
-    await reportCliVersion(transport, "0.16.29", () => [origin])(`${origin}/api/v1/me`, { headers: new ForeignHeaders() as unknown as HeadersInit });
+    await reportCliVersion(transport, "0.16.29", () => [origin])(`${origin}/api/v1/me`, { headers: new ForeignHeaders() as unknown as RequestInit["headers"] });
     const sent = new Headers(captured[0]!.headers);
     expect(sent.get("authorization")).toBe("Bearer foreign");
     expect(sent.get("content-type")).toBe("application/json");
