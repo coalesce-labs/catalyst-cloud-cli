@@ -1,9 +1,9 @@
 // CTC-6650 — `events wait-for` with scope keys runs on the SDK's wait under the CLI's exit codes.
 import { beforeEach, describe, expect, test } from "vitest";
-import type { CachedEventWaitOptions, EventWaitOptions, EventWaitResult } from "@catalyst-cloud/sdk/events";
+import type { CachedEventWaitOptions, EventWaitOptions, EventWaitResult, WaitedEvent } from "@catalyst-cloud/sdk/events";
 import { main } from "../src/cli";
 import { readManifest, writeConfig, type CustomerConfig } from "../src/config";
-import type { CachedEvent, EventsSdk } from "../src/events";
+import type { EventsSdk } from "../src/events";
 import { makeCtx, tempHome, type TestCtx } from "./helpers";
 
 let home: string;
@@ -15,11 +15,12 @@ beforeEach(() => {
   writeConfig(home, config);
 });
 
-const conflict: CachedEvent = {
+const conflict: WaitedEvent = {
   tenantId: "workspace-1",
   sequence: 9002,
   eventId: "conflict-9002",
   type: "pr.conflict.detected",
+  schemaVersion: 1,
   recordedAt: "2026-10-23T09:00:00.000Z",
   payload: { repo: "acme/web", branch: "feature/checkout", pr: 9001, paths: ["src/a.ts"] },
 };

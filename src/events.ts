@@ -330,7 +330,8 @@ async function cmdScopedWait(
           `events: ${result.source === "filter" ? "the filter was refused" : `the cloud refused the wait${result.status === null ? "" : ` (${result.status})`}`}${result.key ? ` on --${result.key}${result.value === null ? "" : ` ${result.value}`}` : ""}: ${result.reason}`,
           "events-refused",
         );
-      case "failed":
+      default:
+        // The remaining outcome is "failed"; a default keeps every path ending in a return or throw.
         if (result.code === "cache-missing" || result.code === "cache-writer-stopped")
           throw new CliError(
             `events: ${result.reason}. Start the local writer with: catalyst replica start --detach, or drop --from-cache to read from the cloud`,

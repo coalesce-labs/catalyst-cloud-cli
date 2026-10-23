@@ -50,6 +50,23 @@ describe("messages read", () => {
     expect(ctx.err.join("\n")).toContain("messages: unsupported (404): this server does not offer message reads");
   });
 
+  test("an empty page says so, with or without --since", async () => {
+    const f = fake({ ...ok, messages: [], next: null });
+    expect(await main(["messages", "read", "--ticket", "CTC-1234"], ctx, { messages: { createClient: () => f.client } })).toBe(0);
+    expect(await main(["messages", "read", "--ticket", "CTC-1234", "--since", "7000"], ctx, { messages: { createClient: () => f.client } })).toBe(0);
+    expect(ctx.out).toEqual(["CTC-1234: no messages", "CTC-1234: no messages at or after 7000"]);
+    expect(ctx.err).toEqual([]);
+  });
+
+  test("a refusal prints the whole result with --json, and a status-less failure names only its outcome", async () => {
+    const refused = fake({ outcome: "forbidden", status: 403, reason: "a phase session's credential cannot read messages", required: null, account: null });
+    expect(await main(["messages", "read", "--ticket", "CTC-1234", "--json"], ctx, { messages: { createClient: () => refused.client } })).toBe(1);
+    expect(JSON.parse(ctx.out.join(""))).toMatchObject({ outcome: "forbidden", status: 403 });
+    const offline = fake({ outcome: "network", reason: "fetch failed" });
+    expect(await main(["messages", "read", "--ticket", "CTC-1234"], ctx, { messages: { createClient: () => offline.client } })).toBe(1);
+    expect(ctx.err.at(-1)).toBe("messages: network: fetch failed");
+  });
+
   test("a missing ticket or a bad --since is a usage error before any request", async () => {
     const f = fake(ok);
     expect(await main(["messages", "read"], ctx, { messages: { createClient: () => f.client } })).toBe(1);
