@@ -338,7 +338,10 @@ export function installHostDiskSampler(dir: string, deps: HostDiskSamplerDeps): 
   const plistChanged = !existing?.equals(Buffer.from(p.plistText));
   if (existing && plistChanged && foreign(existing, p.output)) return "runner_host_disk_sampler_conflict";
   try {
-    if (!readOr(p.script)?.equals(p.scriptBytes)) writeAtomic(p.script, p.scriptBytes, 0o644);
+    // The plist does not carry the script's bytes, so a changed script needs its own reload: a
+    // running agent keeps the code it started with until launchd starts it again.
+    const scriptChanged = !readOr(p.script)?.equals(p.scriptBytes);
+    if (scriptChanged) writeAtomic(p.script, p.scriptBytes, 0o644);
     // One synchronous sample proves the interpreter and the measured path before launchd owns it.
     // Without --interval the script publishes once and exits; with it, it loops.
     const loop = p.command.indexOf("--interval");
@@ -347,7 +350,7 @@ export function installHostDiskSampler(dir: string, deps: HostDiskSamplerDeps): 
     if (once.status !== 0 || !sampleFresh(p.output, deps.now())) return "runner_host_disk_sampler_failed";
     if (plistChanged) writeAtomic(p.plist, p.plistText, 0o644);
     let domain = loadedIn(run, deps.uid);
-    if (domain && plistChanged) {
+    if (domain && (plistChanged || scriptChanged)) {
       run("/bin/launchctl", ["bootout", `${domain}/${HOST_DISK_LABEL}`], 15_000);
       domain = null;
     }
