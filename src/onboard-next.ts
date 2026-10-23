@@ -523,10 +523,15 @@ export function onboardReasonText(
 ): string {
   const reason = step.reason ?? "";
   const choices = recordedChoices(step);
+  const recordedTotal = step.evidence?.choiceTotal;
+  const total =
+    typeof recordedTotal === "number" && recordedTotal > choices.length ? recordedTotal : choices.length;
+  // The list is capped at 20, so a longer inventory says which part it shows.
+  const shown = total > choices.length ? `, the first ${choices.length} of them` : "";
   if (reason === "team_choice_required" && choices.length)
-    return `This workspace has ${choices.length} Linear ${choices.length === 1 ? "team" : "teams"}: ${choices.join(", ")}. Add --team with one of them to the same command, for example --team ${choices[0]}.`;
+    return `This workspace has ${total} Linear ${total === 1 ? "team" : "teams"}${shown}: ${choices.join(", ")}. Add --team with one of them to the same command, for example --team ${choices[0]}.`;
   if (reason === "repository_choice_required" && choices.length)
-    return `${choices.length === 1 ? "One repository is" : `${choices.length} repositories are`} available: ${choices.join(", ")}. Add --repo <owner/name> to the same command, for example --repo ${choices[0]}. Repeat --repo to choose more than one.`;
+    return `${total === 1 ? "One repository is" : `${total} repositories are`} available${shown}: ${choices.join(", ")}. Add --repo <owner/name> to the same command, for example --repo ${choices[0]}. Repeat --repo to choose more than one.`;
   if (
     [
       "workspace_approval_required",

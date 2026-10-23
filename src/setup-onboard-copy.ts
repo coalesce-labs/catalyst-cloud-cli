@@ -495,12 +495,18 @@ export function unattendedSkipLines(
   const open = BROWSER_CONNECTIONS.filter(
     (id) => inScope(id) && step(id)?.state !== "done",
   );
+  // Name only the providers still open, so a re-run with Linear connected never calls it skipped.
+  const providers = [
+    ...(open.some((id) => id.startsWith("linear.")) ? ["Linear"] : []),
+    ...(open.some((id) => id.startsWith("github.")) ? ["GitHub"] : []),
+  ];
+  const both = providers.length > 1;
   if (open.length)
     lines.push(
-      `Linear and GitHub were skipped, because they need you in a browser. Not connected: ${open
+      `${providers.join(" and ")} ${both ? "were" : "was"} skipped, because ${both ? "they need" : "it needs"} you in a browser. Not connected: ${open
         .map((id) => TITLES[id] ?? ONBOARD_TITLES[id])
         .join(", ")}.`,
-      "To connect them, run in a terminal: catalyst setup",
+      `To connect ${both ? "them" : "it"}, run in a terminal: catalyst setup`,
     );
   return lines;
 }

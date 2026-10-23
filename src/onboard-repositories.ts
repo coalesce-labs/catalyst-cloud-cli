@@ -8,7 +8,7 @@ import {
 } from "./config.js";
 import { contractVersionInRange } from "./contract.js";
 import {
-  choiceList,
+  choiceEvidence,
   readExistingOnboardJson,
   selectedOnboardTeam,
 } from "./onboard-existing.js";
@@ -60,7 +60,7 @@ export const repositoryChoiceWait = (
   rows.length
     ? {
         ...waiting("repository_choice_required"),
-        evidence: { choices: choiceList(rows.map((row) => `${row.owner}/${row.name}`)) },
+        evidence: choiceEvidence(rows.map((row) => `${row.owner}/${row.name}`)),
       }
     : waiting("repository_choice_required");
 const valid = (value: unknown): value is ExistingOnboardRepository => {

@@ -33,9 +33,14 @@ const waiting = (reason: string): OnboardStepResult => ({
   state: "waiting",
   reason,
 });
-/** CTC-5932: at most 20 choices, so the advice stays one readable line. */
-export const choiceList = (values: string[]): string =>
-  [...new Set(values)].sort().slice(0, 20).join(",");
+/**
+ * CTC-5932: at most 20 choices, so the advice stays one readable line, and the full count, so the
+ * advice never reports the cap as the workspace's total.
+ */
+export const choiceEvidence = (values: string[]): { choices: string; choiceTotal: number } => {
+  const unique = [...new Set(values)].sort();
+  return { choices: unique.slice(0, 20).join(","), choiceTotal: unique.length };
+};
 const object = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -271,7 +276,7 @@ export function existingLinearAdapters(
       : undefined;
   const stopTeam = (reason: string, teams?: ExistingOnboardTeam[]): OnboardStepResult =>
     uncertainResult() ??
-    (teams?.length ? { ...waiting(reason), evidence: { choices: choiceList(teams.map((team) => team.key)) } } : waiting(reason));
+    (teams?.length ? { ...waiting(reason), evidence: choiceEvidence(teams.map((team) => team.key)) } : waiting(reason));
   const requested = (teams: ExistingOnboardTeam[], journal: OnboardJournal) => {
     const explicit = args.flags.team;
     if (typeof explicit === "string") {

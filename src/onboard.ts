@@ -488,6 +488,7 @@ function normalizeStep(value: unknown, fallbackAt: string): OnboardStep | null {
     "teamKey",
     // CTC-5932: the comma-joined choices a run with no one to ask names in its flag advice.
     "choices",
+    "choiceTotal",
     "selected",
     "hostName",
     "supervisorImage",

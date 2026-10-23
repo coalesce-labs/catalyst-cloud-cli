@@ -329,7 +329,7 @@ describe("native existing Linear workspace and explicit team selection", () => {
     // CTC-5932: the wait names the team, so the advice can name the exact flag.
     expect(
       await f.runtime.adapters!["linear.team"]!.act!(f.ctx, f.journal),
-    ).toEqual({ state: "waiting", reason: "team_choice_required", evidence: { choices: "ENG" } });
+    ).toEqual({ state: "waiting", reason: "team_choice_required", evidence: { choices: "ENG", choiceTotal: 1 } });
   });
   test("explicit unique key selects real ID with safe evidence and no fabricated counts", async () => {
     const f = fixture(["--team", "ENG"]);

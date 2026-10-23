@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, test } from "vitest";
 import { createClackOnboardUi } from "../src/onboard-ui.js";
+import { choiceEvidence } from "../src/onboard-existing.js";
 import { onboardReasonText } from "../src/onboard-next.js";
 import { ONBOARD_STEPS, type OnboardJournal, type OnboardStepId } from "../src/onboard.js";
 import { setupPartProgress, unattendedSkipLines } from "../src/setup-onboard-copy.js";
@@ -67,8 +68,22 @@ describe("CTC-5932 — what an unattended run left out", () => {
   test("a scoped run speaks only of its own steps", () => {
     expect(unattendedSkipLines(PIPED, { scope: ["runner"] })).toHaveLength(2);
     expect(unattendedSkipLines(PIPED, { scope: ["linear.workspace"] })).toEqual([
-      "Linear and GitHub were skipped, because they need you in a browser. Not connected: Connect your Linear workspace.",
-      "To connect them, run in a terminal: catalyst setup",
+      "Linear was skipped, because it needs you in a browser. Not connected: Connect your Linear workspace.",
+      "To connect it, run in a terminal: catalyst setup",
+    ]);
+  });
+
+  test("a re-run with Linear connected names only GitHub as skipped", () => {
+    const linearDone = journalWith({
+      ...MACHINE,
+      "linear.workspace": { state: "done" },
+      "linear.personal": { state: "done" },
+      "github.install": { state: "waiting", reason: "github_installation_approval_required" },
+      "github.personal": { state: "waiting", reason: "personal_approval_required" },
+    });
+    expect(unattendedSkipLines(linearDone, { runner: true })).toEqual([
+      "GitHub was skipped, because it needs you in a browser. Not connected: Install Catalyst on GitHub, Connect your GitHub account.",
+      "To connect it, run in a terminal: catalyst setup",
     ]);
   });
 });
@@ -140,11 +155,11 @@ describe("CTC-5932 — the end screen of a run with no terminal", () => {
 });
 
 describe("CTC-5932 — a choice no one could make names the exact flag", () => {
-  const step = (reason: string, choices?: string): Step => ({
+  const step = (reason: string, choices?: string, choiceTotal?: number): Step => ({
     id: reason.startsWith("team") ? "linear.team" : "github.repos",
     state: "waiting",
     reason,
-    ...(choices ? { evidence: { choices } } : {}),
+    ...(choices ? { evidence: { choices, ...(choiceTotal === undefined ? {} : { choiceTotal }) } } : {}),
   });
   test("two teams: the advice lists both", () => {
     expect(onboardReasonText(step("team_choice_required", "ADV,ENG"))).toBe(
@@ -159,6 +174,26 @@ describe("CTC-5932 — a choice no one could make names the exact flag", () => {
   test("one repository: the advice names --repo with it", () => {
     expect(onboardReasonText(step("repository_choice_required", "acme/api"))).toBe(
       "One repository is available: acme/api. Add --repo <owner/name> to the same command, for example --repo acme/api. Repeat --repo to choose more than one.",
+    );
+  });
+  test("35 teams: the evidence keeps 20 keys and the total, and the advice says it shows the first 20", () => {
+    const keys = Array.from({ length: 35 }, (_, i) => `T${String(i).padStart(2, "0")}`);
+    const evidence = choiceEvidence([...keys, "T00"]);
+    expect(evidence.choiceTotal).toBe(35);
+    expect(evidence.choices.split(",")).toEqual(keys.slice(0, 20));
+    expect(onboardReasonText(step("team_choice_required", evidence.choices, evidence.choiceTotal))).toBe(
+      `This workspace has 35 Linear teams, the first 20 of them: ${keys.slice(0, 20).join(", ")}. Add --team with one of them to the same command, for example --team T00.`,
+    );
+  });
+  test("25 repositories: the advice gives the real count, not the cap", () => {
+    const evidence = choiceEvidence(Array.from({ length: 25 }, (_, i) => `acme/r${String(i).padStart(2, "0")}`));
+    expect(onboardReasonText(step("repository_choice_required", evidence.choices, evidence.choiceTotal))).toMatch(
+      /^25 repositories are available, the first 20 of them: acme\/r00, /,
+    );
+  });
+  test("a total no larger than the list adds nothing", () => {
+    expect(onboardReasonText(step("team_choice_required", "ADV,ENG", 2))).toBe(
+      "This workspace has 2 Linear teams: ADV, ENG. Add --team with one of them to the same command, for example --team ADV.",
     );
   });
   test("without recorded choices the old advice stays", () => {
