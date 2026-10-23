@@ -1,4 +1,5 @@
-import { flagInt, flagString, positionals, type ParsedArgs } from "./args.js";
+import type { CachedEventWaitOptions, EventScopeFilterInput, EventWaitOptions, EventWaitResult } from "@catalyst-cloud/sdk/events";
+import { flagInt, flagList, flagString, positionals, type ParsedArgs } from "./args.js";
 import { normalizeBaseUrl, requireConfig, type Ctx } from "./config.js";
 import { CliError, UsageError } from "./errors.js";
 import { authStrategyFor } from "./oauth.js";
@@ -45,6 +46,9 @@ export interface EventsSdk {
     after?: number;
     signal: AbortSignal;
   }): AsyncGenerator<CachedEvent>;
+  /** SDK 0.16.19: a filtered wait on one connection (CTC-5520). */
+  waitForEvents?: (options: EventWaitOptions) => Promise<EventWaitResult>;
+  waitForCachedEvents?: (options: CachedEventWaitOptions) => Promise<EventWaitResult>;
 }
 
 const eventsModule = "@catalyst-cloud/sdk/events";
@@ -109,6 +113,13 @@ export async function cmdEvents(
     );
   if (!(["tail", "wait-for", "query", "status"] as string[]).includes(sub))
     throw new UsageError(`unknown events subcommand: ${sub}`);
+  // CTC-6650 — a scope key or a type family runs on the SDK's wait; the --type/--ticket path is unchanged.
+  const scope = scopeFilter(args);
+  if (scope) {
+    if (sub !== "wait-for")
+      throw new UsageError("--repo, --ref, --pr, --session, --to and a type family such as pr.* work with wait-for only");
+    return cmdScopedWait(args, ctx, deps, scope);
+  }
   // CTC-4554 — the cloud is the default source; the local event file is the opt-in.
   if (args.flags["from-cache"] !== true) {
     if (flagString(args, "directory") !== undefined)
@@ -197,6 +208,141 @@ function startingCursor(args: ParsedArgs, name = "after"): number | undefined {
   if (!Number.isSafeInteger(parsed) || parsed < 0)
     throw new UsageError(`--${name} must be a non-negative event sequence`);
   return parsed;
+}
+
+const SCOPE_KEYS = ["repo", "ref", "pr", "session"] as const;
+
+/** The SDK filter when the wait names a scope key or a type family, or null for the original path. */
+function scopeFilter(args: ParsedArgs): EventScopeFilterInput | null {
+  const filter: { -readonly [K in keyof EventScopeFilterInput]: EventScopeFilterInput[K] } = {};
+  for (const key of SCOPE_KEYS) {
+    const values = flagList(args, key);
+    if (values.length) filter[key] = values;
+  }
+  const to = flagString(args, "to");
+  if (to !== undefined) {
+    if (to !== "me") throw new UsageError("--to accepts only me");
+    filter.to = "me";
+  }
+  const type = flagString(args, "type");
+  if (Object.keys(filter).length === 0 && !type?.endsWith(".*")) return null;
+  const ticket = flagString(args, "ticket");
+  return { ...filter, ...(type ? { type } : {}), ...(ticket ? { ticket } : {}) };
+}
+
+/** Counts consecutive failed requests, so a wait that cannot reach the cloud ends as an outage. */
+function outageFetch(base: typeof fetch, signal: AbortSignal, onOutage: (failures: number, sinceMs: number) => void, now: () => number): typeof fetch {
+  let failures = 0;
+  let sinceMs = 0;
+  const trouble = () => {
+    if (failures === 0) sinceMs = now();
+    failures += 1;
+    if (failures >= OUTAGE_ATTEMPTS) onOutage(failures, sinceMs);
+  };
+  return async (input, init) => {
+    try {
+      const response = await base(input, init);
+      if (response.status >= 500) trouble();
+      else failures = 0;
+      return response;
+    } catch (error) {
+      // A request the SDK timed out counts; one cancelled because this wait ended does not.
+      if (!signal.aborted) trouble();
+      throw error;
+    }
+  };
+}
+
+/** `wait-for` with scope keys: the SDK's wait, under the CLI's documented exit codes. */
+async function cmdScopedWait(
+  args: ParsedArgs,
+  ctx: Ctx,
+  deps: EventDeps,
+  filter: EventScopeFilterInput,
+): Promise<number> {
+  const cfg = requireConfig(ctx);
+  const timeout = flagInt(args, "timeout", 300);
+  if (timeout < 0) throw new UsageError("--timeout must be zero or more seconds");
+  const after = startingCursor(args);
+  const fromCache = args.flags["from-cache"] === true;
+  if (!fromCache && flagString(args, "directory") !== undefined)
+    throw new UsageError("--directory names the local event cache; add --from-cache to read it");
+  const sdk = await (deps.loadSdk ?? loadEventsSdk)();
+  const { waitForEvents, waitForCachedEvents } = sdk;
+  if (!waitForEvents || !waitForCachedEvents)
+    throw new CliError("the installed SDK cannot wait on scope keys; upgrade the catalyst CLI", "sdk-upgrade-required");
+  const controller = new AbortController();
+  const abort = () => controller.abort(deps.signal?.reason);
+  if (deps.signal?.aborted) abort();
+  else deps.signal?.addEventListener("abort", abort, { once: true });
+  let interrupted = false;
+  let outage: { failures: number; sinceMs: number } | undefined;
+  const removeInterrupt = (deps.onInterrupt ?? processInterrupts)(() => {
+    interrupted = true;
+    controller.abort(new Error("interrupted"));
+  });
+  try {
+    let result: EventWaitResult;
+    if (fromCache) {
+      result = await waitForCachedEvents({
+        tenantId: cfg.account,
+        directory: flagString(args, "directory") ?? sdk.defaultEventCacheDirectory(cfg.account),
+        filter,
+        after,
+        timeoutMs: timeout * 1_000,
+        signal: controller.signal,
+      });
+    } else {
+      const auth = authStrategyFor(ctx, cfg);
+      if (auth.kind === "cookie") throw new CliError("event waits require a token or OAuth session", "events-auth");
+      result = await waitForEvents({
+        baseUrl: normalizeBaseUrl(cfg.baseUrl),
+        auth,
+        tenantId: cfg.account,
+        filter,
+        after,
+        timeoutMs: timeout * 1_000,
+        signal: controller.signal,
+        fetch: outageFetch(ctx.fetch, controller.signal, (failures, sinceMs) => {
+          if (outage) return;
+          outage = { failures, sinceMs };
+          controller.abort(new Error("cloud unreachable"));
+        }, () => ctx.now().getTime()),
+      });
+    }
+    const resume = (cursor: number | null | undefined) => (cursor === null || cursor === undefined ? "" : `; resume with --after ${cursor}`);
+    switch (result.outcome) {
+      case "matched":
+        for (const event of result.events) ctx.stdout(JSON.stringify(event));
+        return 0;
+      case "timeout":
+        ctx.stderr(`events: no matching event within ${timeout} s${resume(result.cursor)}`);
+        return 1;
+      case "aborted":
+        if (interrupted) return 130;
+        if (outage) {
+          ctx.stderr(`events: the cloud event service was unreachable for ${outage.failures} attempts over ${Math.round((ctx.now().getTime() - outage.sinceMs) / 1_000)} s; this is an outage, not a timeout${resume(result.cursor)}`);
+          return 4;
+        }
+        return 1;
+      case "refused":
+        throw new CliError(
+          `events: ${result.source === "filter" ? "the filter was refused" : `the cloud refused the wait${result.status === null ? "" : ` (${result.status})`}`}${result.key ? ` on --${result.key}${result.value === null ? "" : ` ${result.value}`}` : ""}: ${result.reason}`,
+          "events-refused",
+        );
+      case "failed":
+        if (result.code === "cache-missing" || result.code === "cache-writer-stopped")
+          throw new CliError(
+            `events: ${result.reason}. Start the local writer with: catalyst replica start --detach, or drop --from-cache to read from the cloud`,
+            "events-absent",
+            3,
+          );
+        throw new CliError(`events: the wait failed (${result.code}): ${result.reason}${resume(result.resumeFrom ?? result.cursor)}`, "events-failed");
+    }
+  } finally {
+    removeInterrupt();
+    deps.signal?.removeEventListener("abort", abort);
+  }
 }
 
 function eventFilter(args: ParsedArgs): { type?: string; ticket?: string } {

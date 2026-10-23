@@ -14,6 +14,8 @@ Cloud reads are the default on every machine. They need no local writer and no l
 | Find a ticket by words | `node scripts/search.mjs <terms>` |
 | What happened to it, event by event? | `catalyst events query --ticket <KEY-123>` |
 | Wait until its phase finishes | `catalyst events wait-for --ticket <KEY-123> --type relay.phase.completed --after <head> --timeout 300` |
+| Wait until its branch or PR changes | `catalyst events wait-for --ref <owner/name:branch> --type pr.* --after <head> --timeout 14400` |
+| What messages were sent to it? | `catalyst messages read --ticket <KEY-123>` |
 
 ## Reading the answer
 
@@ -28,7 +30,9 @@ A smaller read is coming: the cloud will answer a ticket or its execution histor
 `catalyst events` reads the cloud by default and needs no local file.
 
 - `catalyst events query --ticket <KEY-123>` prints the ticket's events, newest first. Add `--type`, `--limit` (up to 200), `--order asc` and `--before` or `--after` to page. An empty page says which sequences the cloud has indexed, so "no match" is not "never happened".
-- To wait for something to happen, first run `catalyst events status --json` and keep its `head`. Then run `catalyst events wait-for --ticket <KEY-123> --type relay.phase.completed --after <head> --timeout 300`. Exit 0 prints the event, exit 1 is a timeout, and exit 4 means the cloud was unreachable.
+- To wait for something to happen, first run `catalyst events status --json` and keep its `head`. Then run `catalyst events wait-for --ticket <KEY-123> --type relay.phase.completed --after <head> --timeout 300`. Exit 0 prints the event, exit 1 is a timeout, exit 2 is a refusal with its reason, and exit 4 means the cloud was unreachable.
+- To wait on a branch, a pull request, a repository, a phase session or messages addressed to you, use `--ref <owner/name:branch>`, `--pr <owner/name#n>`, `--repo <owner/name>`, `--session <KEY-123/phase#n>` or `--to me`, with `--type pr.*` for a family of types. Such a wait prints nothing until a match, so `--timeout 14400` costs nothing while it waits. On a timeout, stderr names the `--after` to resume from.
+- `catalyst messages read --ticket <KEY-123> [--since <sequence>]` prints the messages sent to the ticket, with sender and time.
 - `catalyst events tail --ticket <KEY-123>` stays in the foreground and prints one JSON line per new event.
 
 The ticket filter reads the event's ticket entity, `payload.ticket`, and the lease that caused it. `--from-cache` reads this machine's local event cache instead. It exists only where local sync is on, and it pays off when several agents on one machine share it.
