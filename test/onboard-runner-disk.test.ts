@@ -199,6 +199,18 @@ describe("the Mac's host-disk LaunchAgent", () => {
       .toEqual([`/bin/launchctl bootout gui/501/${HOST_DISK_LABEL}`, `/bin/launchctl bootstrap gui/501 ${m.plist}`]);
   });
 
+  test("a changed sampler script reloads the running agent, even with the plist unchanged", () => {
+    const m = machine();
+    expect(installHostDiskSampler(m.dir, m.deps)).toBe("ready");
+    const script = join(m.dir, "host-disk-sampler", "host-disk-sample.py");
+    writeFileSync(script, "# an older sampler\n");
+    m.calls.length = 0;
+    expect(installHostDiskSampler(m.dir, m.deps)).toBe("ready");
+    expect(readFileSync(script)).toEqual(readFileSync(join(packageRoot(), "vendor/self-host/host-disk-sample.py")));
+    expect(m.calls.filter(call => / (bootout|bootstrap) /.test(call)))
+      .toEqual([`/bin/launchctl bootout gui/501/${HOST_DISK_LABEL}`, `/bin/launchctl bootstrap gui/501 ${m.plist}`]);
+  });
+
   test("a same-label agent publishing elsewhere belongs to its operator and is never replaced", () => {
     const m = machine();
     mkdirSync(join(m.home, "Library", "LaunchAgents"), { recursive: true });
