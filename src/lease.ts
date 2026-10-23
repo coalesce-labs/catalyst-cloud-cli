@@ -71,6 +71,15 @@ function saveLease(ctx: Ctx, lease: StoredLease): void {
 function forgetLease(ctx: Ctx, ticket: string, agent: string): void {
   rmSync(leasePath(ctx, ticket, agent), { force: true });
 }
+/** Refusals that mean this seat's lease is gone: it lapsed, or a later take replaced it. */
+const GONE = new Set(["expired", "not_holder", "stale_generation"]);
+/** Forget a stored lease the cloud says this seat no longer holds, so a later seat on the same
+ * ticket is not asked to name one with --agent. The exit stays 1: the renew or release did not happen. */
+function forgetIfGone(ctx: Ctx, ticket: string, agent: string, body: unknown): void {
+  if (!object(body) || !object(body.refusal) || !GONE.has(String(body.refusal.reason))) return;
+  forgetLease(ctx, ticket, agent);
+  ctx.stderr(`[catalyst] ${agent} no longer holds ${ticket}; forgot its stored lease`);
+}
 /** The leases this machine holds on a ticket, one per seat that took it. */
 function storedLeases(ctx: Ctx, ticket: string): StoredLease[] {
   let names: string[];
@@ -224,8 +233,10 @@ export async function cmdLease(args: ParsedArgs, ctx: Ctx): Promise<number> {
     const progress = parseProgress(args);
     const held = heldLease(args, ctx, ticket);
     const res = await client.postJson(`${ROUTE}/renew`, { ticket, ...held, progress, ...parseTtlMs(args) }, { accept: ACCEPT });
-    if (res.status !== 200 || !object(res.body) || res.body.outcome !== "renewed" || !leaseRow(res.body.lease))
+    if (res.status !== 200 || !object(res.body) || res.body.outcome !== "renewed" || !leaseRow(res.body.lease)) {
+      forgetIfGone(ctx, ticket, held.agent, res.body);
       return refuse(args, ctx, res.status, res.body, action);
+    }
     if (args.json) ctx.stdout(JSON.stringify(res.body));
     else printLease(ctx, ticket, res.body.lease);
     return 0;
@@ -233,8 +244,10 @@ export async function cmdLease(args: ParsedArgs, ctx: Ctx): Promise<number> {
 
   const held = heldLease(args, ctx, ticket);
   const res = await client.postJson(`${ROUTE}/release`, { ticket, ...held }, { accept: ACCEPT });
-  if (res.status !== 200 || !object(res.body) || res.body.outcome !== "released")
+  if (res.status !== 200 || !object(res.body) || res.body.outcome !== "released") {
+    forgetIfGone(ctx, ticket, held.agent, res.body);
     return refuse(args, ctx, res.status, res.body, action);
+  }
   forgetLease(ctx, ticket, held.agent);
   if (args.json) ctx.stdout(JSON.stringify(res.body));
   else ctx.stdout(`${ticket}: released by ${held.agent}`);

@@ -165,9 +165,22 @@ describe("lease release and show", () => {
 
   test("a refused release keeps the stored lease", async () => {
     await main(["lease", "take", "ENG-123", "--agent", "agent-a"], ctx);
-    respond = () => json({ outcome: "refused", refusal: { reason: "stale_generation", current: lease({ generation: 9 }), occupied: null, retryAtMs: null } });
+    respond = () => json({ outcome: "refused", refusal: { reason: "active_descendants", current: lease(), occupied: null, retryAtMs: null } });
     expect(await main(["lease", "release", "ENG-123"], ctx)).toBe(1);
     expect(leaseFiles()).toEqual(["ENG-123--agent-a.json"]);
+  });
+
+  test("a release or renew refused because the lease is gone exits 1 and forgets the stored lease", async () => {
+    for (const [verb, reason] of [["release", "expired"], ["release", "not_holder"], ["renew", "stale_generation"], ["renew", "expired"]] as const) {
+      respond = () => json({ outcome: "taken", lease: lease(), minted: true, adopted: [] });
+      await main(["lease", "take", "ENG-123", "--agent", "agent-a"], ctx);
+      respond = () => json({ outcome: "refused", refusal: { reason, current: null, occupied: null, retryAtMs: null } });
+      const argv = verb === "renew" ? ["lease", "renew", "ENG-123", "--pr", "12686"] : ["lease", "release", "ENG-123"];
+      expect(await main(argv, ctx)).toBe(1);
+      expect(ctx.out.at(-1)).toBe(`refused: ${reason}`);
+      expect(ctx.err.at(-1)).toBe("[catalyst] agent-a no longer holds ENG-123; forgot its stored lease");
+      expect(leaseFiles()).toEqual([]);
+    }
   });
 
   test("show reads a held lease, a lapsed one and none", async () => {
@@ -298,12 +311,13 @@ describe("lease edges", () => {
     await take();
     respond = () => json({ outcome: "refused", refusal: { reason: "expired", current: lease({ holder: null }), occupied: null, retryAtMs: null } });
     expect(await main(["lease", "renew", "ENG-123", "--pr", "12686"], ctx)).toBe(1);
+    expect(leaseFiles()).toEqual([]);
     respond = () => json({ outcome: "refused", refusal: { current: null } });
-    expect(await main(["lease", "release", "ENG-123"], ctx)).toBe(1);
+    expect(await main(["lease", "release", "ENG-123", "--agent", "agent-a", "--generation", "7"], ctx)).toBe(1);
     respond = () => json({ outcome: "rejected", reason: "write budget exhausted" }, 429);
     expect(await main(["lease", "take", "ENG-123", "--agent", "agent-a"], ctx)).toBe(1);
     respond = () => json({ outcome: "rejected", reason: "progress.ref: a pr ref is the pull request's number" }, 400);
-    expect(await main(["lease", "renew", "ENG-123", "--pr", "12686"], ctx)).toBe(1);
+    expect(await main(["lease", "renew", "ENG-123", "--pr", "12686", "--agent", "agent-a", "--generation", "7"], ctx)).toBe(1);
     respond = () => json({ outcome: "taken" });
     expect(await main(["lease", "take", "ENG-123", "--agent", "agent-a"], ctx)).toBe(1);
     expect(ctx.out.slice(1)).toEqual([
