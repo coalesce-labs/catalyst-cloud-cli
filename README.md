@@ -201,6 +201,24 @@ Open a new session and ask about your own cloud account. The skills read the con
 
 `catalyst team list` inventories visible teams without running readiness checks. `team check ENG` prints readiness for one team; `team check --all` runs checks for every team. `team map ENG`, `team adopt ENG`, and `team migrate ENG` print a plan and exit 3 before changing configuration; review the plan and rerun the chosen command with `--yes --plan-hash <hash>` from that preview. `team adopt ENG --undo` previews the exact previously created stages, and `team migrate ENG --retire` requires its own confirmation after the ticket move. `team checklist ENG` prints the same manual setup lines as the browser. These commands use the member's own login; an admin or owner seat is required for setup, and Adopt and Migrate also need that member's personal Linear connection.
 
+## Repository status and pauses
+
+Use your existing login to list the repositories visible to you, their status and attached projects:
+
+```sh
+catalyst repo status
+catalyst repo status --json
+catalyst repo pause acme/app --reason "flaky deploy"
+catalyst repo resume acme/app --reason "deploy fixed"
+catalyst repo resume acme/app
+```
+
+Any workspace member can read status. Pausing or resuming requires a workspace owner or admin. Pause requires a reason; resume accepts an optional reason. A supplied reason must contain 1 to 500 characters after trimming. These commands work outside a local checkout.
+
+Paused rows show who paused the repository (their email, or the key or operator that paused it), when and why, when those details are available. An empty list means no repositories are visible to your login. After a write, the command reads and prints the repository's current state. If that read fails, it reports that the write succeeded and status could not be read; check `catalyst repo status` before repeating a write.
+
+`--json` preserves the list response for status and prints the refreshed repository row for a write. An older cloud reports that repository status is not served yet and needs a newer cloud. Agents can use `catalyst capabilities --json` to check route availability against the cached cloud contract.
+
 ## What has to be running
 
 Nothing, by default. After `login`, every read, write, ask and explanation goes to the cloud's origin-fresh API with the config file and the cached contract on disk. Two optional processes exist for people who want them:

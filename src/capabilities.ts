@@ -62,6 +62,8 @@ export const CAPABILITIES: readonly Capability[] = [
   { verb: "team checklist", does: "print what adopting the workflow would do to a team", needs: "admin", routes: [agent("GET", "team-workflow")], since: "0.9.5" },
   { verb: "project wip-limit get", does: "read a project's new-start WIP limit, where it comes from, and its work in progress now", needs: "member", routes: [agent("GET", "team-wip-limit")], since: "0.13.1" },
   { verb: "project wip-limit set", does: "set a project's new-start WIP limit (0 to 9999, or back to the workspace default)", needs: "admin", routes: [agent("POST", "team-wip-limit")], since: "0.13.1" },
+  { verb: "repo status", does: "list visible repositories with their state, pause details and projects", needs: "member", routes: [agent("GET", "repos")], since: "0.16.26" },
+  { verb: "repo pause|resume", does: "pause or resume a repository as a workspace owner or admin", needs: "admin", routes: [agent("GET", "repos"), agent("POST", "repos/pause"), agent("POST", "repos/resume")], since: "0.16.26" },
   { verb: "repo agents-block", does: "add or refresh the one Catalyst block in a checkout's AGENTS.md, in the working tree, for the person to commit and open as a pull request", needs: "member", routes: [], since: "0.13.1" },
   { verb: "repo agent-setup", does: "read a checkout's agent setup (AGENTS.md, CLAUDE.md, .agents and .claude skills and rules) and, on request, make it portable in the working tree", needs: "member", routes: [], since: "0.13.1" },
   { verb: "env shell", does: "open this repository's environment on this computer: Catalyst's image, the declared toolchain and variables (needs Docker; no login for Catalyst's image)", needs: "member", routes: [], since: "0.16.20" },
