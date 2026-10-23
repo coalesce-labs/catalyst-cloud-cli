@@ -7,6 +7,7 @@ import {
 } from "./onboard-existing.js";
 import {
   existingRepositoryAdapter,
+  repositoryChoiceWait,
   type ChooseExistingRepositories,
 } from "./onboard-repositories.js";
 import type {
@@ -286,7 +287,7 @@ export function firstProjectAdapters(
             : waiting("repository_selection_unverified");
         return input.chooseFirst && list.rows.length
           ? { state: "pending" }
-          : waiting("repository_choice_required");
+          : repositoryChoiceWait(list.rows);
       },
       act: async (ctx, journal, signal) => {
         const live = await existing.check(ctx, journal, signal);
@@ -295,7 +296,7 @@ export function firstProjectAdapters(
         const list = await options(ctx, journal, signal);
         if ("reason" in list) return waiting(list.reason);
         if (!input.chooseFirst || !list.rows.length)
-          return waiting("repository_choice_required");
+          return repositoryChoiceWait(list.rows);
         if (list.truncated)
           input.message?.(
             "GitHub returned part of its repository list. Choose a displayed repository, or stop and adjust the App access before resuming.",
