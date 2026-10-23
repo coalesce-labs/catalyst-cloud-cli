@@ -23,6 +23,7 @@ import {
 import { dockerFleetUpdateEngine, runFleetUpdate, type FleetUpdateEngine } from "./runner-update-fleet.js";
 import { runUpdate, sharedReleaseRead, updateReportJson, updateReportLines, type UpdateOptions } from "./update.js";
 import { effectivePolicy, readUpdatePolicy, setComponentPolicy } from "./update-policy.js";
+import { resolveClaude } from "./update-plugin.js";
 import { cmdRunnerLifecycle, RUNNER_LIFECYCLE_ACTIONS, type RunnerLifecycleDeps } from "./runner.js";
 
 // `catalyst runner update [--check] [--auto] [--dir <dir>] [--fleet]` and
@@ -35,7 +36,7 @@ export interface RunnerCommandDeps extends RunnerLifecycleDeps {
   fleetEngine?: FleetUpdateEngine;
   scheduler?: Partial<AutoUpdateDeps>;
   /** The scheduled run's component movers; tests pass fakes. */
-  components?: Pick<UpdateOptions, "cliApply" | "replicaRestart" | "packApply" | "sdkExec">;
+  components?: Pick<UpdateOptions, "cliApply" | "replicaRestart" | "packApply" | "pluginApply" | "sdkExec">;
 }
 
 const USAGE =
@@ -48,6 +49,7 @@ function schedulerDeps(ctx: Ctx, deps: RunnerCommandDeps): AutoUpdateDeps {
     home: ctx.home,
     cli,
     path: scheduledPath(cli, process.execPath, ctx.env.PATH),
+    claude: resolveClaude(ctx.home, ctx.env),
     ...deps.scheduler,
   };
 }

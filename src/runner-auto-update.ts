@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { CLAUDE_PATH_ENV } from "./update-plugin.js";
 
 // The schedule that runs `catalyst runner update --auto` every 15 minutes (CTC-4646): a LaunchAgent
 // on macOS, a systemd user timer on Linux. It runs as the person who set the runner up, with the
@@ -22,6 +23,8 @@ export interface AutoUpdateDeps {
   cli: string;
   /** PATH for the scheduled run: it must find docker and node. */
   path: string;
+  /** The `claude` command found at setup, recorded so the scheduled run can move the Claude plugin (CTC-6791). */
+  claude?: string | null;
   run?: SchedulerRun;
 }
 
@@ -61,7 +64,7 @@ export function systemdUnitPaths(home: string): { service: string; timer: string
   return { service: join(base, `${AUTO_UPDATE_UNIT}.service`), timer: join(base, `${AUTO_UPDATE_UNIT}.timer`) };
 }
 
-export function launchAgentPlist(deps: Pick<AutoUpdateDeps, "cli" | "path" | "home">, dir: string): string {
+export function launchAgentPlist(deps: Pick<AutoUpdateDeps, "cli" | "path" | "home" | "claude">, dir: string): string {
   const args = [deps.cli, "runner", "update", "--auto", "--dir", dir];
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -69,7 +72,7 @@ export function launchAgentPlist(deps: Pick<AutoUpdateDeps, "cli" | "path" | "ho
     '<plist version="1.0"><dict>',
     `<key>Label</key><string>${AUTO_UPDATE_LABEL}</string>`,
     `<key>ProgramArguments</key><array>${args.map((a) => `<string>${xml(a)}</string>`).join("")}</array>`,
-    `<key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(deps.path)}</string><key>HOME</key><string>${xml(deps.home)}</string></dict>`,
+    `<key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(deps.path)}</string><key>HOME</key><string>${xml(deps.home)}</string>${deps.claude ? `<key>${CLAUDE_PATH_ENV}</key><string>${xml(deps.claude)}</string>` : ""}</dict>`,
     // A calendar schedule, not StartInterval: on a busy Mac launchd held a StartInterval job as
     // "pended nondemand spawn" for hours (mini-2, 2026-10-17), and RunAtLoad was pended the same
     // way. The calendar entries fired on time on that same machine.
@@ -82,7 +85,7 @@ export function launchAgentPlist(deps: Pick<AutoUpdateDeps, "cli" | "path" | "ho
   ].join("\n");
 }
 
-export function systemdUnits(deps: Pick<AutoUpdateDeps, "cli" | "path">, dir: string): { service: string; timer: string } {
+export function systemdUnits(deps: Pick<AutoUpdateDeps, "cli" | "path" | "claude">, dir: string): { service: string; timer: string } {
   return {
     service: [
       "[Unit]",
@@ -91,6 +94,7 @@ export function systemdUnits(deps: Pick<AutoUpdateDeps, "cli" | "path">, dir: st
       "[Service]",
       "Type=oneshot",
       `Environment=${unitWord(`PATH=${deps.path}`)}`,
+      ...(deps.claude ? [`Environment=${unitWord(`${CLAUDE_PATH_ENV}=${deps.claude}`)}`] : []),
       `ExecStart=${[deps.cli, "runner", "update", "--auto", "--dir", dir].map(unitWord).join(" ")}`,
       "",
     ].join("\n"),
