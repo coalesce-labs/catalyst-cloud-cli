@@ -5,8 +5,9 @@ import { main } from "../src/cli";
 import { configPathFor, type MeUser } from "../src/config";
 import { makeCtx, tempHome, type TestCtx } from "./helpers";
 
-// Planning fixture, not a captured /me response: paths and metadata come from CTC-4357;
+// Planning fixture, not a captured /me response: paths come from CTC-4357;
 // the envelope and projects follow test/onboard-repositories-team.test.ts's agent list.
+// Pause attribution follows the { actor, email } shape reported by PR #454's review.
 type Body = Record<string, unknown>;
 type Request = { method: string; path: string; body: unknown; authorization: string | null };
 const now = Date.parse("2026-09-29T15:00:00Z");
@@ -14,7 +15,7 @@ const personalKey = "ctc_user_repository_fixture";
 const project = { id: "project-app", name: "Application", teamKey: "APP", status: "active" };
 const row = (over: Body = {}): Body => ({
   id: "repo-app", owner: "acme", name: "app", fullName: "acme/app", status: "paused",
-  pausedAt: "2026-09-29T12:00:00Z", pausedBy: { id: "person-sam", name: "Sam Example" },
+  pausedAt: "2026-09-29T12:00:00Z", pausedBy: { actor: "person-sam", email: "sam@example.com" },
   pauseReason: "flaky deploy", projects: [project], ...over,
 });
 const list = (repositories: Body[] = [row()], canManage = false): Body => ({ repositories, canManage });
@@ -64,7 +65,7 @@ describe("repo status", () => {
     expect(await main(["repo", "status"], ctx)).toBe(0);
     expect(requests).toEqual([{ method: "GET", path: "/api/v1/me/repos", body: null, authorization: `Bearer ${personalKey}` }]);
     expect(ctx.out).toEqual([
-      "acme/app: paused by Sam Example 3 hours ago: flaky deploy", "  projects: Application (APP)",
+      "acme/app: paused by sam@example.com 3 hours ago: flaky deploy", "  projects: Application (APP)",
       "acme/api: active", "  projects: Application (APP)",
       "acme/legacy: paused by an operator", "  projects: none",
       "acme/retired: archived", "  projects: Legacy (OLD)",
@@ -98,14 +99,23 @@ describe("repo status", () => {
   ])("renders elapsed %s milliseconds as %s", async (elapsed, text) => {
     respond = () => json(list([row({ pausedAt: now - elapsed })]));
     expect(await main(["repo", "status"], ctx)).toBe(0);
-    expect(ctx.out[0]).toBe(`acme/app: paused by Sam Example ${text}: flaky deploy`);
+    expect(ctx.out[0]).toBe(`acme/app: paused by sam@example.com ${text}: flaky deploy`);
   });
   test.each(["bad-date", null, 1e20])("omits invalid or absent date %s", async (pausedAt) => {
     respond = () => json(list([row({ pausedAt })]));
     expect(await main(["repo", "status"], ctx)).toBe(0);
-    expect(ctx.out[0]).toBe("acme/app: paused by Sam Example: flaky deploy");
+    expect(ctx.out[0]).toBe("acme/app: paused by sam@example.com: flaky deploy");
   });
-  test.each([["Sam", "Sam"], [{ label: "Sam Label" }, "Sam Label"], [{ id: "person" }, "an operator"], [{ name: " " }, "an operator"], [undefined, "an operator"]])("accepts legacy actor %j", async (pausedBy, display) => {
+  test.each([
+    { pausedBy: { actor: "person-sam", email: "sam@example.com", name: "Legacy name" }, display: "sam@example.com" },
+    { pausedBy: { actor: "person-sam", email: null }, display: "person-sam" },
+    { pausedBy: { actor: "person-sam", email: " " }, display: "person-sam" },
+  ])("renders pause attribution as $display using email before actor", async ({ pausedBy, display }) => {
+    respond = () => json(list([row({ pausedBy })]));
+    expect(await main(["repo", "status"], ctx)).toBe(0);
+    expect(ctx.out[0]).toBe(`acme/app: paused by ${display} 3 hours ago: flaky deploy`);
+  });
+  test.each([["Sam", "Sam"], [{ name: "Sam Example" }, "Sam Example"], [{ label: "Sam Label" }, "Sam Label"], [{ id: "person" }, "an operator"], [{ name: " " }, "an operator"], [undefined, "an operator"]])("accepts legacy actor %j", async (pausedBy, display) => {
     respond = () => json(list([row({ pausedBy, pausedAt: undefined, pauseReason: undefined })]));
     expect(await main(["repo", "status"], ctx)).toBe(0);
     expect(ctx.out[0]).toBe(`acme/app: paused by ${display}`);
@@ -152,7 +162,7 @@ describe("repo pause and resume", () => {
       { method: "POST", path: `/api/v1/me/repos/${encodeURIComponent(id)}/${action}`, body: reason === undefined ? {} : { reason: reason.trim() }, authorization: `Bearer ${personalKey}` },
       { method: "GET", path: "/api/v1/me/repos", body: null, authorization: `Bearer ${personalKey}` },
     ]);
-    expect(ctx.out).toEqual([status === "paused" ? "acme/app: paused by Sam Example just now: flaky deploy" : "acme/app: active", "  projects: Application (APP)"]);
+    expect(ctx.out).toEqual([status === "paused" ? "acme/app: paused by sam@example.com just now: flaky deploy" : "acme/app: active", "  projects: Application (APP)"]);
   });
   test.each(["pause", "resume"])("%s accepts exactly 500 trimmed characters", async (action) => {
     mutationFixture();

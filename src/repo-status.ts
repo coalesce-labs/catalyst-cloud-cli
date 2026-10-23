@@ -43,7 +43,7 @@ function renderRow(row: Repository, ctx: Ctx): void {
   let state = row.status;
   if (state === "paused") {
     const actor = text(row.pausedBy) ? row.pausedBy : object(row.pausedBy)
-      ? text(row.pausedBy.name) ? row.pausedBy.name : text(row.pausedBy.label) ? row.pausedBy.label : "an operator"
+      ? [row.pausedBy.email, row.pausedBy.actor, row.pausedBy.name, row.pausedBy.label].find(text) ?? "an operator"
       : "an operator";
     const time = elapsedTime(row.pausedAt, ctx.now());
     state += ` by ${actor}${time ? ` ${time}` : ""}${text(row.pauseReason) ? `: ${row.pauseReason}` : ""}`;
