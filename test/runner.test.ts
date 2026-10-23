@@ -296,3 +296,188 @@ describe("runner uninstall", () => {
     expect(cloud).toEqual([]);
   });
 });
+
+type Result = { code: number; stdout: string; stderr: string };
+/** The fake, with chosen docker calls answered differently. */
+function overriding(pick: (call: string) => Result | undefined): RunnerCommand {
+  const base = command(fake);
+  return async (file, args, options) => (file === "docker" ? pick(args.join(" ")) : undefined) ?? base(file, args, options);
+}
+const fail = (stderr = ""): Result => ({ code: 1, stdout: "", stderr });
+const rows = (...lines: string[][]): Result => ({ code: 0, stdout: lines.map(l => l.join("\t")).join("\n") + "\n", stderr: "" });
+const PROJECT_PS = "ps --all --no-trunc --filter label=com.docker.compose.project=catalyst-host";
+function runnerWith(run: RunnerCommand, ...argv: string[]) {
+  return main(["runner", ...argv], ctx, { runner: { run, platform: "linux", isTty: () => false } });
+}
+
+describe("CTC-6603: runner refuses what it cannot verify", () => {
+  it("refuses an unknown action and an extra word", async () => {
+    expect(await runner("restart")).not.toBe(0);
+    expect(await runner("stop", "now")).not.toBe(0);
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("says Docker is not reachable when the project cannot be listed", async () => {
+    expect(await runnerWith(overriding(c => c.startsWith(PROJECT_PS) ? fail() : undefined), "status")).toBe(1);
+    expect(ctx.err.join("\n")).toContain("Docker is not reachable");
+  });
+
+  it("changes nothing when a project container cannot be read", async () => {
+    const files = join(dir, "compose.yaml");
+    expect(await runnerWith(overriding(c => c.startsWith(PROJECT_PS) ? rows(["not-an-id", "supervisor", "running", dir, files]) : undefined), "stop")).toBe(1);
+    expect(ctx.err.join("\n")).toContain("has a container this command cannot read");
+    expect(docker().some(c => c.endsWith("stop supervisor"))).toBe(false);
+  });
+
+  it("changes nothing when the project was started from two folders", async () => {
+    const files = join(dir, "compose.yaml");
+    expect(await runnerWith(overriding(c => c.startsWith(PROJECT_PS)
+      ? rows([SUPERVISOR, "supervisor", "running", dir, files], [WATCHDOG, "deadline-watchdog", "running", join(ctx.home, "other"), files]) : undefined), "stop")).toBe(1);
+    expect(ctx.err.join("\n")).toContain("more than one folder");
+  });
+});
+
+describe("CTC-6603: runner status", () => {
+  it("prints the state, the folder and each container", async () => {
+    expect(await runner("status")).toBe(0);
+    expect(ctx.out).toEqual([`Runner: running (folder ${dir})`, "  supervisor: running", "  deadline-watchdog: running"]);
+  });
+
+  it("reads a set-up runner with no containers as not started", async () => {
+    fake.supervisor = "absent";
+    expect(await runner("status", "--json")).toBe(0);
+    expect(JSON.parse(ctx.out[0]!)).toMatchObject({ installed: true, state: "not started", containers: [] });
+  });
+
+  it.each([[[] as string[], "No Catalyst runner is installed on this machine."], [["--json"], JSON.stringify({ installed: false })]])(
+    "says so when nothing is installed (%j)", async (flags, line) => {
+      fake.supervisor = "absent";
+      ctx.env.CATALYST_INSTALL_STATE_DIR = join(tempHome(), "state");
+      expect(await runner("status", ...flags)).toBe(0);
+      expect(ctx.out).toEqual([line]);
+    });
+});
+
+describe("CTC-6603: runner stop and start failures", () => {
+  it("refuses to stop a runner that has no containers", async () => {
+    fake.supervisor = "absent";
+    expect(await runner("stop")).toBe(1);
+    expect(ctx.err.join("\n")).toContain("No Catalyst runner is running on this machine");
+  });
+
+  it("refuses a runner folder that lost its settings", async () => {
+    rmSync(join(dir, ".env"));
+    expect(await runner("stop")).toBe(1);
+    expect(ctx.err.join("\n")).toContain("is missing its settings");
+  });
+
+  it("changes nothing when Compose cannot read the runner's state", async () => {
+    expect(await runnerWith(overriding(c => c.includes("ps --status running --services") ? fail() : undefined), "stop")).toBe(1);
+    expect(ctx.err.join("\n")).toContain("Compose could not read the runner's state");
+  });
+
+  it("names Compose's last line when the supervisor does not stop", async () => {
+    expect(await runnerWith(overriding(c => c.endsWith("stop supervisor") ? fail("warming up\nboom\n") : undefined), "stop")).toBe(1);
+    expect(ctx.err.join("\n")).toContain("The runner did not stop: boom");
+  });
+
+  it("names Compose's last line when the runner does not start", async () => {
+    fake.supervisor = "exited";
+    expect(await runnerWith(overriding(c => c.endsWith("up --detach") ? fail("port is already allocated\n") : undefined), "start")).toBe(1);
+    expect(ctx.err.join("\n")).toContain("The runner did not start: port is already allocated");
+  });
+
+  it("reports stop and start as JSON", async () => {
+    expect(await runner("stop", "--json")).toBe(0);
+    expect(JSON.parse(ctx.out[0]!)).toEqual({ stopped: true, alreadyStopped: false, runningAttempts: 1 });
+    ctx.out.length = 0;
+    expect(await runner("start", "--json")).toBe(0);
+    expect(JSON.parse(ctx.out[0]!)).toEqual({ started: true, alreadyRunning: false, hostId: HOST });
+  });
+
+  it("refuses to start over an uninstall journal it cannot read", async () => {
+    fake.supervisor = "exited";
+    writeFileSync(join(dir, "uninstall.json"), "not json");
+    expect(await runner("start")).toBe(1);
+    expect(ctx.err.join("\n")).toContain("An uninstall of this runner has started");
+    expect(docker().some(c => c.endsWith("up --detach"))).toBe(false);
+  });
+});
+
+describe("CTC-6603: runner uninstall edges", () => {
+  it("asks on a terminal and keeps the runner on a no, then goes ahead on a yes", async () => {
+    let shown: string[] = [];
+    const ask = (answer: boolean) => main(["runner", "uninstall"], ctx, { runner: { run: command(fake), platform: "linux", isTty: () => true, confirm: async (summary) => { shown = summary; return answer; } } });
+    expect(await ask(false)).toBe(2);
+    expect(shown).toContain("Runner key: will be revoked");
+    expect(shown).toContain(`Host registration: ${HOST} (team ADV)`);
+    expect(ctx.out.join("\n")).toContain("Runner kept.");
+    expect(cloud).toEqual([]);
+    expect(await ask(true)).toBe(0);
+    expect(ctx.out.join("\n")).toContain("Uninstalled the runner from this machine.");
+  });
+
+  it("reports a missing confirmation as JSON", async () => {
+    expect(await runner("uninstall", "--json")).toBe(2);
+    expect(JSON.parse(ctx.out[0]!)).toEqual({ removed: false, reason: "confirmation_required" });
+  });
+
+  it("revokes only the key for a machine that never enrolled", async () => {
+    fake.enrolled = false;
+    expect(await runner("uninstall", "--yes")).toBe(0);
+    expect(ctx.out.join("\n")).toContain("host registration (this machine never enrolled)");
+    expect(cloud.map(c => `${c.method} ${new URL(c.url).pathname}`)).toEqual([`DELETE /api/v1/agent/runner-keys/${REQUEST}`]);
+  });
+
+  it("names what it could not list or remove, and keeps the journal for a rerun", async () => {
+    const run = overriding(c => c.endsWith("stop supervisor") || c.startsWith("ps --all --no-trunc --filter label=dev.catalystcloud.attempt.host-id")
+      || c.startsWith("volume ls") || c.includes(" down --volumes") ? fail("down broke\n") : undefined);
+    expect(await runnerWith(run, "uninstall", "--yes")).toBe(1);
+    const out = ctx.out.join("\n");
+    expect(out).toContain("supervisor (compose stop failed)");
+    expect(out).toContain("attempt containers (could not be listed)");
+    expect(out).toContain("attempt volumes (could not be listed)");
+    expect(out).toContain("compose project (down broke)");
+    expect(out).toContain("lets the next run finish the uninstall");
+    expect(out).toContain("Some of the runner is left on this machine");
+  });
+
+  it("names attempt containers and volumes Docker would not remove", async () => {
+    const run = overriding(c => c.startsWith("rm --force") || c.startsWith("volume rm catalyst-pa") ? fail() : undefined);
+    expect(await runnerWith(run, "uninstall", "--yes", "--json")).toBe(1);
+    const body = JSON.parse(ctx.out[0]!);
+    expect(body.steps).toEqual(expect.arrayContaining([
+      { item: "attempt containers", outcome: "failed", detail: "1" },
+      { item: "attempt volumes", outcome: "failed", detail: "catalyst-pa_x_1-g1-ws" },
+    ]));
+  });
+
+  it("removes the project's own volumes and keeps one another project labelled", async () => {
+    const run = overriding(c => c.startsWith("volume inspect")
+      ? { code: 0, stdout: c.endsWith("supervisor-state") ? "catalyst-host\n" : "someone-else\n", stderr: "" } : undefined);
+    expect(await runnerWith(run, "uninstall", "--yes")).toBe(0);
+    expect(docker()).toContain("volume rm catalyst-host_supervisor-state");
+    expect(docker()).not.toContain("volume rm catalyst-host_host-credential");
+    expect(ctx.out.join("\n")).toContain("catalyst-host_host-credential: not labelled as this project's");
+  });
+
+  it("leaves team admission as it was when the cloud refuses the switch", async () => {
+    cloudStatus.PUT = 403;
+    expect(await runner("uninstall", "--yes")).toBe(0);
+    expect(ctx.out.join("\n")).toContain("team runner admission (left as it was (the cloud answered 403))");
+  });
+
+  it("leaves team admission as it was when the machine list cannot be read", async () => {
+    const reach = ctx.fetch;
+    ctx.fetch = async (input, init) => (init?.method ?? "GET") === "GET" ? Promise.reject(new Error("offline")) : reach(input, init);
+    expect(await runner("uninstall", "--yes")).toBe(0);
+    expect(ctx.out.join("\n")).toContain("left as it was: the machine list could not be read");
+    expect(cloud.some(c => c.method === "PUT")).toBe(false);
+  });
+
+  it("skips the session network when there is none", async () => {
+    fake.network = "absent";
+    expect(await runner("uninstall", "--yes")).toBe(0);
+    expect(docker().some(c => c.startsWith("network rm"))).toBe(false);
+  });
+});
