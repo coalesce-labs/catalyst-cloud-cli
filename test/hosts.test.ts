@@ -65,6 +65,16 @@ beforeEach(() => {
   });
 });
 describe("hosts", () => {
+  it("CTC-5930: shows a machine the cloud marks stopped as stopped", async () => {
+    inventory.machines[0] = { ...inventory.machines[0]!, status: "stale", stopped: true } as (typeof inventory.machines)[0];
+    try {
+      expect(await main(["hosts"], ctx)).toBe(0);
+      expect(ctx.out.join("\n")).toContain("4 slots, 1 in use, 3 free | stopped |");
+    } finally {
+      inventory.machines[0] = { ...inventory.machines[0]!, status: "live" };
+      delete (inventory.machines[0] as { stopped?: boolean }).stopped;
+    }
+  });
   it("reads rows and totals in text and JSON, using the connected account", async () => {
     expect(await main(["hosts"], ctx)).toBe(0);
     expect(ctx.out.join("\n")).toContain(

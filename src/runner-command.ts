@@ -19,19 +19,22 @@ import {
   type RunnerUpdateEngine,
 } from "./runner-update.js";
 import { dockerFleetUpdateEngine, runFleetUpdate, type FleetUpdateEngine } from "./runner-update-fleet.js";
+import { cmdRunnerLifecycle, RUNNER_LIFECYCLE_ACTIONS, type RunnerLifecycleDeps } from "./runner.js";
 
 // `catalyst runner update [--check] [--auto] [--dir <dir>] [--fleet]` and
 // `catalyst runner auto-update [status|on|off]` (CTC-4646). `--fleet` updates a multi-team
 // supervisor fleet's `compose.json` in `--dir` instead of a single runner's `.env` (CTC-6530).
+// `catalyst runner [status] | stop | start | uninstall` go to runner.ts (CTC-5930).
 
-export interface RunnerCommandDeps {
+export interface RunnerCommandDeps extends RunnerLifecycleDeps {
   engine?: RunnerUpdateEngine;
   fleetEngine?: FleetUpdateEngine;
   scheduler?: Partial<AutoUpdateDeps>;
 }
 
 const USAGE =
-  "catalyst runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off]";
+  "catalyst runner [status] | stop | start | uninstall [--yes] [--delete-checkouts] | runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off]";
+const UPDATE_FLAGS = ["check", "auto", "dir", "fleet"] as const;
 
 function schedulerDeps(ctx: Ctx, deps: RunnerCommandDeps): AutoUpdateDeps {
   const cli = deps.scheduler?.cli ?? resolve(process.argv[1] ?? "catalyst");
@@ -72,6 +75,13 @@ export function enableRunnerAutoUpdate(ctx: Ctx, dir: string): string {
 export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandDeps = {}): Promise<number> {
   const parts = positionals(args);
   const action = parts[0];
+  if (action === undefined || RUNNER_LIFECYCLE_ACTIONS.includes(action)) {
+    if (UPDATE_FLAGS.some(flag => args.flags[flag] !== undefined))
+      throw new UsageError("--check, --auto, --dir and --fleet are only valid with runner update or auto-update");
+    return cmdRunnerLifecycle(args, ctx, deps);
+  }
+  if (args.flags.yes !== undefined || args.flags["delete-checkouts"] !== undefined)
+    throw new UsageError("--yes and --delete-checkouts are only valid with runner uninstall");
   const dirFlag = flagString(args, "dir");
   if (dirFlag !== undefined && !isAbsolute(dirFlag)) throw new UsageError("--dir must be an absolute path");
   const dir = () => dirFlag ?? runnerDir(ctx);

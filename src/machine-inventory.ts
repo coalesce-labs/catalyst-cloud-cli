@@ -8,6 +8,8 @@ export interface Machine {
   free: number;
   lastCheckInAtMs: number | null;
   status: "live" | "stale";
+  /** A cloud that knows it says so: the machine's last check-in was a graceful stop. */
+  stopped?: boolean;
   removable: boolean;
   renameable: boolean;
 }
@@ -40,6 +42,7 @@ function machine(value: unknown): value is Machine {
     count(value.free) &&
     (value.lastCheckInAtMs === null || count(value.lastCheckInAtMs)) &&
     (value.status === "live" || value.status === "stale") &&
+    (value.stopped === undefined || typeof value.stopped === "boolean") &&
     typeof value.removable === "boolean" &&
     typeof value.renameable === "boolean"
   );
