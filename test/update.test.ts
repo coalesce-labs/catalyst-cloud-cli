@@ -109,6 +109,25 @@ describe("the release check lists every component against the approved release",
     expect(components.map((c) => c.id)).toEqual(["runner", "supervisor", "watchdog", "cli", "skills-cloud", "skills-dev", "replica"]);
     expect(components[1]).toMatchObject({ installedReference: ref("supervisor", "8"), approvedReference: ref("supervisor", "2") });
     expect(components[6]).toMatchObject({ status: "not_installed", reason: "not_installed" });
+    expect(json.approvedSkills).toEqual({
+      cloud: { version: NEXT, repository: "coalesce-labs/catalyst-cloud-skills", commit: "1".repeat(40) },
+      dev: { version: NEXT, repository: "coalesce-labs/catalyst-dev-skills", commit: "2".repeat(40) },
+    });
+  });
+
+  it("--json names no approved skills commit for a release on another train", async () => {
+    const { ctx, options } = hostCase({
+      components: approved({
+        mutate: (r) => {
+          r.releaseLine = "9.1";
+          r.members = { cli: "9.1.0" };
+          r.skills = { cloud: { version: "9.1.0", repository: "coalesce-labs/catalyst-cloud-skills", commit: "3".repeat(40) } };
+        },
+      }),
+    });
+    const json = updateReportJson(await runUpdate(ctx, options("check")));
+    expect(json.crossTrain).not.toBeNull();
+    expect(json.approvedSkills).toBeNull();
   });
 
   it("a CLI-only install reads the member route once and never reaches Docker", async () => {
