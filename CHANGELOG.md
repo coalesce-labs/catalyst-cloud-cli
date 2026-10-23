@@ -1,8 +1,12 @@
 # Changelog
 
-## 0.16.26
+## 0.16.27
 
 A large workspace's local replica now finishes its first download instead of stopping after 30 seconds: it waits as long as data keeps arriving, and gives up only after 150 seconds with no progress. New commands: `catalyst repo status` lists your repositories and whether each is paused, and `catalyst repo pause|resume` pauses or resumes one (owners and admins). `catalyst runner status|stop|start|uninstall` stops a self-hosted machine taking work, starts it again with the same registration, or removes it and revokes its registration. Setup with local sync off now lists an old local replica's files with their sizes and removes them only after you say yes. Setup with local sync on keeps using the replica you already have. On a Mac where Docker Desktop does not share your home folder, setup now says which setting to change (Settings, then Resources, then File sharing).
+
+## 0.16.26
+
+Not published. Its changes ship in 0.16.27.
 
 ## 0.16.25
 
