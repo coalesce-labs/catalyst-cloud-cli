@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.28
+
+`catalyst events wait-for` can now wait on a repository (`--repo owner/name`), a branch (`--ref owner/name:branch`), a pull request (`--pr owner/name#n`), a work session (`--session KEY-123/phase#n`), events addressed to you (`--to me`) or a family of event types (`--type pr.*`). An agent can wait hours for a review or a conflict on its own branch: the wait holds one connection, prints each matching event as one JSON line, and after a dropped connection picks up where it left off without missing or repeating an event. Two new exit codes say why a wait ended without a match. 2 means the cloud refused the wait, for example on a ticket outside your teams, or the wait failed. 3 means `--from-cache` found no local event cache. A wait still exits 1 on a timeout and 4 on an outage, as before, and on a timeout it names the `--after` to resume from. New: `catalyst messages read --ticket KEY-123` prints the messages sent to a ticket on your teams, with each sender and time.
+
 ## 0.16.27
 
 A large workspace's local replica now finishes its first download instead of stopping after 30 seconds: it waits as long as data keeps arriving, and gives up only after 150 seconds with no progress. New commands: `catalyst repo status` lists your repositories and whether each is paused, and `catalyst repo pause|resume` pauses or resumes one (owners and admins). `catalyst runner status|stop|start|uninstall` stops a self-hosted machine taking work, starts it again with the same registration, or removes it and revokes its registration. Setup with local sync off now lists an old local replica's files with their sizes and removes them only after you say yes. Setup with local sync on keeps using the replica you already have. On a Mac where Docker Desktop does not share your home folder, setup now says which setting to change (Settings, then Resources, then File sharing).
