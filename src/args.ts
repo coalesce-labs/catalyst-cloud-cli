@@ -525,6 +525,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
   },
   repo: {
+    reason: { value: true, help: "pause: required; resume: optional; 1 to 500 characters after trimming (owner or admin)" },
     write: {
       value: false,
       help: "agents-block: write or update the block in AGENTS.md (working tree only)",
@@ -621,7 +622,7 @@ export const VERB_USAGE: Record<string, string> = {
   capabilities: "capabilities [--json]",
   project:
     "project <list [--json] | wip-limit <get|set <n>|set default> [--team K] [--json]>",
-  repo: "repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]> [--json]",
+  repo: "repo <status|pause <owner/name> --reason <text>|resume <owner/name> [--reason <text>]|agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]> [--json]   (status: visible workspace repositories; agents-block/agent-setup: local checkout)",
   legacy: "legacy [--remove [--data] [--yes]] [--json]",
   connections:
     "connections personal <linear|github> <start|status> [--wait <seconds>] [--json]",

@@ -62,3 +62,19 @@ describe("every verb's --help", () => {
     expect(ctx.err.join("\n")).toContain("unknown command");
   });
 });
+
+describe("repository lifecycle arguments", () => {
+  test("parses pause and resume reasons as values", () => {
+    expect(parseArgs(["repo", "pause", "acme/app", "--reason", "flaky deploy"]).flags.reason).toBe("flaky deploy");
+    expect(parseArgs(["repo", "resume", "acme/app", "--reason=deploy fixed", "--json"]).flags.reason).toBe("deploy fixed");
+    expect(parseArgs(["repo", "resume", "acme/app"]).flags.reason).toBeUndefined();
+    expect(() => parseArgs(["repo", "pause", "acme/app", "--reason"])).toThrow(/--reason requires a value/);
+  });
+});
+
+test("repository help documents cloud writes and keeps the local verbs", async () => {
+  const ctx = makeCtx(tempHome());
+  expect(await main(["repo", "--help"], ctx)).toBe(0);
+  const help = ctx.out.join("\n");
+  for (const syntax of ["status", "pause <owner/name> --reason <text>", "resume <owner/name> [--reason <text>]", "agents-block <path> [--write]", "agent-setup <path> [--apply] [--with-check]", "1 to 500", "owner or admin"]) expect(help).toContain(syntax);
+});
