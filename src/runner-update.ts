@@ -23,11 +23,18 @@ import {
 //
 //   - the release parses strictly: three digests from the three Catalyst repositories, never a
 //     tag or `latest`, and a generation newer than the one this machine last applied;
-//   - no phase container exists for this host;
+//   - no phase container exists for this host, unless the update is in place (below);
 //   - all three images are pulled by digest, natively for this engine, before anything changes;
 //   - on a Mac with private thoughts storage, that storage is re-attested on the new supervisor;
 //   - with the supervisor stopped, so it admits no new work, there is still no phase container.
 //     If one started in between, the supervisor comes back as it was and the update waits.
+//
+// In place (CTC-6709): when the release names its supervisor's journal format and it equals the
+// format of the supervisor a failure would go back to, as recorded when that supervisor was applied,
+// running phases are not waited out. The supervisor is recreated and re-adopts them, and they finish
+// on the image they were granted. A rollback lands on a supervisor that reads the same journal. A
+// format that differs, or is unknown on either side, waits for an idle machine as above, because an
+// older supervisor that meets a newer journal refuses to start.
 //
 // Then it rewrites the three image lines in `.env`, keeps the previous file beside it, and runs
 // `docker compose up`. The release counts as applied only when the running containers are its
@@ -63,6 +70,8 @@ export interface DesiredRelease {
   generation: number;
   approvedAtMs: number;
   images: Record<ReleaseComponent, { reference: string; sourceSha: string }>;
+  /** The journal format the release's supervisor reads and writes; null when the release does not say. */
+  journalFormat: number | null;
 }
 
 /** What one desired-release read returned, as the container saw it. */
@@ -103,9 +112,15 @@ export function parseDesiredRelease(input: unknown): DesiredRelease | null {
     if (value.tag !== tag) return null;
     images[component] = { reference, sourceSha: value.sourceSha };
   }
+  // Only the supervisor carries a journal format, a positive integer, as catalyst-cloud's parser.
+  const supervisor = input.supervisor as Record<string, unknown>;
+  if (supervisor.journalFormat !== undefined && !posInt(supervisor.journalFormat)) return null;
+  for (const component of ["runner", "watchdog"] as const)
+    if ((input[component] as Record<string, unknown>).journalFormat !== undefined) return null;
+  const journalFormat = supervisor.journalFormat === undefined ? null : supervisor.journalFormat;
   const id = `hr-${shortDigest(images.runner.reference)}-${shortDigest(images.supervisor.reference)}-${shortDigest(images.watchdog.reference)}`;
   if (input.releaseId !== id) return null;
-  return { releaseId: id, generation: input.generation, approvedAtMs: input.approvedAtMs, images };
+  return { releaseId: id, generation: input.generation, approvedAtMs: input.approvedAtMs, images, journalFormat };
 }
 
 export type ReleaseDecision =
@@ -144,11 +159,13 @@ export interface ReleaseState {
   appliedAtMs: number | null;
   /** The images before the last applied release, for a person who wants to go back. */
   previous: Record<ReleaseComponent, string> | null;
+  /** The journal format of the supervisor image this machine last applied, when its release named one. */
+  journal: { format: number; supervisor: string } | null;
   last: { atMs: number; outcome: UpdateOutcome; detail: string; generation: number | null } | null;
 }
 
 export function readReleaseState(dir: string): ReleaseState {
-  const empty: ReleaseState = { version: 1, generation: null, releaseId: null, appliedAtMs: null, previous: null, last: null };
+  const empty: ReleaseState = { version: 1, generation: null, releaseId: null, appliedAtMs: null, previous: null, journal: null, last: null };
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(dir, RELEASE_STATE_FILE), "utf8"));
     if (!isRecord(parsed) || parsed.version !== 1) return empty;
@@ -158,6 +175,9 @@ export function readReleaseState(dir: string): ReleaseState {
       releaseId: typeof parsed.releaseId === "string" ? parsed.releaseId : null,
       appliedAtMs: posInt(parsed.appliedAtMs) ? parsed.appliedAtMs : null,
       previous: isRecord(parsed.previous) ? (parsed.previous as ReleaseState["previous"]) : null,
+      journal: isRecord(parsed.journal) && posInt(parsed.journal.format) && typeof parsed.journal.supervisor === "string"
+        ? { format: parsed.journal.format, supervisor: parsed.journal.supervisor }
+        : null,
       last: isRecord(parsed.last) ? (parsed.last as ReleaseState["last"]) : null,
     };
   } catch {
@@ -312,7 +332,8 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   }
   const tagged = { releaseId: release.releaseId };
   const record = (outcome: UpdateOutcome, detail: string, previous: Images | null): UpdateResult => {
-    writeReleaseState(dir, { ...state, generation: release.generation, releaseId: release.releaseId, appliedAtMs: now(), previous });
+    const journal = release.journalFormat === null ? null : { format: release.journalFormat, supervisor: target.supervisor };
+    writeReleaseState(dir, { ...state, generation: release.generation, releaseId: release.releaseId, appliedAtMs: now(), previous, journal });
     return { outcome, detail, generation: release.generation, exitCode: 0, ...tagged };
   };
 
@@ -333,11 +354,16 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     }
   }
   const rollbackImages = rollbackText === null ? null : imagesOf(parseEnvText(rollbackText));
+  // In place only when the supervisor a failure goes back to reads the release's journal format.
+  const inPlace = release.journalFormat !== null && state.journal !== null && rollbackImages !== null
+    && state.journal.format === release.journalFormat && state.journal.supervisor === rollbackImages.supervisor;
 
   const hostId = read.kind === "answered" ? read.hostId : "";
-  const busy = await engine.attemptContainers(dir, hostId, signal);
-  if (busy === null) return done("retained", "docker_unavailable");
-  if (busy > 0) return done("deferred_busy", `attempt_containers:${busy}`, tagged);
+  if (!inPlace) {
+    const busy = await engine.attemptContainers(dir, hostId, signal);
+    if (busy === null) return done("retained", "docker_unavailable");
+    if (busy > 0) return done("deferred_busy", `attempt_containers:${busy}`, tagged);
+  }
 
   const unprepared = await engine.prepare(RELEASE_COMPONENTS.map((c) => target[c]), signal);
   if (unprepared !== null) return done("retained", unprepared, tagged);
@@ -364,7 +390,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     await restoreCustody(rollbackImages ?? current);
     return done("retained", "supervisor_stop_failed", tagged);
   }
-  const busyAfterStop = await engine.attemptContainers(dir, hostId, signal);
+  const busyAfterStop = inPlace ? 0 : await engine.attemptContainers(dir, hostId, signal);
   if (busyAfterStop !== 0) {
     await engine.composeUp(dir, signal);
     await restoreCustody(rollbackImages ?? current);
@@ -382,7 +408,8 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     // image is several GB, against a free-space floor that decides whether the machine takes work).
     // A rollback or failure never reaches here, so the previous images stay for it.
     if (changed.length > 0) await engine.removeImages(changed.map((c) => current[c]).filter((ref) => ref !== ""), signal);
-    return record("updated", changed.length > 0 ? `updated:${changed.join(",")}` : "reconciled", changed.length > 0 ? current : state.previous);
+    const applied = changed.length > 0 ? `updated:${changed.join(",")}` : "reconciled";
+    return record("updated", inPlace ? `${applied}:in_place` : applied, changed.length > 0 ? current : state.previous);
   }
 
   if (rollbackText === null || rollbackImages === null)
