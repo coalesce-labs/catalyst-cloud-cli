@@ -506,13 +506,13 @@ function firstTicketText(reason: string, key: string | undefined, stage: unknown
   return undefined;
 }
 
-/** One step's next action. `waitsFor` names the unfinished step a prerequisite wait is blocked on. */
 /** CTC-5932: the choices a step recorded, for advice that names real flag values. */
 function recordedChoices(step: OnboardStep): string[] {
   const value = step.evidence?.choices;
   return typeof value === "string" ? value.split(",").filter(Boolean) : [];
 }
 
+/** One step's next action. `waitsFor` names the unfinished step a prerequisite wait is blocked on. */
 export function onboardReasonText(
   step: OnboardStep,
   context: {
