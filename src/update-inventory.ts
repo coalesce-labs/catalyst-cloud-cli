@@ -16,6 +16,7 @@ import {
   type ReleaseComponent,
 } from "./runner-update.js";
 import { installedBundleVersion, resolveSkillsDir, skillsSourceDir } from "./skills.js";
+import { cloudPluginInventory, type PluginInventory } from "./update-plugin.js";
 
 export interface CliInventory {
   version: string;
@@ -50,6 +51,8 @@ export interface Inventory {
   cli: CliInventory;
   images: ImageInventory;
   skills: { cloud: PackInventory; dev: PackInventory };
+  /** The Cloud pack installed as the Claude plugin (CTC-6791). */
+  plugin: PluginInventory;
   replica: ReplicaInventory;
 }
 
@@ -130,6 +133,7 @@ export function readInventory(ctx: Ctx, imagesDir: string): Inventory {
       cloud: cloudPackInventory(ctx, cfg),
       dev: devPackInventory(ctx, cfg),
     },
+    plugin: cloudPluginInventory(ctx.home, ctx.env),
     replica: replicaInventory(ctx, cfg),
   };
 }

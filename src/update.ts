@@ -12,7 +12,8 @@
 // beside the running one and selected through the person's own command: update-cli.ts), and then
 // restarts a running local replica on it with its data (update-replica.ts). The Cloud skills pack
 // moves to its own approved version from that version's package, even while the CLI is held
-// (update-skills.ts). The Dev pack carries no version this CLI can read, so it is reported, never
+// (update-skills.ts), and its Claude plugin form moves through Claude Code when the plugin's
+// marketplace serves the approved version (update-plugin.ts). The Dev pack carries no version this CLI can read, so it is reported, never
 // moved. A project's SDK is reported
 // with its update command; an applying run changes a project's files only when its owner turned that
 // project's SDK updates on, and a check never does.
@@ -32,6 +33,7 @@ import { applyCliUpdate, type CliApplyResult } from "./update-cli.js";
 import { readInventory, type Inventory } from "./update-inventory.js";
 import { restartPending, restartReplica, type ReplicaRestartResult } from "./update-replica.js";
 import { applyCloudPackUpdate, type PackApplyResult } from "./update-skills.js";
+import { applyCloudPluginUpdate, CLOUD_PLUGIN_COMMAND, type PluginApplyDeps, type PluginApplyResult } from "./update-plugin.js";
 import { onboardStatePath, readOnboardJournal } from "./onboard.js";
 import {
   effectivePolicy,
@@ -73,8 +75,11 @@ export type ComponentStatus =
   | "pending"
   | "failed";
 
+/** A report row: each update component, plus the Cloud pack's Claude plugin form, which follows the `skills-cloud` setting. */
+export type ComponentId = UpdateComponent | "skills-cloud-plugin";
+
 export interface ComponentReport {
-  id: UpdateComponent;
+  id: ComponentId;
   installed: string | null;
   approved: string | null;
   /** Images only: the full digest-pinned references behind the labels above. */
@@ -131,14 +136,17 @@ export interface UpdateOptions {
   replicaRestart?: (target: string) => Promise<ReplicaRestartResult>;
   /** Refreshes the Cloud skills pack in `skillsDir` to `target`; tests pass a fake. */
   packApply?: (home: string, skillsDir: string, target: string) => PackApplyResult;
+  /** Moves the Cloud pack's Claude plugin to `target` through Claude Code; tests pass a fake. */
+  pluginApply?: (home: string, env: NodeJS.ProcessEnv, target: string, scope: string, deps: PluginApplyDeps) => PluginApplyResult;
 }
 
-export const COMPONENT_LABELS: Readonly<Record<UpdateComponent, string>> = {
+export const COMPONENT_LABELS: Readonly<Record<ComponentId, string>> = {
   runner: "Runner",
   supervisor: "Supervisor",
   watchdog: "Watchdog",
   cli: "CLI",
   "skills-cloud": "Cloud skills",
+  "skills-cloud-plugin": "Cloud skills plugin",
   "skills-dev": "Dev skills",
   replica: "Local replica",
 };
@@ -234,7 +242,7 @@ function componentRows(inventory: Inventory, policy: UpdatePolicy, release: Appr
     const p = effectivePolicy(policy, id);
     return { id, policy: p.enabled ? ("on" as const) : ("off" as const), policySource: p.source, enabled: p.enabled };
   };
-  const finish = (r: ReturnType<typeof row>, rest: Omit<ComponentReport, "id" | "policy" | "policySource">): ComponentReport => ({
+  const finish = (r: Omit<ReturnType<typeof row>, "id"> & { id: ComponentId }, rest: Omit<ComponentReport, "id" | "policy" | "policySource">): ComponentReport => ({
     id: r.id,
     policy: r.policy,
     policySource: r.policySource,
@@ -270,6 +278,20 @@ function componentRows(inventory: Inventory, policy: UpdatePolicy, release: Appr
     });
   };
 
+  // CTC-6791: the Claude plugin form follows the Cloud pack's setting, and is listed only where it is installed.
+  const pluginRow = ((): ComponentReport | null => {
+    const found = inventory.plugin;
+    if (found.state === "not_installed") return null;
+    const r = { ...row("skills-cloud"), id: "skills-cloud-plugin" as const };
+    const approved = release?.members.plugin ?? null;
+    if (found.state === "unknown") return finish(r, { installed: null, approved, status: "unknown", reason: found.reason, action: null });
+    if (approved === null) return finish(r, { installed: found.version, approved: null, status: "approval_unavailable", reason: unavailable, action: null });
+    if (crossTrain) return finish(r, { installed: found.version, approved, status: "cross_train", reason: "cross_train", action: null });
+    const decided = versionStatus(found.version, approved, r.enabled);
+    // An applying run moves it through Claude Code; with no `claude` command found, the owner runs it.
+    return finish(r, { installed: found.version, approved, ...decided, action: decided.status === "update_available" && found.claude === null ? CLOUD_PLUGIN_COMMAND : null });
+  })();
+
   const replica = row("replica");
   const replicaRow = ((): ComponentReport => {
     const found = inventory.replica;
@@ -293,7 +315,7 @@ function componentRows(inventory: Inventory, policy: UpdatePolicy, release: Appr
     return finish(replica, { ...base, status: "update_available", reason: "restart_needed" });
   })();
 
-  return [cliRow, packRow("skills-cloud", "cloud"), packRow("skills-dev", "dev"), replicaRow];
+  return [cliRow, packRow("skills-cloud", "cloud"), ...(pluginRow ? [pluginRow] : []), packRow("skills-dev", "dev"), replicaRow];
 }
 
 function projectReports(policy: UpdatePolicy, release: ApprovedRelease | null, extra: string | undefined): ProjectReport[] {
@@ -435,6 +457,18 @@ export async function runUpdate(ctx: Ctx, options: UpdateOptions): Promise<Updat
         if (moved.outcome === "updated") Object.assign(packRow, { status: "updated", reason: moved.detail, installed: moved.version });
         else if (moved.outcome === "linked") Object.assign(packRow, { status: "unknown", reason: moved.detail });
         else Object.assign(packRow, { status: "failed", reason: moved.detail, installed: moved.version ?? packRow.installed });
+      }
+    }
+    const pluginRow = components.find((c) => c.id === "skills-cloud-plugin");
+    const plugin = inventory.plugin;
+    if (pluginRow && pluginRow.status === "update_available" && pluginRow.approved !== null && plugin.state === "installed" && plugin.claude !== null) {
+      if (!effectivePolicy(current, "skills-cloud").enabled) Object.assign(pluginRow, { status: "held", reason: "owner_setting" });
+      else {
+        const moved = (options.pluginApply ?? applyCloudPluginUpdate)(ctx.home, ctx.env, pluginRow.approved, plugin.scope, { claudePath: plugin.claude });
+        if (moved.outcome === "updated") Object.assign(pluginRow, { status: "updated", reason: moved.detail, installed: moved.version });
+        else if (moved.outcome === "waiting") Object.assign(pluginRow, { status: "pending", reason: moved.detail });
+        else if (moved.outcome === "no_claude") Object.assign(pluginRow, { action: CLOUD_PLUGIN_COMMAND });
+        else Object.assign(pluginRow, { status: "failed", reason: moved.detail, installed: moved.version ?? pluginRow.installed });
       }
     }
     if (replicaRow && replicaRow.approved !== null) {
@@ -588,6 +622,9 @@ export function updateReportLines(report: UpdateReport): string[] {
     lines.push(
       `CLI: the update to ${cli.approved ?? "the approved version"} failed (${cli.reason}). You keep running ${cli.installed ?? "the installed version"}. The next release check tries again: within 15 minutes when automatic updates are on, or run catalyst update.`,
     );
+
+  const plugin = report.components.find((c) => c.id === "skills-cloud-plugin");
+  if (plugin?.status === "updated") lines.push(`Cloud skills plugin: run /reload-plugins in Claude Code, or restart it, to load ${plugin.installed ?? plugin.approved}.`);
 
   if (unchanged) lines.push("Checked the approved release; nothing was changed.");
   else {
