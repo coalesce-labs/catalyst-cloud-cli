@@ -128,7 +128,8 @@ describe("removing local sync data", () => {
     const other = join(ctx.home, "replica.db-wal");
     put(path, "db");
     put(other, "wal");
-    const approved = [fileAt(path), fileAt(other)];
+    // The changed file comes last, so removing as it goes would already have deleted the other one.
+    const approved = [fileAt(other), fileAt(path)];
     // A folder now stands where the approved file was: a rename or a fresh file reads the same way.
     rmSync(path);
     mkdirSync(path);
