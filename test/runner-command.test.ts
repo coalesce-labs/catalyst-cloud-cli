@@ -59,6 +59,10 @@ describe("catalyst runner update", () => {
     [["runner", "update", "--dir", "relative/path"]],
     [["runner", "rollback"]],
     [["runner", "update", "extra"]],
+    [["runner", "stop", "--check"]],
+    [["runner", "status", "--dir", "/tmp/runner"]],
+    [["runner", "update", "--yes"]],
+    [["runner", "auto-update", "off", "--delete-checkouts"]],
   ])("NEGATIVE: %j is a usage error", async (argv) => {
     const ctx = makeCtx(tempHome());
     expect(await main(argv, ctx, { runner: { engine: engine(503) } })).not.toBe(0);

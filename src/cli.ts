@@ -210,6 +210,7 @@ export function usageText(): string {
     "  catalyst status | notice | me | ready | accounts",
     "  catalyst seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE]",
     "  catalyst hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name>",
+    "  catalyst runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts]   (this machine's self-hosted runner)",
     "  catalyst runner update [--check] | runner auto-update [status|on|off]   (move this machine's runner to the approved release)",
     "  catalyst mcp add|list|remove (vault references only) | mcp status <name>   (a server's state, grants and last 50 tool calls)",
     "  catalyst contract [--refresh] [--path <a.b.c>]",

@@ -57,6 +57,8 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     auto: { value: false, help: "one-line output for the scheduled run" },
     dir: { value: true, help: "the runner directory (default: the one setup created)" },
     fleet: { value: false, help: "update a multi-team supervisor fleet's compose.json in --dir" },
+    yes: { value: false, help: "uninstall: confirm without a terminal" },
+    "delete-checkouts": { value: false, help: "uninstall: also delete the repository and thoughts checkouts" },
   },
   login: {
     "start-replica": {
@@ -583,7 +585,8 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
 export const VERB_USAGE: Record<string, string> = {
   hosts:
     "hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name> [--json]",
-  runner: "runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off]",
+  runner:
+    "runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts] | runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off] [--json]",
   setup:
     "setup [onboard options]   (sets up Catalyst step by step; same as catalyst onboard) | setup --engine <file> --engine-sha256 <hex> [-- <install options>]   (run by install.sh; install.sh --help lists the options)",
   login:
