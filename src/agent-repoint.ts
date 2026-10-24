@@ -15,6 +15,7 @@ import { compareVersions, exactVersion } from "./approved-release.js";
 import { LEGACY_PACKAGE_NAME, readManifest } from "./config.js";
 import {
   AUTO_UPDATE_LABEL,
+  custodyNode,
   defaultRun,
   enableAutoUpdate,
   launchAgentPath,
@@ -59,10 +60,13 @@ export type RepointResult =
   | { action: "skipped"; reason: "agent_not_writable"; agent: string }
   /** Reloading a macOS agent stops a run in progress, so a busy agent is left for the next install. */
   | { action: "skipped"; reason: "agent_busy" }
-  | { action: "repointed"; from: string; fromVersion: string | null; to: string; backup: string }
+  /** `node` is set when the agent runs this install under the custody's node (CTC-7030). */
+  | { action: "repointed"; from: string; fromVersion: string | null; to: string; backup: string; node?: string }
   | { action: "failed"; detail: string };
 
 interface AgentProgram {
+  /** The node the agent runs `cli` under, when it names one (CTC-7030). */
+  node: string | null;
   cli: string;
   dir: string;
   path: string | null;
@@ -99,11 +103,12 @@ function unitProgram(text: string): AgentProgram | null {
 }
 
 function programOf(args: string[], path: string | null, claude: string | null): AgentProgram | null {
-  const [cli, ...rest] = args;
-  if (cli === undefined || !cli.startsWith("/") || rest.length !== 5) return null;
+  const node = args.length === 7 ? (args[0] ?? null) : null;
+  const [cli, ...rest] = node === null ? args : args.slice(1);
+  if (cli === undefined || !cli.startsWith("/") || (node !== null && !node.startsWith("/")) || rest.length !== 5) return null;
   const [a, b, c, d, dir] = rest;
   if (a !== "runner" || b !== "update" || c !== "--auto" || d !== "--dir" || dir === undefined || !dir.startsWith("/")) return null;
-  return { cli, dir, path, claude };
+  return { node, cli, dir, path, claude };
 }
 
 const real = (path: string): string | null => {
@@ -207,11 +212,15 @@ function decide(deps: RepointDeps, seen: { dir?: string }): RepointResult {
     seen.dir = program.dir;
 
     const from = real(program.cli);
-    if (from !== null && from === real(deps.self)) return { action: "skipped", reason: "already_current" };
+    // CTC-7030: an agent already on this install is rewritten only when it runs under another node
+    // than its thoughts custody was set up with, which would refuse every update.
+    const node = platform === "darwin" ? custodyNode(program.dir) : null;
+    const current = from !== null && from === real(deps.self);
+    if (current && program.node === node) return { action: "skipped", reason: "already_current" };
     // A program that no longer exists runs nothing, so any working copy is better. One that exists
     // moves only when it is a catalyst CLI older than this one.
-    let fromVersion: string | null = null;
-    if (from !== null) {
+    let fromVersion: string | null = current ? deps.version : null;
+    if (from !== null && !current) {
       fromVersion = cliVersionAt(program.cli);
       if (fromVersion === null) return { action: "skipped", reason: "agent_cli_unrecognized" };
       if (compareVersions(fromVersion, deps.version) >= 0) return { action: "skipped", reason: "agent_cli_not_older" };
@@ -233,6 +242,7 @@ function decide(deps: RepointDeps, seen: { dir?: string }): RepointResult {
           home: deps.home,
           uid: deps.uid,
           cli: deps.self,
+          node,
           path: scheduledPath(deps.self, deps.nodeExecutable, program.path ?? deps.env.PATH),
           claude: program.claude ?? resolveClaude(deps.home, deps.env),
           run: deps.run,
@@ -244,7 +254,7 @@ function decide(deps: RepointDeps, seen: { dir?: string }): RepointResult {
       if (status?.state !== "on") restore(deps, platform, agent, original, backup);
     }
     if (status.state !== "on") return { action: "failed", detail: status.detail };
-    return { action: "repointed", from: program.cli, fromVersion, to: deps.self, backup };
+    return { action: "repointed", from: program.cli, fromVersion, to: deps.self, backup, ...(node !== null ? { node } : {}) };
   } catch (err) {
     return { action: "failed", detail: (err instanceof Error ? err.message : String(err)).slice(0, 160) };
   }
@@ -252,8 +262,10 @@ function decide(deps: RepointDeps, seen: { dir?: string }): RepointResult {
 
 /** One line for the person, or null when there is nothing to say. */
 export function repointLine(result: RepointResult, version: string): string | null {
-  if (result.action === "repointed")
-    return `catalyst: the runner update agent now runs ${result.to} (${version}) instead of ${result.from} (${result.fromVersion ?? "missing"}). The previous agent file is kept at ${result.backup}.`;
+  if (result.action === "repointed") {
+    const under = result.node === undefined ? "" : `, under ${result.node}, the node this machine's thoughts custody was set up with,`;
+    return `catalyst: the runner update agent now runs ${result.to} (${version})${under} instead of ${result.from} (${result.fromVersion ?? "missing"}). The previous agent file is kept at ${result.backup}.`;
+  }
   if (result.action === "skipped" && result.reason === "agent_not_writable")
     return `catalyst: the runner update agent at ${result.agent} runs an older catalyst, and this install cannot change it. Ask whoever installed it to run: catalyst runner auto-update on`;
   if (result.action === "skipped" && result.reason === "agent_busy")
