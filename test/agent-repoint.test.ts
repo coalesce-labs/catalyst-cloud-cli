@@ -1,6 +1,6 @@
 // CTC-6975: a global install points an older runner update agent at itself, and touches nothing else.
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -46,8 +46,8 @@ function writeAgent(cli: string, platform: "darwin" | "linux" = "darwin"): strin
   return paths.service;
 }
 
-const repoint = (self: string, version: string, platform: NodeJS.Platform = "darwin", run: SchedulerRun = ok) =>
-  repointAgent({ platform, home, uid: 501, self, version, nodeExecutable: "/usr/local/node/bin/node", env: { PATH: "/usr/bin:/bin" }, run });
+const repoint = (self: string, version: string, platform: NodeJS.Platform = "darwin", run: SchedulerRun = ok, canWrite?: (path: string) => boolean) =>
+  repointAgent({ platform, home, uid: 501, self, version, nodeExecutable: "/usr/local/node/bin/node", env: { PATH: "/usr/bin:/bin" }, run, canWrite });
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "agent-repoint-"));
@@ -63,8 +63,11 @@ describe("repointAgent", () => {
     const stale = install("brew", "0.16.31");
     const self = install("node", "0.16.35");
     const plist = writeAgent(stale);
+    const before = readFileSync(plist, "utf8");
 
-    expect(repoint(self, "0.16.35")).toEqual({ action: "repointed", from: stale, fromVersion: "0.16.31", to: self });
+    expect(repoint(self, "0.16.35")).toEqual({ action: "repointed", from: stale, fromVersion: "0.16.31", to: self, backup: `${plist}.before-0.16.35` });
+    // The file it replaced is kept beside it, under a name launchd does not load: the rollback.
+    expect(readFileSync(`${plist}.before-0.16.35`, "utf8")).toBe(before);
     const text = readFileSync(plist, "utf8");
     expect(text).toContain(`<string>${self}</string><string>runner</string><string>update</string><string>--auto</string><string>--dir</string><string>${dir}</string>`);
     expect(text).not.toContain(`<string>${stale}</string>`);
@@ -132,6 +135,40 @@ describe("repointAgent", () => {
     expect(repoint(self, "0.16.35")).toEqual({ action: "skipped", reason: "no_agent" });
     expect(repoint(self, "0.16.35", "linux")).toEqual({ action: "skipped", reason: "no_agent" });
     expect(repoint(self, "0.16.35", "win32")).toEqual({ action: "skipped", reason: "unsupported_platform" });
+    expect(calls).toEqual([]);
+  });
+
+  it("NEGATIVE: an agent this person cannot change is left alone, with one line saying so", () => {
+    const stale = install("old", "0.16.20");
+    const self = install("node", "0.16.35");
+    const service = writeAgent(stale, "linux");
+    const before = readFileSync(service, "utf8");
+    const asked: string[] = [];
+    const result = repoint(self, "0.16.35", "linux", ok, (path) => (asked.push(path), path !== service));
+
+    expect(result).toEqual({ action: "skipped", reason: "agent_not_writable", agent: service });
+    expect(asked).toContain(service);
+    expect(readFileSync(service, "utf8")).toBe(before);
+    expect(existsSync(`${service}.before-0.16.35`)).toBe(false);
+    expect(calls).toEqual([]);
+    expect(repointLine(result, "0.16.35")).toContain("this install cannot change it");
+  });
+
+  it("NEGATIVE: a root-owned timer beside a writable service is also left alone", () => {
+    const stale = install("old", "0.16.20");
+    const self = install("node", "0.16.35");
+    writeAgent(stale, "linux");
+    const { timer } = systemdUnitPaths(home);
+    expect(repoint(self, "0.16.35", "linux", ok, (path) => path !== timer)).toMatchObject({ action: "skipped", reason: "agent_not_writable" });
+    expect(calls).toEqual([]);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("NEGATIVE: the real write check refuses a read-only agent file", () => {
+    const stale = install("brew", "0.16.31");
+    const self = install("node", "0.16.35");
+    const plist = writeAgent(stale);
+    chmodSync(plist, 0o444);
+    expect(repoint(self, "0.16.35")).toEqual({ action: "skipped", reason: "agent_not_writable", agent: plist });
     expect(calls).toEqual([]);
   });
 

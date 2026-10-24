@@ -5,8 +5,10 @@
 // agent at the copy updates do move.
 //
 // It only ever moves the agent forward, touches only this CLI's own agent, keeps the agent's runner
-// directory and PATH, and never fails the install. Removing the stale copy is the installer's job.
-import { appendFileSync, existsSync, readFileSync, realpathSync } from "node:fs";
+// directory and PATH, and never fails the install. The agent file it replaces is kept beside it, named
+// `<file>.before-<version>`, which neither launchd nor systemd loads: that copy is the rollback.
+// Removing the stale CLI copy is the installer's job.
+import { accessSync, appendFileSync, constants, copyFileSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compareVersions, exactVersion } from "./approved-release.js";
@@ -32,11 +34,15 @@ export interface RepointDeps {
   nodeExecutable: string;
   env: NodeJS.ProcessEnv;
   run?: SchedulerRun;
+  /** Whether this person may change a file or create one in a directory; tests pass a fake. */
+  canWrite?: (path: string) => boolean;
 }
 
 export type RepointResult =
   | { action: "skipped"; reason: "unsupported_platform" | "no_agent" | "agent_unrecognized" | "already_current" | "agent_cli_unrecognized" | "agent_cli_not_older" }
-  | { action: "repointed"; from: string; fromVersion: string | null; to: string }
+  /** A unit installed for this person by someone else (root, a package): only its owner may change it. */
+  | { action: "skipped"; reason: "agent_not_writable"; agent: string }
+  | { action: "repointed"; from: string; fromVersion: string | null; to: string; backup: string }
   | { action: "failed"; detail: string };
 
 interface AgentProgram {
@@ -91,6 +97,15 @@ const real = (path: string): string | null => {
   }
 };
 
+const writable = (path: string): boolean => {
+  try {
+    accessSync(path, constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 /** The version of the catalyst package a command belongs to, or null when it is not one. */
 export function cliVersionAt(command: string): string | null {
   const resolved = real(command);
@@ -117,14 +132,15 @@ export function repointAgent(deps: RepointDeps): RepointResult {
   try {
     const platform = deps.platform ?? process.platform;
     let program: AgentProgram | null;
+    let agent: string;
     if (platform === "darwin") {
-      const path = launchAgentPath(deps.home);
-      if (!existsSync(path)) return { action: "skipped", reason: "no_agent" };
-      program = plistProgram(readFileSync(path, "utf8"));
+      agent = launchAgentPath(deps.home);
+      if (!existsSync(agent)) return { action: "skipped", reason: "no_agent" };
+      program = plistProgram(readFileSync(agent, "utf8"));
     } else if (platform === "linux") {
-      const { service } = systemdUnitPaths(deps.home);
-      if (!existsSync(service)) return { action: "skipped", reason: "no_agent" };
-      program = unitProgram(readFileSync(service, "utf8"));
+      agent = systemdUnitPaths(deps.home).service;
+      if (!existsSync(agent)) return { action: "skipped", reason: "no_agent" };
+      program = unitProgram(readFileSync(agent, "utf8"));
     } else {
       return { action: "skipped", reason: "unsupported_platform" };
     }
@@ -140,6 +156,11 @@ export function repointAgent(deps: RepointDeps): RepointResult {
       if (fromVersion === null) return { action: "skipped", reason: "agent_cli_unrecognized" };
       if (compareVersions(fromVersion, deps.version) >= 0) return { action: "skipped", reason: "agent_cli_not_older" };
     }
+    const canWrite = deps.canWrite ?? writable;
+    const files = platform === "linux" ? [agent, systemdUnitPaths(deps.home).timer].filter((f) => existsSync(f)) : [agent];
+    if (![...files, dirname(agent)].every(canWrite)) return { action: "skipped", reason: "agent_not_writable", agent };
+    const backup = `${agent}.before-${deps.version}`;
+    copyFileSync(agent, backup);
 
     const status = enableAutoUpdate(
       {
@@ -154,7 +175,7 @@ export function repointAgent(deps: RepointDeps): RepointResult {
       program.dir,
     );
     if (status.state !== "on") return { action: "failed", detail: status.detail };
-    const result: RepointResult = { action: "repointed", from: program.cli, fromVersion, to: deps.self };
+    const result: RepointResult = { action: "repointed", from: program.cli, fromVersion, to: deps.self, backup };
     try {
       appendFileSync(join(program.dir, "update.log"), `${new Date().toISOString()} ${repointLine(result, deps.version)}\n`);
     } catch {
@@ -169,7 +190,9 @@ export function repointAgent(deps: RepointDeps): RepointResult {
 /** One line for the person, or null when there is nothing to say. */
 export function repointLine(result: RepointResult, version: string): string | null {
   if (result.action === "repointed")
-    return `catalyst: the runner update agent now runs ${result.to} (${version}) instead of ${result.from} (${result.fromVersion ?? "missing"}).`;
+    return `catalyst: the runner update agent now runs ${result.to} (${version}) instead of ${result.from} (${result.fromVersion ?? "missing"}). The previous agent file is kept at ${result.backup}.`;
+  if (result.action === "skipped" && result.reason === "agent_not_writable")
+    return `catalyst: the runner update agent at ${result.agent} runs an older catalyst, and this install cannot change it. Ask whoever installed it to run: catalyst runner auto-update on`;
   if (result.action === "failed")
     return `catalyst: could not point the runner update agent at this install (${result.detail}). Run: catalyst runner auto-update on`;
   return null;
