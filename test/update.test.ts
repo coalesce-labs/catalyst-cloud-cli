@@ -166,6 +166,22 @@ describe("one applying release check moves the CLI, the Cloud pack and then the 
     expect(lines.find((l) => l.startsWith("Local replica"))).toContain("updated");
   });
 
+  it("an applying check reports the previous runner update's outcome on its one release read; a check reports none (CTC-6999)", async () => {
+    const { home, dir, ctx, options, engine } = hostCase();
+    signIn(home);
+    writeFileSync(join(dir, "release-state.json"), JSON.stringify({
+      version: 1, generation: 88, releaseId: "hr-88", appliedAtMs: 1, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
+      last: { atMs: 1_800_000_000_000, outcome: "waiting_window", detail: "next_window:2026-10-24T16:00:00.000Z", generation: 89 },
+    }));
+    const reports: Array<string | undefined> = [];
+    const recording: RunnerUpdateEngine = { ...engine, desiredRelease: async (d, signal, report) => (reports.push(report), engine.desiredRelease(d, signal, report)) };
+    await runUpdate(ctx, options("check", { engine: () => recording }));
+    expect(reports).toEqual([undefined]);
+    await runUpdate(ctx, options("apply", { engine: () => recording }));
+    expect(reports).toHaveLength(2);
+    expect(JSON.parse(reports[1] ?? "")).toMatchObject({ v: 1, outcome: "waiting_window", applied: 88, offered: 89 });
+  });
+
   it("a running writer that recorded no version is older than any approved CLI, so it is restarted with the move", async () => {
     const { home, ctx, options, replicaCalls } = hostCase();
     signIn(home);

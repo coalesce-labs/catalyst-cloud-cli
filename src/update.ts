@@ -22,7 +22,7 @@ import {
   type ApprovedRead,
   type ApprovedRelease,
 } from "./approved-release.js";
-import { loadConfig, type Ctx } from "./config.js";
+import { loadConfig, readManifest, type Ctx } from "./config.js";
 import { applyCliUpdate, type CliApplyResult } from "./update-cli.js";
 import { readInventory, type Inventory } from "./update-inventory.js";
 import { restartPending, restartReplica, type ReplicaRestartResult } from "./update-replica.js";
@@ -45,8 +45,10 @@ import {
   decideRelease,
   isRecord,
   parseDesiredRelease,
+  readReleaseState,
   RELEASE_COMPONENTS,
   runRunnerUpdate,
+  updateReport,
   type DesiredRelease,
   type DesiredReleaseRead,
   type ReleaseComponent,
@@ -168,18 +170,20 @@ export function readEffectivePolicy(ctx: Ctx): UpdatePolicy {
   return withMigratedHolds(readUpdatePolicy(ctx.home), dailyUpdateOff(ctx));
 }
 
-/** An engine whose desired-release read happens once per pass, however many readers ask. */
-export function sharedReleaseRead(engine: RunnerUpdateEngine): RunnerUpdateEngine & { read(dir: string): Promise<DesiredReleaseRead> } {
+/** An engine whose desired-release read happens once per pass, however many readers ask. The first
+ *  reader's update report rides that one read, so the cloud hears the previous run's outcome
+ *  (CTC-6999: the report was dropped here, and no scheduled run ever sent one). */
+export function sharedReleaseRead(engine: RunnerUpdateEngine): RunnerUpdateEngine & { read(dir: string, report?: string): Promise<DesiredReleaseRead> } {
   const reads = new Map<string, Promise<DesiredReleaseRead>>();
-  const read = (dir: string, signal?: AbortSignal) => {
+  const read = (dir: string, signal?: AbortSignal, report?: string) => {
     let pending = reads.get(dir);
     if (!pending) {
-      pending = engine.desiredRelease(dir, signal);
+      pending = engine.desiredRelease(dir, signal, report);
       reads.set(dir, pending);
     }
     return pending;
   };
-  return { ...engine, desiredRelease: read, read: (dir) => read(dir) };
+  return { ...engine, desiredRelease: read, read: (dir, report) => read(dir, undefined, report) };
 }
 
 function imageApproval(read: DesiredReleaseRead): { release: DesiredRelease | null; reason: string } {
@@ -384,7 +388,8 @@ export async function runUpdate(ctx: Ctx, options: UpdateOptions): Promise<Updat
   let images: { release: DesiredRelease | null; reason: string } | null = null;
   if (inventory.images.installed) {
     engine = sharedReleaseRead(options.engine());
-    const read = await engine.read(options.imagesDir);
+    // An apply reports the previous run's outcome on its read, as `runner update` does; a check never does.
+    const read = await engine.read(options.imagesDir, options.mode === "apply" ? updateReport(readReleaseState(options.imagesDir), readManifest().version) : undefined);
     images = imageApproval(read);
     approval = hostApproval(read);
     // The runner's own read failed (Docker stopped, say): a signed-in CLI can still ask the member
