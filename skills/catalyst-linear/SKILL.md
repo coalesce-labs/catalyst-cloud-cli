@@ -30,6 +30,7 @@ Exit codes: 0 done, 1 not found or a usage error, 2 this machine is not connecte
 | "what did Catalyst write on this ticket?", a comment shape, a label, the marker, the 👀 | `references/what-a-ticket-accumulates.md` |
 | before any read you will report on; "is this current?"; citing; searching | `references/reading-a-ticket.md` |
 | before any comment, move, label or new ticket; identity, budget, slots, ids | `references/writing-to-linear.md` |
+| proposing work-type or component labels for creation, triage or backfill | `references/ticket-classification.md`; then the project's `.agents/references/ticket-labels.json` if present |
 | which command answers a ticket question from the cloud: stage, last phase, PR, what changed | `references/reading-from-the-cloud.md` |
 | local SQL, only when `catalyst replica status --json` reports `configured: true` | `references/local-replica.md` |
 
