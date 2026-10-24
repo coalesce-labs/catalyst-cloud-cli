@@ -145,8 +145,7 @@ export type ApprovalUnavailable =
   | "credential_refused"
   | "unreachable"
   | "not_provided"
-  | "response_invalid"
-  | "envelope_mismatch";
+  | "response_invalid";
 
 export type ApprovedRead =
   | { kind: "approved"; release: ApprovedRelease; source: "network" | "host" }
@@ -176,8 +175,9 @@ export async function readMemberApproval(ctx: Ctx): Promise<ApprovedRead> {
 }
 
 /** The component record a host's desired-release answer carries, from the same read the image
- *  update used. A legacy answer with images only reads `not_provided`; a record whose generation is
- *  not the image generation reads `envelope_mismatch`, so the two halves never mix snapshots. */
+ *  update used, so the two halves are one snapshot. A legacy answer with images only reads
+ *  `not_provided`. The record's generation counts component approvals and the answer's counts host
+ *  releases: two ledgers, so the numbers differ and are never compared (CTC-6890). */
 export function hostApproval(read: DesiredReleaseRead): ApprovedRead {
   if (read.kind === "no_credential") return { kind: "unavailable", reason: "host_unreadable" };
   if (read.kind === "unreachable") return { kind: "unavailable", reason: "unreachable" };
@@ -190,7 +190,6 @@ export function hostApproval(read: DesiredReleaseRead): ApprovedRead {
   if (release.components === undefined) return { kind: "unavailable", reason: "not_provided" };
   const parsed = parseApprovedRelease(release.components);
   if (!parsed.ok) return { kind: "unavailable", reason: parsed.reason };
-  if (parsed.release.generation !== release.generation) return { kind: "unavailable", reason: "envelope_mismatch" };
   return { kind: "approved", release: parsed.release, source: "host" };
 }
 

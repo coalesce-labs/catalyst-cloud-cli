@@ -27,12 +27,13 @@ export const TRAIN = `${major}.${minor}`;
 export const NEXT = `${major}.${minor}.${patch + 2}`;
 export const OLD = `${major}.${minor}.${Math.max(0, patch - 3)}`;
 
-/** The approved component record (`schemaVersion: 1`), as the member route and the host envelope carry it. */
+/** The approved component record (`schemaVersion: 1`), as the member route and the host envelope carry it.
+ *  Its generation (3) differs from the host answer's (89) as in production: separate ledgers (CTC-6890). */
 export function approved(over: { generation?: number; mutate?: (r: Record<string, unknown>) => void } = {}): Record<string, unknown> {
   const body: Record<string, unknown> = {
     schemaVersion: 1,
-    approvalId: `example-${over.generation ?? 89}`,
-    generation: over.generation ?? 89,
+    approvalId: `example-${over.generation ?? 3}`,
+    generation: over.generation ?? 3,
     approvedAtMs: 1_792_755_646_000,
     releaseLine: TRAIN,
     members: {
