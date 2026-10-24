@@ -19,6 +19,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  rmSync,
   statSync,
   symlinkSync,
   unlinkSync,
@@ -44,6 +45,7 @@ import {
   findBlocks,
   installCodexAgent,
   removeCodexAttribution,
+  RC_BACKUP_SUFFIX,
   setupCodexAttribution,
   withoutAppliedAttributes,
   type CodexAttributionDeps,
@@ -1217,4 +1219,169 @@ describe("Scenario: Which setup runs add the hooks", () => {
       expect([...ctx.out, ...ctx.err]).toEqual([]);
     },
   );
+});
+
+describe("Scenario: An existing install turns on Codex attribution alone (CTC-6993)", () => {
+  const backup = () => `${zshrc()}${RC_BACKUP_SUFFIX}`;
+  const plist = () =>
+    codexAgentPlist({ cli: CLI, path: "/opt/catalyst/bin:/usr/bin:/bin", home });
+  const only = (ctx: TestCtx, d: CodexAttributionDeps, ...flags: string[]) =>
+    main(["setup", "--only", "codex-attribution", ...flags], ctx, { codexAttribution: d });
+
+  test("it adds the hooks and runs no other setup step", async () => {
+    writeFileSync(zshrc(), "export A=1\n");
+    const f = fakeLaunchctl();
+    const ctx = ctxWith();
+    expect(await only(ctx, deps(f.run))).toBe(0);
+    expect(readFileSync(zshrc(), "utf8")).toBe(`export A=1\n${codexBlock()}`);
+    expect(readFileSync(codexAgentPlistPath(home), "utf8")).toBe(plist());
+    expect(f.loaded).toBe(true);
+    expect(ctx.out).toEqual([
+      "Codex launches from a terminal name their coding account: the codex function is in ~/.zshrc (added). The file as it was is kept at ~/.zshrc.before-codex-attribution.",
+      `Codex launches from the Dock name their coding account: the ${CODEX_ATTRIBUTION_LABEL} LaunchAgent is loaded. A Codex app that is already open picks this up the next time it starts.`,
+    ]);
+    expect(ctx.err).toEqual([]);
+    // No onboarding step ran: nothing reached the network.
+    expect(fetches).toBe(0);
+  });
+
+  test("it keeps a byte-for-byte copy of the rc file, with its mode, and names it", async () => {
+    const original = Buffer.from("export A=1\r\nalias ll='ls -l' # caf\xe9\r\n", "latin1");
+    writeFileSync(zshrc(), original, { mode: 0o600 });
+    const ctx = ctxWith();
+    expect(await only(ctx, linux())).toBe(0);
+    expect(bytes(backup()).equals(original)).toBe(true);
+    expect(statSync(backup()).mode & 0o777).toBe(0o600);
+    expect(ctx.out.join("\n")).toContain("kept at ~/.zshrc.before-codex-attribution");
+  });
+
+  test("an earlier copy is never overwritten, so it stays what the file was before any hook", async () => {
+    writeFileSync(zshrc(), "export A=1\n");
+    expect(await only(ctxWith(), linux())).toBe(0);
+    // A hook from an older release: same markers, different body.
+    writeFileSync(zshrc(), `export A=1\n${BLOCK_BEGIN}\nold body\n${BLOCK_END}\n`);
+    const ctx = ctxWith();
+    expect(await only(ctx, linux())).toBe(0);
+    expect(readFileSync(zshrc(), "utf8")).toBe(`export A=1\n${codexBlock()}`);
+    expect(readFileSync(backup(), "utf8")).toBe("export A=1\n");
+    expect(ctx.out).toEqual([
+      "Codex launches from a terminal name their coding account: the codex function is in ~/.zshrc (replaced). An earlier copy of the file is kept at ~/.zshrc.before-codex-attribution.",
+    ]);
+  });
+
+  test("--dry-run prints exactly the block and the LaunchAgent file it would write, and changes nothing", async () => {
+    writeFileSync(zshrc(), "export A=1\n");
+    const f = fakeLaunchctl();
+    const ctx = ctxWith();
+    expect(await only(ctx, deps(f.run), "--dry-run")).toBe(0);
+    expect(ctx.out).toEqual([
+      "Would add this block in ~/.zshrc, after keeping a copy of the file as ~/.zshrc.before-codex-attribution:",
+      ...codexBlock().replace(/\n$/, "").split("\n"),
+      `Would write ~/Library/LaunchAgents/${CODEX_ATTRIBUTION_LABEL}.plist and load it:`,
+      ...plist().replace(/\n$/, "").split("\n"),
+      "Dry run: nothing was changed.",
+    ]);
+    expect(readFileSync(zshrc(), "utf8")).toBe("export A=1\n");
+    expect(existsSync(backup())).toBe(false);
+    expect(existsSync(codexAgentPlistPath(home))).toBe(false);
+    // The only launchctl call is the read-only check of whether the agent is loaded.
+    expect(f.calls).toEqual([`launchctl print gui/501/${CODEX_ATTRIBUTION_LABEL}`]);
+  });
+
+  test("--dry-run for a file setup would create prints the block it would create it with", async () => {
+    const ctx = ctxWith();
+    expect(await only(ctx, linux(), "--dry-run")).toBe(0);
+    expect(ctx.out).toEqual([
+      "Would create ~/.zshrc with this block:",
+      ...codexBlock({ created: true }).replace(/\n$/, "").split("\n"),
+      "Dry run: nothing was changed.",
+    ]);
+    expect(existsSync(zshrc())).toBe(false);
+  });
+
+  test("a second run is byte-identical and says unchanged", async () => {
+    writeFileSync(zshrc(), "export A=1\n");
+    const f = fakeLaunchctl();
+    expect(await only(ctxWith(), deps(f.run))).toBe(0);
+    const rc = bytes(zshrc());
+    const copy = bytes(backup());
+    const agentFile = bytes(codexAgentPlistPath(home));
+    const second = ctxWith();
+    expect(await only(second, deps(f.run))).toBe(0);
+    expect(bytes(zshrc()).equals(rc)).toBe(true);
+    expect(bytes(backup()).equals(copy)).toBe(true);
+    expect(bytes(codexAgentPlistPath(home)).equals(agentFile)).toBe(true);
+    expect(second.out).toEqual([
+      "~/.zshrc already has the Codex launch hook (unchanged).",
+      `The ${CODEX_ATTRIBUTION_LABEL} LaunchAgent is loaded and unchanged.`,
+    ]);
+  });
+
+  test("a copy that cannot be written leaves the rc file as it was and fails the run", async () => {
+    writeFileSync(zshrc(), "export A=1\n");
+    const ctx = ctxWith();
+    const failing = deps(fakeLaunchctl().run, {
+      platform: "linux",
+      files: {
+        writeFile: (path, data, options) => {
+          if (path.includes(RC_BACKUP_SUFFIX)) throw new Error("disk full");
+          writeFileSync(path, data, options);
+        },
+      },
+    });
+    expect(await only(ctx, failing)).toBe(1);
+    expect(readFileSync(zshrc(), "utf8")).toBe("export A=1\n");
+    expect(ctx.out).toEqual([
+      "Left ~/.zshrc without the Codex launch hook: it could not be written (disk full).",
+    ]);
+  });
+
+  test("--json prints one document with the files, the copies and the agent", async () => {
+    writeFileSync(zshrc(), "export A=1\n");
+    const ctx = ctxWith();
+    expect(await only(ctx, linux(), "--json")).toBe(0);
+    expect(ctx.out).toHaveLength(1);
+    expect(JSON.parse(ctx.out[0] ?? "")).toEqual({
+      ok: true,
+      dryRun: false,
+      files: [{ path: zshrc(), state: "added" }],
+      backups: [{ path: zshrc(), backup: backup(), kept: "new" }],
+      agent: { state: "not_macos" },
+    });
+  });
+
+  test("with Codex not on this computer it says so and writes nothing", async () => {
+    rmSync(join(home, "Applications", "Codex.app"), { recursive: true });
+    writeFileSync(zshrc(), "export A=1\n");
+    const ctx = ctxWith({ SHELL: "/bin/zsh", PATH: "/nowhere" });
+    expect(await only(ctx, linux())).toBe(0);
+    expect(ctx.out).toEqual([CODEX_ABSENT_LINE]);
+    expect(readFileSync(zshrc(), "utf8")).toBe("export A=1\n");
+  });
+
+  test("on a Mac with Codex not installed the agent is reported absent, not as a non-Mac, and launchctl is never called", async () => {
+    rmSync(join(home, "Applications", "Codex.app"), { recursive: true });
+    const f = fakeLaunchctl();
+    const ctx = ctxWith({ SHELL: "/bin/zsh", PATH: "/nowhere" });
+    expect(await only(ctx, deps(f.run), "--json")).toBe(0);
+    expect(JSON.parse(ctx.out[0] ?? "").agent).toEqual({ state: "codex_absent" });
+    expect(f.calls).toEqual([]);
+    expect(existsSync(codexAgentPlistPath(home))).toBe(false);
+  });
+
+  test("under a HOME that is not this account's own it changes nothing and fails", async () => {
+    writeFileSync(zshrc(), "export A=1\n");
+    const ctx = ctxWith();
+    expect(await only(ctx, { ...linux(), realHome: () => "/elsewhere" })).toBe(1);
+    expect(readFileSync(zshrc(), "utf8")).toBe("export A=1\n");
+    expect(ctx.out.join("\n")).toContain("is not this account's home folder");
+  });
+
+  test("--no-shell-hook with it is refused before anything changes", async () => {
+    writeFileSync(zshrc(), "export A=1\n");
+    const ctx = ctxWith();
+    expect(await only(ctx, linux(), "--no-shell-hook")).toBe(1);
+    expect(ctx.err.join("\n")).toContain("--only codex-attribution adds the Codex launch hooks");
+    expect(readFileSync(zshrc(), "utf8")).toBe("export A=1\n");
+  });
 });

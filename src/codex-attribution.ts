@@ -348,46 +348,61 @@ export type RcOutcome =
 const message = (err: unknown) =>
   err instanceof Error ? err.message : String(err);
 
-/** One file: add the block, replace it in place (a second copy is dropped), or leave the file alone.
- *  Null when the file does not exist and setup has no reason to create it. */
-export function installShellHook(
-  file: RcFile,
-  home: string,
-  ops: FileOps = defaultFileOps,
-): RcOutcome | null {
+/** What installing the block would do to one file, computed without writing: the outcome, and for a
+ *  change the exact bytes, where they go and the block they carry. Null when the file does not exist
+ *  and setup has no reason to create it. */
+export interface ShellHookPlan {
+  outcome: RcOutcome;
+  write?: {
+    target: string;
+    data: Buffer;
+    mode: number;
+    block: string;
+    /** The file was there before, so a change replaces bytes someone may want back. */
+    existed: boolean;
+  };
+}
+
+export function planShellHook(file: RcFile, home: string): ShellHookPlan | null {
   const where = rcTarget(file.path, home);
   if (where.kind === "skip")
-    return { path: file.path, state: "skipped", why: where.why };
+    return { outcome: { path: file.path, state: "skipped", why: where.why } };
   if (where.kind === "missing") {
     if (!file.wanted) return null;
-    writeRcAtomic(file.path, codexBlock({ created: true }), 0o644, ops);
-    return { path: file.path, state: "added" };
+    const block = codexBlock({ created: true });
+    return {
+      outcome: { path: file.path, state: "added" },
+      write: { target: file.path, data: Buffer.from(block, "latin1"), mode: 0o644, block, existed: false },
+    };
   }
   const before = readFileSync(where.target, "latin1");
   const blocks = findBlocks(before);
   if (blocks === "malformed")
     return {
-      path: file.path,
-      state: "skipped",
-      why: `it has a "${BLOCK_BEGIN}" or "${BLOCK_END}" line without its partner; fix or delete that line, then run catalyst setup again`,
+      outcome: {
+        path: file.path,
+        state: "skipped",
+        why: `it has a "${BLOCK_BEGIN}" or "${BLOCK_END}" line without its partner; fix or delete that line, then run catalyst setup again`,
+      },
     };
   if (definesCodex(outsideBlocks(before, blocks)))
     return {
-      path: file.path,
-      state: "skipped",
-      why: "it already defines codex itself, as a function or an alias. To use the hook, remove that definition and run catalyst setup again",
+      outcome: {
+        path: file.path,
+        state: "skipped",
+        why: "it already defines codex itself, as a function or an alias. To use the hook, remove that definition and run catalyst setup again",
+      },
     };
   let after: string;
+  let block: string;
   const first = blocks[0];
   if (first === undefined) {
-    after =
-      before === "" || before.endsWith("\n")
-        ? before + codexBlock()
-        : `${before}\n${codexBlock({ newlineAdded: true })}`;
+    const appended = before === "" || before.endsWith("\n");
+    block = codexBlock(appended ? {} : { newlineAdded: true });
+    after = appended ? before + block : `${before}\n${block}`;
   } else {
-    after =
-      before.slice(0, first.start) +
-      codexBlock({ created: first.created, newlineAdded: first.newlineAdded });
+    block = codexBlock({ created: first.created, newlineAdded: first.newlineAdded });
+    after = before.slice(0, first.start) + block;
     let cursor = first.end;
     for (const b of blocks.slice(1)) {
       after += before.slice(cursor, b.start);
@@ -395,9 +410,24 @@ export function installShellHook(
     }
     after += before.slice(cursor);
   }
-  if (after === before) return { path: file.path, state: "unchanged" };
-  writeRcAtomic(where.target, Buffer.from(after, "latin1"), where.mode, ops);
-  return { path: file.path, state: first === undefined ? "added" : "replaced" };
+  if (after === before) return { outcome: { path: file.path, state: "unchanged" } };
+  return {
+    outcome: { path: file.path, state: first === undefined ? "added" : "replaced" },
+    write: { target: where.target, data: Buffer.from(after, "latin1"), mode: where.mode, block, existed: true },
+  };
+}
+
+/** One file: add the block, replace it in place (a second copy is dropped), or leave the file alone.
+ *  Null when the file does not exist and setup has no reason to create it. */
+export function installShellHook(
+  file: RcFile,
+  home: string,
+  ops: FileOps = defaultFileOps,
+): RcOutcome | null {
+  const plan = planShellHook(file, home);
+  if (plan === null) return null;
+  if (plan.write) writeRcAtomic(plan.write.target, plan.write.data, plan.write.mode, ops);
+  return plan.outcome;
 }
 
 /** One file: take every block out. Null when the file has none. */
@@ -813,8 +843,151 @@ export function setupCodexAttribution(
   return lines;
 }
 
+/** The copy `--only codex-attribution` keeps of an rc file before it first changes it. */
+export const RC_BACKUP_SUFFIX = ".before-codex-attribution";
+
+export interface CodexAttributionOnly {
+  ok: boolean;
+  dryRun: boolean;
+  files: RcOutcome[];
+  /** Each copy kept beside the file it was taken from, and whether this run made it. */
+  backups: { path: string; backup: string; kept: "new" | "earlier" }[];
+  agent: AgentOutcome | { state: "would_load"; path: string } | { state: "codex_absent" };
+  lines: string[];
+}
+
+/** `catalyst setup --only codex-attribution`: the hooks setup adds after a full run, and nothing else.
+ *  Before it first changes an existing rc file it keeps a byte-for-byte copy beside it, and an earlier
+ *  copy is never overwritten, so the copy is what the file was before any hook. `dryRun` writes
+ *  nothing and prints the exact block each file would get and the exact agent file. */
+export function onlyCodexAttribution(
+  ctx: Ctx,
+  deps: CodexAttributionDeps = {},
+  options: { dryRun?: boolean } = {},
+): CodexAttributionOnly {
+  const dryRun = options.dryRun === true;
+  const result: CodexAttributionOnly = {
+    ok: true,
+    dryRun,
+    files: [],
+    backups: [],
+    agent: { state: "other_home" },
+    lines: [],
+  };
+  if (!ownsHome(ctx.home, deps)) {
+    result.ok = false;
+    result.lines.push(
+      `HOME (${ctx.home}) is not this account's home folder, so the Codex launch hooks were left alone. Run it as the account that uses Codex.`,
+    );
+    return result;
+  }
+  if (codexPresence(ctx, deps) === null) {
+    result.agent = { state: "codex_absent" };
+    result.lines.push(CODEX_ABSENT_LINE);
+    return result;
+  }
+  const ops = fileOps(deps);
+  const verb = { added: "add", replaced: "replace" } as const;
+  for (const file of shellRcFiles(ctx)) {
+    let plan: ShellHookPlan | null;
+    try {
+      plan = planShellHook(file, ctx.home);
+    } catch (err) {
+      plan = { outcome: { path: file.path, state: "skipped", why: `it could not be read (${message(err)})` } };
+    }
+    if (plan === null) continue;
+    const name = tilde(file.path, ctx.home);
+    const write = plan.write;
+    if (write === undefined) {
+      result.files.push(plan.outcome);
+      if (plan.outcome.state === "unchanged")
+        result.lines.push(`${name} already has the Codex launch hook (unchanged).`);
+      else if (plan.outcome.state === "skipped")
+        result.lines.push(`Left ${name} without the Codex launch hook: ${plan.outcome.why}.`);
+      continue;
+    }
+    const state = plan.outcome.state === "replaced" ? "replaced" : "added";
+    const backup = `${write.target}${RC_BACKUP_SUFFIX}`;
+    if (dryRun) {
+      result.files.push(plan.outcome);
+      result.lines.push(
+        write.existed
+          ? `Would ${verb[state]} this block in ${name}, after keeping a copy of the file as ${tilde(backup, ctx.home)}${existsSync(backup) ? " (an earlier copy is already there and would be kept)" : ""}:`
+          : `Would create ${name} with this block:`,
+        ...write.block.replace(/\n$/, "").split("\n"),
+      );
+      continue;
+    }
+    try {
+      if (write.existed) {
+        if (existsSync(backup)) result.backups.push({ path: write.target, backup, kept: "earlier" });
+        else {
+          writeRcAtomic(backup, readFileSync(write.target), write.mode, ops);
+          result.backups.push({ path: write.target, backup, kept: "new" });
+        }
+      }
+      writeRcAtomic(write.target, write.data, write.mode, ops);
+    } catch (err) {
+      result.ok = false;
+      const outcome: RcOutcome = { path: file.path, state: "skipped", why: `it could not be written (${message(err)})` };
+      result.files.push(outcome);
+      result.lines.push(`Left ${name} without the Codex launch hook: ${outcome.why}.`);
+      continue;
+    }
+    result.files.push(plan.outcome);
+    const kept = result.backups.find((b) => b.path === write.target);
+    result.lines.push(
+      `Codex launches from a terminal name their coding account: the codex function is in ${name} (${state}).` +
+        (kept === undefined
+          ? ""
+          : kept.kept === "new"
+            ? ` The file as it was is kept at ${tilde(kept.backup, ctx.home)}.`
+            : ` An earlier copy of the file is kept at ${tilde(kept.backup, ctx.home)}.`),
+    );
+  }
+  if (result.files.length === 0)
+    result.lines.push(
+      "No shell rc file got the Codex launch hook: there is no ~/.zshrc or ~/.bashrc, and your login shell is neither zsh nor bash.",
+    );
+  const d = resolved(ctx, deps);
+  if (d.platform !== "darwin") {
+    result.agent = { state: "not_macos" };
+    if (dryRun) result.lines.push("Dry run: nothing was changed.");
+    return result;
+  }
+  if (dryRun) {
+    const path = codexAgentPlistPath(ctx.home);
+    const text = codexAgentPlist({ cli: d.cli, path: d.path, home: ctx.home });
+    const loaded = d.run("launchctl", ["print", `gui/${d.uid}/${CODEX_ATTRIBUTION_LABEL}`]).status === 0;
+    if (readOr(path) === text && loaded) {
+      result.agent = { state: "unchanged", path };
+      result.lines.push(`The ${CODEX_ATTRIBUTION_LABEL} LaunchAgent is loaded and unchanged.`);
+    } else {
+      result.agent = { state: "would_load", path };
+      result.lines.push(`Would write ${tilde(path, ctx.home)} and load it:`, ...text.replace(/\n$/, "").split("\n"));
+    }
+    result.lines.push("Dry run: nothing was changed.");
+    return result;
+  }
+  const agent = installCodexAgent(ctx, deps);
+  result.agent = agent;
+  if (agent.state === "loaded")
+    result.lines.push(
+      `Codex launches from the Dock name their coding account: the ${CODEX_ATTRIBUTION_LABEL} LaunchAgent is loaded. A Codex app that is already open picks this up the next time it starts.`,
+    );
+  else if (agent.state === "unchanged")
+    result.lines.push(`The ${CODEX_ATTRIBUTION_LABEL} LaunchAgent is loaded and unchanged.`);
+  else if (agent.state === "failed") {
+    result.ok = false;
+    result.lines.push(
+      `Setup could not load the ${CODEX_ATTRIBUTION_LABEL} LaunchAgent (${agent.detail}), so apps started from the Dock do not name their coding account. Run catalyst setup --only codex-attribution again in Terminal on this Mac's desktop.`,
+    );
+  }
+  return result;
+}
+
 /** What a full setup run adds after its steps, done or waiting. A dry run, a run scoped with
- *  --only and --no-shell-hook add nothing. With --json the lines go to stderr, so stdout keeps its one
+ *  --only and --no-shell-hook add nothing (`--only codex-attribution` is its own path, above). With --json the lines go to stderr, so stdout keeps its one
  *  document. */
 export function codexAttributionAfterSetup(
   args: ParsedArgs,
