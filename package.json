@@ -39,6 +39,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "prepare": "tsc -p tsconfig.build.json",
+    "postinstall": "node bin/postinstall.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "version:sync": "node scripts/sync-plugin-version.mjs",
