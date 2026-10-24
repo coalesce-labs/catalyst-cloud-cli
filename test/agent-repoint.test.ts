@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cliVersionAt, repointAgent, repointLine } from "../src/agent-repoint.js";
+import { cliVersionAt, postinstallRepoint, repointAgent, repointLine, type RepointDeps } from "../src/agent-repoint.js";
 import { launchAgentPath, launchAgentPlist, systemdUnitPaths, systemdUnits, type SchedulerRun } from "../src/runner-auto-update.js";
 
 let root: string;
@@ -46,8 +46,15 @@ function writeAgent(cli: string, platform: "darwin" | "linux" = "darwin"): strin
   return paths.service;
 }
 
-const repoint = (self: string, version: string, platform: NodeJS.Platform = "darwin", run: SchedulerRun = ok, canWrite?: (path: string) => boolean) =>
-  repointAgent({ platform, home, uid: 501, self, version, nodeExecutable: "/usr/local/node/bin/node", env: { PATH: "/usr/bin:/bin" }, run, canWrite });
+const repoint = (
+  self: string,
+  version: string,
+  platform: NodeJS.Platform = "darwin",
+  run: SchedulerRun = ok,
+  canWrite?: (path: string) => boolean,
+  extra: Partial<RepointDeps> = {},
+) =>
+  repointAgent({ platform, home, uid: 501, self, version, nodeExecutable: "/usr/local/node/bin/node", env: { PATH: "/usr/bin:/bin" }, run, canWrite, ...extra });
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "agent-repoint-"));
@@ -180,9 +187,145 @@ describe("repointAgent", () => {
       calls.push([cmd, ...args]);
       return args[0] === "bootstrap" ? { status: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error" } : { status: 1, stdout: "", stderr: "" };
     };
+    const plist = launchAgentPath(home);
+    const before = readFileSync(plist, "utf8");
     const result = repoint(self, "0.16.35", "darwin", refuse);
     expect(result).toEqual({ action: "failed", detail: "launchctl_bootstrap_failed:Bootstrap failed: 5: Input/output error" });
     expect(repointLine(result, "0.16.35")).toContain("Run: catalyst runner auto-update on");
+    // The agent goes back exactly as it was, is loaded again, and no backup is left behind.
+    expect(readFileSync(plist, "utf8")).toBe(before);
+    expect(calls.filter((c) => c[1] === "bootstrap")).toEqual([
+      ["launchctl", "bootstrap", "gui/501", plist],
+      ["launchctl", "bootstrap", "gui/501", plist],
+    ]);
+    expect(existsSync(`${plist}.before-0.16.35`)).toBe(false);
+  });
+
+  it("a scheduler that throws mid-reload still restores the agent and reports a failure", () => {
+    const stale = install("brew", "0.16.31");
+    const self = install("node", "0.16.35");
+    const plist = writeAgent(stale);
+    const before = readFileSync(plist, "utf8");
+    const boom: SchedulerRun = (cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (args[0] === "bootstrap") throw new Error("spawn launchctl EAGAIN");
+      return { status: 1, stdout: "", stderr: "" };
+    };
+    expect(repoint(self, "0.16.35", "darwin", boom)).toEqual({ action: "failed", detail: "spawn launchctl EAGAIN" });
+    expect(readFileSync(plist, "utf8")).toBe(before);
+    expect(existsSync(`${plist}.before-0.16.35`)).toBe(false);
+  });
+
+  it("NEGATIVE: with no systemd user manager the unit is untouched and no backup is left", () => {
+    const stale = install("old", "0.16.20");
+    const self = install("node", "0.16.35");
+    const service = writeAgent(stale, "linux");
+    const before = readFileSync(service, "utf8");
+    const noManager: SchedulerRun = (cmd, args) => {
+      calls.push([cmd, ...args]);
+      return { status: 1, stdout: "", stderr: "Failed to connect to bus" };
+    };
+    expect(repoint(self, "0.16.35", "linux", noManager)).toEqual({ action: "failed", detail: "no_systemd_user_manager" });
+    expect(readFileSync(service, "utf8")).toBe(before);
+    expect(existsSync(`${service}.before-0.16.35`)).toBe(false);
+  });
+});
+
+describe("a running macOS agent is never cut off", () => {
+  const busyFor = (polls: number): SchedulerRun => {
+    let seen = 0;
+    return (cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (args[0] === "print") return { status: 0, stdout: seen++ < polls ? "gui/501/x = {\n\tstate = running\n\t\tstate = active\n}" : "gui/501/x = {\n\tstate = not running\n}", stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    };
+  };
+
+  it("waits for an update in progress to finish, then repoints", () => {
+    const stale = install("brew", "0.16.31");
+    const self = install("node", "0.16.35");
+    writeAgent(stale);
+    const slept: number[] = [];
+    const result = repoint(self, "0.16.35", "darwin", busyFor(2), undefined, { sleep: (ms) => slept.push(ms), busyWaitMs: 60_000 });
+    expect(result).toMatchObject({ action: "repointed" });
+    expect(slept).toEqual([5_000, 5_000]);
+    // Three reads (running, running, idle) before anything stops the job.
+    const order = calls.map((c) => c[1]);
+    expect(order.slice(0, 3)).toEqual(["print", "print", "print"]);
+    expect(order.indexOf("bootout")).toBeGreaterThan(2);
+  });
+
+  it("NEGATIVE: an agent still running at the deadline is left exactly as it is", () => {
+    const stale = install("brew", "0.16.31");
+    const self = install("node", "0.16.35");
+    const plist = writeAgent(stale);
+    const before = readFileSync(plist, "utf8");
+    const slept: number[] = [];
+    const result = repoint(self, "0.16.35", "darwin", busyFor(1_000), undefined, { sleep: (ms) => slept.push(ms), busyWaitMs: 20_000 });
+    expect(result).toEqual({ action: "skipped", reason: "agent_busy" });
+    expect(slept).toHaveLength(4);
+    expect(readFileSync(plist, "utf8")).toBe(before);
+    expect(existsSync(`${plist}.before-0.16.35`)).toBe(false);
+    expect(calls.every((c) => c[1] === "print")).toBe(true);
+    expect(repointLine(result, "0.16.35")).toContain("busy updating");
+  });
+});
+
+describe("agent files", () => {
+  it("a plist with no PATH falls back to this install's PATH, and a recorded claude path is kept", () => {
+    const stale = install("brew", "0.16.31");
+    const self = install("node", "0.16.35");
+    const path = launchAgentPath(home);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      `<plist><dict><key>ProgramArguments</key><array><string>${stale}</string><string>runner</string><string>update</string><string>--auto</string><string>--dir</string><string>${dir}</string></array>` +
+        `<key>EnvironmentVariables</key><dict><key>CATALYST_CLAUDE_PATH</key><string>/opt/claude &amp; co/claude</string></dict></dict></plist>`,
+    );
+    expect(repoint(self, "0.16.35")).toMatchObject({ action: "repointed" });
+    const text = readFileSync(path, "utf8");
+    expect(text).toContain(`<string>${dirname(self)}:/usr/local/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>`);
+    expect(text).toContain("<key>CATALYST_CLAUDE_PATH</key><string>/opt/claude &amp; co/claude</string>");
+  });
+
+  it.each([
+    ["a relative program", (s: string) => ["catalyst", "runner", "update", "--auto", "--dir", s]],
+    ["another subcommand", (s: string) => ["/usr/bin/catalyst", "runner", "status", "--auto", "--dir", s]],
+    ["a relative directory", () => ["/usr/bin/catalyst", "runner", "update", "--auto", "--dir", "runner"]],
+    ["an extra word", (s: string) => ["/usr/bin/catalyst", "runner", "update", "--auto", "--dir", s, "--check"]],
+  ])("NEGATIVE: a unit naming %s is unrecognized", (_label, words) => {
+    const self = install("node", "0.16.35");
+    const { service } = systemdUnitPaths(home);
+    mkdirSync(dirname(service), { recursive: true });
+    writeFileSync(service, `[Service]\nExecStart=${words(dir).map((w) => `"${w}"`).join(" ")}\n`);
+    expect(repoint(self, "0.16.35", "linux")).toEqual({ action: "skipped", reason: "agent_unrecognized" });
+  });
+
+  it("NEGATIVE: a unit with no ExecStart is unrecognized", () => {
+    const self = install("node", "0.16.35");
+    const { service } = systemdUnitPaths(home);
+    mkdirSync(dirname(service), { recursive: true });
+    writeFileSync(service, "[Service]\nType=oneshot\n");
+    expect(repoint(self, "0.16.35", "linux")).toEqual({ action: "skipped", reason: "agent_unrecognized" });
+  });
+
+  it("an unreadable agent is a failure, never a throw", () => {
+    const self = install("node", "0.16.35");
+    mkdirSync(launchAgentPath(home), { recursive: true });
+    expect(repoint(self, "0.16.35")).toMatchObject({ action: "failed" });
+  });
+
+  it("quiet results print nothing", () => {
+    expect(repointLine({ action: "skipped", reason: "no_agent" }, "0.16.35")).toBeNull();
+  });
+});
+
+describe("postinstallRepoint", () => {
+  it("NEGATIVE: no HOME, or a HOME with no agent, prints nothing", () => {
+    expect(postinstallRepoint({})).toBeNull();
+    expect(postinstallRepoint({ HOME: home, npm_config_prefix: join(root, "nowhere") })).toBeNull();
+    const self = install("node", "0.16.35");
+    expect(postinstallRepoint({ HOME: home, npm_config_prefix: dirname(dirname(self)) })).toBeNull();
   });
 });
 
@@ -193,6 +336,13 @@ describe("cliVersionAt", () => {
   });
   it("NEGATIVE: a missing command or a foreign package has no version", () => {
     expect(cliVersionAt(join(root, "nothing"))).toBeNull();
+    const broken = install("broken", "0.16.31");
+    writeFileSync(join(root, "broken", "lib", "node_modules", "@catalyst-cloud", "cli", "package.json"), "{not json");
+    expect(cliVersionAt(broken)).toBeNull();
+    const deep = join(root, "a", "b", "c", "d", "e", "catalyst");
+    mkdirSync(dirname(deep), { recursive: true });
+    writeFileSync(deep, "");
+    expect(cliVersionAt(deep)).toBeNull();
     expect(cliVersionAt(install("x", "1.0.0", "left-pad"))).toBeNull();
   });
 });
