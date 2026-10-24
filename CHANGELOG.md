@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.35
+
+On a self-hosted machine set up before 0.16.33, the runner update agent kept running the CLI it was installed with, and that CLI could not update itself. The daily job installed newer versions into its own folder, but the agent never ran them. Installing this release globally (`npm install -g @catalyst-cloud/cli`) now points that agent at the newly installed copy. It only ever moves the agent to a newer catalyst, and keeps the agent's runner folder and PATH. It saves the previous agent file beside it, as `<file>.before-0.16.35`, so you can roll back. On a Mac it waits for an update already in progress to finish. An agent file you cannot change is left alone. Each outcome is written to the runner's `update.log`, and a failed attempt puts the agent back exactly as it was. The install itself never fails because of this. To turn it off, set `CATALYST_NO_AGENT_REPOINT=1`.
+
+`catalyst runner update --check` now says when the last update failed or was rolled back, with its time, its reason and the release it was offered, between the image result and the component report. The JSON output carries the same as `lastProblem`.
+
 ## 0.16.34
 
 `catalyst runner update` now tells Catalyst how its previous run went when it reads the approved release. A self-hosted machine that keeps waiting, refusing or rolling back an update shows up without anyone reading its local log. It sends a short report: the outcome, its reason code, the release it runs, the release that run was offered, when it ran and the CLI version. `--check` sends nothing, and nothing beyond that fixed set of words leaves the machine. When a self-hosted Mac cannot re-check its private storage during an update, the update log now names the reason instead of a generic failure.
