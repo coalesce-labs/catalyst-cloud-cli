@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -263,6 +263,17 @@ describe("catalyst runner update under another node than its custody's", () => {
     expect(await main(["runner", "update", "--dir", dir], ctx, { runner: { engine: engine(503), custody } })).toBe(0);
     expect(r.calls).toEqual([]);
     expect(ctx.out[0]).toBe("Kept the current images.");
+  });
+
+  it("NEGATIVE: a custody node that is a link to the running node counts as the same node", async () => {
+    const ctx = makeCtx(tempHome());
+    const dir = install();
+    const r = rerunner();
+    const link = join(mkdtempSync(join(tmpdir(), "custody-node-")), "node");
+    symlinkSync(process.execPath, link);
+    const custody = { platform: "darwin" as const, execPath: process.execPath, argv: ["/x", "runner", "update", "--dir", dir], node: () => link, run: r.run };
+    expect(await main(["runner", "update", "--dir", dir], ctx, { runner: { engine: engine(503), custody } })).toBe(0);
+    expect(r.calls).toEqual([]);
   });
 
   it("NEGATIVE: --check never re-runs, since it attests nothing", async () => {
