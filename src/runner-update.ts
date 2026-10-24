@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Ctx } from "./config.js";
 import { CliError } from "./errors.js";
 import { onboardStateRoot } from "./onboard.js";
+import { darwinThoughtsInstallRefusal } from "./onboard-runner-custody.js";
 import {
   dockerRunnerEngine,
   parseEnvText,
@@ -250,6 +251,9 @@ export interface ServiceState {
   startedAtMs: number;
 }
 
+/** A custody attestation: the authority it now holds, or the installer's fixed refusal reason (CTC-6914). */
+export type CustodyAttestation = { authority: string } | { refused: string };
+
 /** Everything the update touches outside its own files. The docker one is below; tests use fakes. */
 export interface RunnerUpdateEngine {
   desiredRelease(dir: string, signal?: AbortSignal): Promise<DesiredReleaseRead>;
@@ -257,8 +261,8 @@ export interface RunnerUpdateEngine {
   attemptContainers(dir: string, hostId: string, signal?: AbortSignal): Promise<number | null>;
   /** Pull and verify each image natively for this engine. Null when ready, else why not. */
   prepare(images: string[], signal?: AbortSignal): Promise<string | null>;
-  /** Attest Mac private thoughts storage on these images; returns the authority it holds, or null. */
-  custody(dir: string, images: Record<ReleaseComponent, string>, signal?: AbortSignal): Promise<string | null>;
+  /** Attest Mac private thoughts storage on these images: the authority it holds, or why it refused. */
+  custody(dir: string, images: Record<ReleaseComponent, string>, signal?: AbortSignal): Promise<CustodyAttestation>;
   /** The supervisor and watchdog containers, or null when Docker could not be read. */
   services(dir: string, signal?: AbortSignal): Promise<{ supervisor: ServiceState | null; watchdog: ServiceState | null } | null>;
   /** Stop the supervisor so it takes no new work. Phase containers are left running (re-adopted on start). */
@@ -415,15 +419,22 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   // Mac private thoughts storage records the supervisor image its helper runs. Every path that does
   // not end on the new release attests it back onto the images the machine keeps.
   const custodyInstalled = persistedCustody(dir, env) === "installed";
-  const restoreCustody = async (images: Images | null): Promise<boolean> =>
-    !custodyInstalled || images === null || (await engine.custody(dir, images, signal)) === env.CATALYST_THOUGHTS_CUSTODY_AUTHORITY;
+  // Null when storage holds the installed authority on these images, else why not. Re-attestation
+  // keeps the installed authority; a different one would need setup, not an update.
+  const attestCustody = async (images: Images): Promise<string | null> => {
+    const attested = await engine.custody(dir, images, signal);
+    if ("refused" in attested) return attested.refused;
+    return attested.authority === env.CATALYST_THOUGHTS_CUSTODY_AUTHORITY ? null : "authority_changed";
+  };
+  const restoreCustody = async (images: Images | null): Promise<string | null> =>
+    !custodyInstalled || images === null ? null : attestCustody(images);
   if (custodyInstalled) {
-    const authority = await engine.custody(dir, target, signal);
-    // Re-attestation keeps the installed authority. A different one would need setup, not an update.
-    if (authority === null || authority !== env.CATALYST_THOUGHTS_CUSTODY_AUTHORITY) {
-      const restored = await restoreCustody(rollbackImages ?? current);
-      return done(restored ? "retained" : "failed", restored ? "custody_reattest_failed" : "custody_restore_failed",
-        { ...tagged, exitCode: restored ? 0 : 1 });
+    const refused = await attestCustody(target);
+    if (refused !== null) {
+      const restoreRefused = await restoreCustody(rollbackImages ?? current);
+      return restoreRefused === null
+        ? done("retained", `custody_reattest_failed:${refused}`, tagged)
+        : done("failed", `custody_restore_failed:${restoreRefused}`, { ...tagged, exitCode: 1 });
     }
   }
 
@@ -462,10 +473,10 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   if (rollbackText === null || rollbackImages === null)
     return done("failed", "new_supervisor_not_ready_no_previous", { ...tagged, exitCode: 1 });
   writePrivateAtomic(envPath, rollbackText);
-  const custodyBack = await restoreCustody(rollbackImages);
+  const custodyRefused = await restoreCustody(rollbackImages);
   const restored = (await engine.composeUp(dir, signal)) && (await waitReady(engine, dir, rollbackImages, options, now));
-  return done(restored && custodyBack ? "rolled_back" : "failed",
-    !restored ? "rollback_not_ready" : custodyBack ? "new_supervisor_not_ready" : "custody_restore_failed",
+  return done(restored && custodyRefused === null ? "rolled_back" : "failed",
+    !restored ? "rollback_not_ready" : custodyRefused === null ? "new_supervisor_not_ready" : `custody_restore_failed:${custodyRefused}`,
     { ...tagged, exitCode: 1 });
 }
 
@@ -603,12 +614,13 @@ export function dockerRunnerUpdateEngine(
       return refused === null ? null : `${refused.reason}${refused.image ? `:${refused.image}` : ""}`;
     },
     async custody(dir, images, signal) {
-      if (!setup.nativeThoughtsCustody) return null;
+      if (!setup.nativeThoughtsCustody) return { refused: "capability_missing" };
       try {
         const result = await setup.nativeThoughtsCustody({ dir, supervisorImage: images.supervisor, runnerImage: images.runner }, signal);
-        return result.envAuthority;
-      } catch {
-        return null;
+        return { authority: result.envAuthority };
+      } catch (error) {
+        // Only the installer's fixed reasons are recorded; other exception text can carry credentials.
+        return { refused: darwinThoughtsInstallRefusal(error) ?? "unclassified" };
       }
     },
     async services(dir, signal) {

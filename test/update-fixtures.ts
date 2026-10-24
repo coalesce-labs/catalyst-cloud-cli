@@ -102,7 +102,7 @@ export function countingEngine(read: DesiredReleaseRead, running: Record<"superv
     desiredRelease: async () => (count("desiredRelease"), read),
     attemptContainers: async () => (count("attemptContainers"), 0),
     prepare: async () => (count("prepare"), null),
-    custody: async () => (count("custody"), null),
+    custody: async () => (count("custody"), { refused: "capability_missing" }),
     services: async () => {
       count("services");
       return live
