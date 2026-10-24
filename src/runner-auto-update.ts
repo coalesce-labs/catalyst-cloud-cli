@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CLAUDE_PATH_ENV } from "./update-plugin.js";
 
@@ -21,6 +21,9 @@ export interface AutoUpdateDeps {
   uid?: number;
   /** The `catalyst` executable the schedule runs. */
   cli: string;
+  /** The node the schedule runs `cli` under; null runs `cli` by its own `#!/usr/bin/env node` line.
+   *  Left out, macOS uses the node a thoughts custody was set up with, when there is one (CTC-7030). */
+  node?: string | null;
   /** PATH for the scheduled run: it must find docker and node. */
   path: string;
   /** The `claude` command found at setup, recorded so the scheduled run can move the Claude plugin (CTC-6791). */
@@ -65,8 +68,8 @@ export function systemdUnitPaths(home: string): { service: string; timer: string
   return { service: join(base, `${AUTO_UPDATE_UNIT}.service`), timer: join(base, `${AUTO_UPDATE_UNIT}.timer`) };
 }
 
-export function launchAgentPlist(deps: Pick<AutoUpdateDeps, "cli" | "path" | "home" | "claude">, dir: string): string {
-  const args = [deps.cli, "runner", "update", "--auto", "--dir", dir];
+export function launchAgentPlist(deps: Pick<AutoUpdateDeps, "cli" | "node" | "path" | "home" | "claude">, dir: string): string {
+  const args = [...(deps.node ? [deps.node] : []), deps.cli, "runner", "update", "--auto", "--dir", dir];
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -162,6 +165,22 @@ export function autoUpdateStatus(deps: AutoUpdateDeps): AutoUpdateStatus {
   return { state: "unsupported", detail: `platform_${platform}` };
 }
 
+/** CTC-7030: the node a Mac's thoughts custody was set up with, when that node is still there. The
+ *  custody records it by path and hash beside the runner directory, and every update re-attests the
+ *  custody under the node that runs it, refusing any other. A CLI installed under a different node
+ *  (the daily job's own prefix) must therefore still run under this one. */
+export function custodyNode(dir: string): string | null {
+  try {
+    const runtime = JSON.parse(readFileSync(join(dirname(dir), "darwin-thoughts-custody", "runtime.json"), "utf8")) as { nodeExecutable?: unknown };
+    const node = runtime.nodeExecutable;
+    if (typeof node !== "string" || !node.startsWith("/")) return null;
+    accessSync(node, constants.X_OK);
+    return node;
+  } catch {
+    return null;
+  }
+}
+
 /** Install and start the schedule. Rewrites the files every time, so a moved CLI or PATH is picked up. */
 export function enableAutoUpdate(deps: AutoUpdateDeps, dir: string): AutoUpdateStatus {
   const platform = deps.platform ?? process.platform;
@@ -169,7 +188,7 @@ export function enableAutoUpdate(deps: AutoUpdateDeps, dir: string): AutoUpdateS
   if (platform === "darwin") {
     const uid = deps.uid ?? process.getuid?.() ?? 0;
     const path = launchAgentPath(deps.home);
-    const text = launchAgentPlist(deps, dir);
+    const text = launchAgentPlist({ ...deps, node: deps.node === undefined ? custodyNode(dir) : deps.node }, dir);
     const unchanged = existsSync(path) && readFileSync(path, "utf8") === text;
     const domain = `gui/${uid}`;
     const loaded = run("launchctl", ["print", `${domain}/${AUTO_UPDATE_LABEL}`]).status === 0;
