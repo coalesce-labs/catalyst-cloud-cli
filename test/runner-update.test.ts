@@ -13,6 +13,8 @@ import {
   rewriteEnvText,
   runRunnerUpdate,
   updateReport,
+  lastProblem,
+  lastProblemLines,
   type DesiredReleaseRead,
   type ReleaseComponent,
   type ReleaseState,
@@ -737,6 +739,34 @@ describe("the update schedule", () => {
     const run: SchedulerRun = () => ({ status: 1, stdout: "", stderr: "Failed to connect to bus" });
     expect(enableAutoUpdate({ platform: "linux", home, cli: "c", path: "/bin", run }, "/d")).toMatchObject({ state: "unsupported" });
     expect(existsSync(systemdUnitPaths(home).timer)).toBe(false);
+  });
+});
+
+describe("lastProblemLines (CTC-6709)", () => {
+  const state = (last: { outcome: UpdateOutcome; detail: string; generation: number | null } | null): ReleaseState =>
+    ({ version: 1, generation: 105, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
+      last: last === null ? null : { atMs: Date.UTC(2026, 9, 24, 4, 30), ...last } });
+
+  it("POSITIVE CONTROL: a rolled-back update is named with its time, reason and offered generation", () => {
+    expect(lastProblemLines(state({ outcome: "rolled_back", detail: "supervisor_not_ready", generation: 106 })))
+      .toEqual(["The last update, at 2026-10-24T04:30:00.000Z, was rolled back (supervisor_not_ready; offered generation 106)."]);
+  });
+
+  it("a failed update with no offered generation says none", () => {
+    expect(lastProblemLines(state({ outcome: "failed", detail: "compose_up_failed", generation: null })))
+      .toEqual(["The last update, at 2026-10-24T04:30:00.000Z, failed (compose_up_failed; offered generation none)."]);
+  });
+
+  it.each([["updated"], ["current"], ["deferred_busy"], ["waiting_window"], ["retained"]] as const)(
+    "NEGATIVE: a last run that %s is no problem to name",
+    (outcome) => {
+      expect(lastProblem(state({ outcome, detail: "x", generation: 106 }))).toBeNull();
+      expect(lastProblemLines(state({ outcome, detail: "x", generation: 106 }))).toEqual([]);
+    },
+  );
+
+  it("NEGATIVE: a machine that never ran an update has nothing to name", () => {
+    expect(lastProblemLines(state(null))).toEqual([]);
   });
 });
 

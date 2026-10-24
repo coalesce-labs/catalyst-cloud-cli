@@ -42,6 +42,37 @@ describe("catalyst runner update", () => {
     ]);
   });
 
+  it("--check names a rolled-back last update between the image result and the component report (CTC-6709)", async () => {
+    const ctx = makeCtx(tempHome());
+    const dir = install();
+    writeFileSync(join(dir, "release-state.json"), JSON.stringify({
+      version: 1, generation: 105, releaseId: "hr-105", appliedAtMs: 1, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
+      last: { atMs: Date.UTC(2026, 9, 24, 4, 30), outcome: "rolled_back", detail: "supervisor_not_ready", generation: 106 },
+    }));
+    expect(await main(["runner", "update", "--check", "--dir", dir], ctx, { runner: { engine: engine(503) } })).toBe(0);
+    // The release line reads the saved generation (105 here), so only its prefix is pinned.
+    expect(ctx.out[0]).toBe("Kept the current images.");
+    expect(ctx.out[1]).toMatch(/^Release: .*\(release_unavailable\)\.$/);
+    expect(ctx.out[2]).toBe("The last update, at 2026-10-24T04:30:00.000Z, was rolled back (supervisor_not_ready; offered generation 106).");
+  });
+
+  it("--check --json carries the rolled-back last update as lastProblem, and null after a clean one", async () => {
+    const write = (dir: string, outcome: string) => writeFileSync(join(dir, "release-state.json"), JSON.stringify({
+      version: 1, generation: 105, releaseId: "hr-105", appliedAtMs: 1, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
+      last: { atMs: 1_800_000_000_000, outcome, detail: "supervisor_not_ready", generation: 106 },
+    }));
+    const bad = install();
+    write(bad, "rolled_back");
+    const ctx = makeCtx(tempHome());
+    await main(["runner", "update", "--check", "--json", "--dir", bad], ctx, { runner: { engine: engine(503) } });
+    expect(JSON.parse(ctx.out[0]!).lastProblem).toEqual({ atMs: 1_800_000_000_000, outcome: "rolled_back", detail: "supervisor_not_ready", generation: 106 });
+    const good = install();
+    write(good, "updated");
+    const clean = makeCtx(tempHome());
+    await main(["runner", "update", "--check", "--json", "--dir", good], clean, { runner: { engine: engine(503) } });
+    expect(JSON.parse(clean.out[0]!).lastProblem).toBeNull();
+  });
+
   it("--json prints the result object, and a revoked machine exits 1", async () => {
     const ctx = makeCtx(tempHome());
     const revoked = engine(401, { ok: false, refusal: "host_revoked", terminal: true });
