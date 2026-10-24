@@ -109,6 +109,7 @@ import { cmdProject } from "./project.js";
 import { cmdRepo } from "./repo.js";
 import { cmdLease, cmdWork } from "./lease.js";
 import { cmdLegacy, type LegacyDeps } from "./legacy.js";
+import { cmdCodexEnv, type CodexEnvDeps } from "./codex-env.js";
 import { cmdIdentity, type IdentityDeps } from "./identity.js";
 import { cmdMessages, type MessagesDeps } from "./messages.js";
 import { cmdConnections, type ConnectionsDeps } from "./connections.js";
@@ -244,6 +245,7 @@ export function usageText(): string {
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
     "  catalyst lease <take <ticket> --agent <seat> [--ttl <minutes>]|renew <ticket> --commit|--artifact|--finding|--pr <ref> [--note <text>]|release <ticket>|show <ticket>> [--json]   (a seat's ticket lease; needs login)",
     "  catalyst work available [--team K] [--json]   (tickets nobody holds and open pull requests no lease covers)",
+    "  catalyst codex-env --print [--codex-home <dir>] | --apply | --refresh   (the telemetry attributes naming the coding account and machine a Codex launch runs as)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
     "  catalyst identity linear <status|options|set> [<linearUserId>] [--json]",
     "  catalyst messages read --ticket CTC-N [--since SEQUENCE] [--json]   (messages sent to a ticket on your teams)",
@@ -290,6 +292,7 @@ export interface MainDeps {
   messages?: MessagesDeps;
   team?: TeamDeps;
   legacy?: LegacyDeps;
+  codexEnv?: CodexEnvDeps;
   loadSdk?: () => Promise<unknown>;
   /** Injected by the tests so no suite ever touches a real terminal. */
   isTty?: () => boolean;
@@ -792,6 +795,8 @@ export async function main(
         return await cmdWork(args, ctx);
       case "legacy":
         return await cmdLegacy(args, ctx, { localSyncSelected: savedLocalSync(ctx), ...deps.legacy });
+      case "codex-env":
+        return await cmdCodexEnv(args, ctx, deps.codexEnv ?? {});
       case "identity":
         return await cmdIdentity(args, ctx, deps.identity ?? {});
       case "messages":
@@ -882,6 +887,7 @@ const VERB_HELP_KNOWN: Record<string, true> = Object.fromEntries(
     "lease",
     "work",
     "legacy",
+    "codex-env",
     "onboard",
     "update",
   ].map((v) => [v, true]),

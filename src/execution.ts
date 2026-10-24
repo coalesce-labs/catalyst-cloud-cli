@@ -386,6 +386,8 @@ export interface CodingAccount {
   bindingResetsAtMs?: number | null;
   liveHoldsCount?: number;
   liveHolds?: { ticket: string; phase: string; leaseDeadlineMs: number }[];
+  /** CTC-6848: SHA-256 hex of the Codex login's account id, on the caller's own Codex accounts; else null. */
+  loginSha256?: string | null;
   [k: string]: unknown;
 }
 
