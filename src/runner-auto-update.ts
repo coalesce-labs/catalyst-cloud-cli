@@ -46,12 +46,13 @@ function schedulerEnv(): NodeJS.ProcessEnv {
     : process.env;
 }
 
-const defaultRun: SchedulerRun = (cmd, args) => {
+/** Shared with the Codex attribution agent (codex-attribution.ts), which runs launchctl the same way. */
+export const defaultRun: SchedulerRun = (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: "utf8", timeout: 15_000, env: schedulerEnv() });
   return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.error ? r.error.message : (r.stderr ?? "") };
 };
 
-const xml = (value: string) =>
+export const xml = (value: string) =>
   value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 /** systemd's own quoting for one ExecStart/Environment word. */
 const unitWord = (value: string) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%")}"`;
@@ -133,7 +134,8 @@ function ensureLingering(run: SchedulerRun, uid: number): { linger: boolean; tur
   return { linger, turnedOn: linger };
 }
 
-function writeFileAtomic(path: string, text: string): void {
+/** Shared with the Codex attribution agent's plist (codex-attribution.ts). */
+export function writeFileAtomic(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.${process.pid}.tmp`;
   writeFileSync(temp, text, { mode: 0o644 });
