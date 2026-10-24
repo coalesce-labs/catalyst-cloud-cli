@@ -222,3 +222,55 @@ describe("catalyst runner auto-update", () => {
     for (const id of ["runner", "supervisor", "watchdog"] as const) expect(effectivePolicy(readUpdatePolicy(home), id).enabled).toBe(true);
   });
 });
+
+// CTC-7046: a Mac's thoughts custody refuses an update run under another node than it recorded. An
+// update run under another node re-runs itself under the custody's node, whatever wrote the agent.
+describe("catalyst runner update under another node than its custody's", () => {
+  /** An engine any image work would fail on: a re-run never reaches it in this process. */
+  const untouched = (): RunnerUpdateEngine => {
+    const no = async (): Promise<never> => { throw new Error("this process must not update"); };
+    return { desiredRelease: no, attemptContainers: no, prepare: no, custody: no, services: no, stopSupervisor: no, composeUp: no, supervisorReadySinceStart: no, removeImages: no };
+  };
+  const rerunner = () => {
+    const calls: { command: string; args: readonly string[]; env: NodeJS.ProcessEnv }[] = [];
+    return { calls, run: (command: string, args: readonly string[], env: NodeJS.ProcessEnv) => { calls.push({ command, args, env }); return 7; } };
+  };
+
+  it("POSITIVE: re-runs itself under the custody's node with the same command line, and answers with that run's exit code", async () => {
+    const ctx = makeCtx(tempHome());
+    const dir = install();
+    const r = rerunner();
+    const argv = ["/opt/catalyst/bin/catalyst.js", "runner", "update", "--auto", "--dir", dir];
+    const custody = { platform: "darwin" as const, execPath: "/home/node/bin/node", argv, node: () => "/brew/node/bin/node", run: r.run };
+    expect(await main(["runner", "update", "--auto", "--dir", dir], ctx, { runner: { engine: untouched(), custody } })).toBe(7);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]?.command).toBe("/brew/node/bin/node");
+    expect(r.calls[0]?.args).toEqual(argv);
+    expect(r.calls[0]?.env.CATALYST_CUSTODY_NODE_RERUN).toBe("1");
+    expect(r.calls[0]?.env.CATALYST_SKILLS_OFFLINE).toBe("1");
+  });
+
+  it.each([
+    ["already runs under the custody's node", { execPath: "/brew/node/bin/node" }, {}],
+    ["is itself the re-run", {}, { CATALYST_CUSTODY_NODE_RERUN: "1" }],
+    ["is on Linux", { platform: "linux" as const }, {}],
+    ["has no custody node", { node: () => null }, {}],
+  ])("NEGATIVE: an update that %s runs in this process", async (_label, over, env) => {
+    const ctx = makeCtx(tempHome(), { env: { CATALYST_SKILLS_OFFLINE: "1", ...env } });
+    const dir = install();
+    const r = rerunner();
+    const custody = { platform: "darwin" as const, execPath: "/home/node/bin/node", argv: ["/opt/catalyst/bin/catalyst.js", "runner", "update", "--dir", dir], node: () => "/brew/node/bin/node", run: r.run, ...over };
+    expect(await main(["runner", "update", "--dir", dir], ctx, { runner: { engine: engine(503), custody } })).toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(ctx.out[0]).toBe("Kept the current images.");
+  });
+
+  it("NEGATIVE: --check never re-runs, since it attests nothing", async () => {
+    const ctx = makeCtx(tempHome());
+    const dir = install();
+    const r = rerunner();
+    const custody = { platform: "darwin" as const, execPath: "/home/node/bin/node", argv: ["/x"], node: () => "/brew/node/bin/node", run: r.run };
+    expect(await main(["runner", "update", "--check", "--dir", dir], ctx, { runner: { engine: engine(503), custody } })).toBe(0);
+    expect(r.calls).toEqual([]);
+  });
+});
