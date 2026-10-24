@@ -135,6 +135,11 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       help: "resume at a verified onboarding step",
     },
     only: { value: true, help: "run only the named onboarding step; codex-attribution adds only the Codex launch hooks, with no other step" },
+    "codex-home": {
+      value: true,
+      repeat: true,
+      help: "codex-attribution: a further Codex home to send telemetry, given the default home's exporter (repeatable; also taken out by --remove-codex-attribution)",
+    },
     yes: { value: false, help: "accept the plan's default choices" },
     "dry-run": {
       value: false,
@@ -645,7 +650,7 @@ export const VERB_USAGE: Record<string, string> = {
   login:
     "login [--base-url <url>] [--start-replica]   (keyless; or --key <personal-key> / CATALYST_CLOUD_TOKEN)",
   onboard:
-    "onboard [--team <ID|key>] [--repo <owner/name>]... [--coding-account <slot>] [--resume-from <step>] [--only <step>] [--local-sync] [--remove-local-data] [--runner|--no-runner] [--no-shell-hook] [--no-color] [--yes] [--dry-run] [--json] | onboard --only codex-attribution [--dry-run] [--json] | onboard --remove-codex-attribution [--json] | onboard --headless [--key-file <path>] [--team ...] [--repo ...]... [--coding-account ...] [--runner yes|no] [--remove-local-data] [--json]",
+    "onboard [--team <ID|key>] [--repo <owner/name>]... [--coding-account <slot>] [--resume-from <step>] [--only <step>] [--local-sync] [--remove-local-data] [--runner|--no-runner] [--no-shell-hook] [--no-color] [--yes] [--dry-run] [--json] | onboard --only codex-attribution [--codex-home <dir>]... [--dry-run] [--json] | onboard --remove-codex-attribution [--codex-home <dir>]... [--json] | onboard --headless [--key-file <path>] [--team ...] [--repo ...]... [--coding-account ...] [--runner yes|no] [--remove-local-data] [--json]",
   install: "install [--skills-dir <dir>] [--force]",
   status: "status",
   notice: "notice",

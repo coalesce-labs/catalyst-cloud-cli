@@ -1145,6 +1145,7 @@ describe("Scenario: The login agent and the launch environment when launchd does
       removed: true,
       files: [{ path: zshrc(), state: "removed" }],
       agent: { agent: "not_macos", environment: "untouched" },
+      homes: [],
     });
     expect(readFileSync(zshrc(), "utf8")).toBe("export A=1\n");
   });
@@ -1347,6 +1348,7 @@ describe("Scenario: An existing install turns on Codex attribution alone (CTC-69
       files: [{ path: zshrc(), state: "added" }],
       backups: [{ path: zshrc(), backup: backup(), kept: "new" }],
       agent: { state: "not_macos" },
+      homes: [],
     });
   });
 
@@ -1383,5 +1385,166 @@ describe("Scenario: An existing install turns on Codex attribution alone (CTC-69
     expect(await only(ctx, linux(), "--no-shell-hook")).toBe(1);
     expect(ctx.err.join("\n")).toContain("--only codex-attribution adds the Codex launch hooks");
     expect(readFileSync(zshrc(), "utf8")).toBe("export A=1\n");
+  });
+});
+
+describe("Scenario: A named Codex home sends its telemetry (CTC-7028)", () => {
+  const SECRET = "Basic c2VjcmV0LXZhbHVlLW5ldmVyLXByaW50ZWQ=";
+  const OTEL = [
+    "[otel]",
+    'environment = "dev"',
+    "",
+    "[otel.exporter.otlp-http]",
+    'endpoint = "https://collector.example/v1/logs"',
+    'protocol = "binary"',
+    "",
+    "[otel.exporter.otlp-http.headers]",
+    `"authorization" = "${SECRET}"`,
+    "",
+  ].join("\n");
+  const DEFAULT = `model = "gpt"\n\n${OTEL}\n[tui]\nstatus_line = "on"\n`;
+  const extra = () => join(home, "homes", "second");
+  const config = () => join(extra(), "config.toml");
+  const copy = () => `${config()}${RC_BACKUP_SUFFIX}`;
+  const setup = async (accountId: string | null = TWO_ID) => {
+    await seedJoined(home, server, { contract: false });
+    writeAccountCache(NOW);
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    writeFileSync(join(home, ".codex", "config.toml"), DEFAULT, { mode: 0o600 });
+    mkdirSync(extra(), { recursive: true });
+    if (accountId !== null) writeLogin(extra(), accountId);
+  };
+  const only = (ctx: TestCtx, ...flags: string[]) =>
+    main(["setup", "--only", "codex-attribution", "--codex-home", extra(), ...flags], ctx, { codexAttribution: linux() });
+  const otelOnly = OTEL.replace(/\n$/, "") + "\n";
+
+  test("a registered home gets the default home's [otel] tables, after a byte-for-byte copy, and is never left wider than the source", async () => {
+    await setup();
+    const original = '[projects."/work"]\ntrust_level = "trusted"\n';
+    writeFileSync(config(), original, { mode: 0o640 });
+    const ctx = ctxWith();
+    expect(await only(ctx)).toBe(0);
+    const text = readFileSync(config(), "utf8");
+    expect(text.startsWith(original)).toBe(true);
+    expect(text).toContain(otelOnly);
+    expect(text).not.toContain("[tui]");
+    expect(readFileSync(copy(), "utf8")).toBe(original);
+    // The source is 600, so the credential never becomes group-readable; the copy of the file as it
+    // was, which holds no credential, keeps its own mode.
+    expect(statSync(config()).mode & 0o777).toBe(0o600);
+    expect(statSync(copy()).mode & 0o777).toBe(0o640);
+    expect(ctx.out.join("\n")).toContain(
+      "Codex launches with ~/homes/second send their telemetry: the exporter from ~/.codex/config.toml is in ~/homes/second/config.toml. The file as it was is kept at ~/homes/second/config.toml.before-codex-attribution.",
+    );
+    expect(ctx.out.join("\n")).not.toContain(SECRET);
+  });
+
+  test("--dry-run shows the tables with every header value hidden, and changes nothing", async () => {
+    await setup();
+    writeFileSync(config(), "x = 1\n", { mode: 0o600 });
+    const ctx = ctxWith();
+    expect(await only(ctx, "--dry-run")).toBe(0);
+    expect(readFileSync(config(), "utf8")).toBe("x = 1\n");
+    expect(existsSync(copy())).toBe(false);
+    const out = ctx.out.join("\n");
+    expect(out).not.toContain(SECRET);
+    expect(out).toContain('"authorization" = <hidden>');
+    expect(out).toContain('endpoint = "https://collector.example/v1/logs"');
+    expect(out).toContain("[otel.exporter.otlp-http.headers]");
+    expect(ctx.out.at(-1)).toBe("Dry run: nothing was changed.");
+  });
+
+  test("a home that already exports is byte-identical, and a second run says unchanged", async () => {
+    await setup();
+    const own = `[otel]\nenvironment = "mine"\n`;
+    writeFileSync(config(), own, { mode: 0o600 });
+    const ctx = ctxWith();
+    expect(await only(ctx)).toBe(0);
+    expect(readFileSync(config(), "utf8")).toBe(own);
+    expect(existsSync(copy())).toBe(false);
+    expect(ctx.out).toContain("~/homes/second/config.toml already has a telemetry exporter (unchanged).");
+    writeFileSync(config(), "x = 1\n", { mode: 0o600 });
+    expect(await only(ctxWith())).toBe(0);
+    const once = readFileSync(config());
+    const again = ctxWith();
+    expect(await only(again)).toBe(0);
+    expect(readFileSync(config()).equals(once)).toBe(true);
+    expect(again.out).toContain("~/homes/second/config.toml already has a telemetry exporter (unchanged).");
+  });
+
+  test.each([
+    ["a login that is not a workspace coding account", "acct-somebody-else", "its Codex login is not one of this workspace's coding accounts"],
+    ["no login at all", null, "there is no Codex login in it"],
+  ])("a home with %s is left as it is", async (_label, accountId, why) => {
+    await setup(accountId);
+    writeFileSync(config(), "x = 1\n", { mode: 0o600 });
+    const ctx = ctxWith();
+    expect(await only(ctx, "--json")).toBe(0);
+    expect(readFileSync(config(), "utf8")).toBe("x = 1\n");
+    const homes = JSON.parse(ctx.out[0] ?? "").homes;
+    expect(homes).toHaveLength(1);
+    expect(homes[0].state).toBe("skipped");
+    expect(homes[0].why).toContain(why);
+  });
+
+  test("the default home itself is never a target", async () => {
+    await setup();
+    const ctx = ctxWith();
+    expect(await main(["setup", "--only", "codex-attribution", "--codex-home", join(home, ".codex"), "--json"], ctx, { codexAttribution: linux() })).toBe(0);
+    expect(JSON.parse(ctx.out[0] ?? "").homes[0].why).toContain("default Codex home");
+    expect(readFileSync(join(home, ".codex", "config.toml"), "utf8")).toBe(DEFAULT);
+  });
+
+  test("a home with no config.toml gets one with the tables, mode 600", async () => {
+    await setup();
+    expect(await only(ctxWith())).toBe(0);
+    expect(statSync(config()).mode & 0o777).toBe(0o600);
+    expect(readFileSync(config(), "utf8")).toContain(otelOnly);
+    expect(existsSync(copy())).toBe(false);
+  });
+
+  test.each([
+    ["ends its last line", "x = 1\n"],
+    ["does not end its last line", "x = 1"],
+    ["is empty", ""],
+  ])("--remove-codex-attribution gives back a config.toml that %s byte for byte", async (_label, original) => {
+    await setup();
+    writeFileSync(config(), original, { mode: 0o600 });
+    expect(await only(ctxWith())).toBe(0);
+    expect(readFileSync(config(), "utf8")).not.toBe(original);
+    const ctx = ctxWith();
+    await main(["setup", "--remove-codex-attribution", "--codex-home", extra()], ctx, { codexAttribution: linux() });
+    expect(readFileSync(config(), "utf8")).toBe(original);
+    expect(ctx.out).toContain("Took the copied telemetry exporter out of ~/homes/second/config.toml; the file is as it was before setup added it.");
+  });
+
+  test("a failed copy leaves config.toml as it was and fails the run", async () => {
+    await setup();
+    writeFileSync(config(), "x = 1\n", { mode: 0o600 });
+    const failing: CodexAttributionDeps = {
+      ...linux(),
+      files: { writeFile: (path) => { if (path.includes("config.toml")) throw new Error("disk full"); } },
+    };
+    const ctx = ctxWith();
+    expect(await main(["setup", "--only", "codex-attribution", "--codex-home", extra()], ctx, { codexAttribution: failing })).toBe(1);
+    expect(readFileSync(config(), "utf8")).toBe("x = 1\n");
+    expect(ctx.out.join("\n")).toContain("its config.toml could not be written (disk full)");
+  });
+
+  test("a config.toml that is a link is left alone, and the link's target is untouched", async () => {
+    await setup();
+    const elsewhere = join(home, "elsewhere.toml");
+    writeFileSync(elsewhere, "x = 1\n", { mode: 0o600 });
+    symlinkSync(elsewhere, config());
+    const ctx = ctxWith();
+    expect(await only(ctx, "--json")).toBe(0);
+    expect(JSON.parse(ctx.out[0] ?? "").homes[0].state).toBe("skipped");
+    expect(readFileSync(elsewhere, "utf8")).toBe("x = 1\n");
+    expect(lstatSync(config()).isSymbolicLink()).toBe(true);
+  });
+
+  test("NEGATIVE: --codex-home without the Codex attribution paths is a usage error", async () => {
+    await setup();
+    expect(await main(["setup", "--codex-home", extra()], ctxWith(), { codexAttribution: linux() })).not.toBe(0);
   });
 });
