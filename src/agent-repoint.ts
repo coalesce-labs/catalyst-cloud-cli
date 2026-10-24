@@ -12,7 +12,7 @@ import { accessSync, appendFileSync, constants, copyFileSync, existsSync, readFi
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compareVersions, exactVersion } from "./approved-release.js";
-import { readManifest } from "./config.js";
+import { LEGACY_PACKAGE_NAME, readManifest } from "./config.js";
 import {
   enableAutoUpdate,
   launchAgentPath,
@@ -116,7 +116,7 @@ export function cliVersionAt(command: string): string | null {
     if (existsSync(manifest)) {
       try {
         const pkg = JSON.parse(readFileSync(manifest, "utf8")) as { name?: unknown; version?: unknown };
-        if (pkg.name === "@catalyst-cloud/cli" || pkg.name === "@catalyst-cloud/catalyst-skills") return exactVersion(pkg.version);
+        if (pkg.name === "@catalyst-cloud/cli" || pkg.name === LEGACY_PACKAGE_NAME) return exactVersion(pkg.version);
       } catch {
         return null;
       }
