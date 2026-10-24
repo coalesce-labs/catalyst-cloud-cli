@@ -124,6 +124,10 @@ export function watchCursorPathFor(home: string): string {
 export function discoveryCachePathFor(home: string): string {
   return join(configDirFor(home), "auth-discovery.json");
 }
+/** CTC-6883 — the coding-account slots and Codex login hashes `codex-env` answers from (src/codex-env.ts). */
+export function codexAccountsCachePathFor(home: string): string {
+  return join(configDirFor(home), "codex-accounts.json");
+}
 export function defaultReplicaDbFor(home: string): string {
   return join(configDirFor(home), "replica.db");
 }

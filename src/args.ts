@@ -558,6 +558,21 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
   work: {
     team: { value: true, help: "available: one team's key (default: every team in the workspace contract)" },
   },
+  "codex-env": {
+    print: {
+      value: false,
+      help: "print the OTEL_RESOURCE_ATTRIBUTES value a Codex launch should carry: the attributes already set, plus the coding account's slot and this machine's short name",
+    },
+    apply: {
+      value: false,
+      help: "macOS: set that value with launchctl for apps started from now on, the Codex desktop app included, for the default Codex home",
+    },
+    refresh: {
+      value: false,
+      help: "fetch this workspace's coding accounts now and update the cache --print and --apply read",
+    },
+    "codex-home": { value: true, help: "print: the Codex home to read (default: $CODEX_HOME, else ~/.codex)" },
+  },
   repo: {
     reason: { value: true, help: "pause: required; resume: optional; 1 to 500 characters after trimming (owner or admin)" },
     write: {
@@ -662,6 +677,8 @@ export const VERB_USAGE: Record<string, string> = {
     "project <list [--json] | wip-limit <get|set <n>|set default> [--team K] [--json]>",
   lease:
     "lease <take <ticket> --agent <seat> [--ttl <minutes>] | renew <ticket> (--commit <sha>|--artifact <path or id>|--finding <id>|--pr <number>) [--note <text>] [--agent <seat>] [--generation <n>] | release <ticket> [--agent <seat>] [--generation <n>] | show <ticket>> [--json]   (a seat's ticket lease: take, renew with new progress, release, read; needs login)",
+  "codex-env":
+    "codex-env --print [--codex-home <dir>] | --apply | --refresh [--json]   (the telemetry attributes naming the coding account and machine a Codex launch runs as; only --refresh waits on the network)",
   work: "work available [--team K] [--json]   (per team: tickets nobody holds, with the last holder and progress, and open pull requests no live lease covers, drafts included)",
   repo: "repo <status|pause <owner/name> --reason <text>|resume <owner/name> [--reason <text>]|agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]> [--json]   (status: visible workspace repositories; agents-block/agent-setup: local checkout)",
   legacy: "legacy [--remove [--data] [--yes]] [--json]",
