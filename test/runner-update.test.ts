@@ -12,8 +12,11 @@ import {
   RELEASE_STATE_FILE,
   rewriteEnvText,
   runRunnerUpdate,
+  updateReport,
   type DesiredReleaseRead,
   type ReleaseComponent,
+  type ReleaseState,
+  type UpdateOutcome,
   type RunnerUpdateEngine,
 } from "../src/runner-update";
 import {
@@ -145,12 +148,13 @@ interface FakeOptions {
 /** A machine: what runs is what `.env` named at the last successful compose up. */
 function fakeEngine(dir: string, options: FakeOptions = {}) {
   const calls: string[] = [];
+  const reports: Array<string | undefined> = [];
   let live: Images = options.live ?? imagesIn(readFileSync(join(dir, ".env"), "utf8"));
   let stopped = false;
   let ups = 0;
   let looks = 0;
   const engine: RunnerUpdateEngine = {
-    async desiredRelease() { calls.push("read"); return options.read ?? answered(release()); },
+    async desiredRelease(_d, _signal, report) { calls.push("read"); reports.push(report); return options.read ?? answered(release()); },
     async attemptContainers(_d, hostId) { calls.push(`attempts:${hostId}`); return options.busy ? (options.busy[looks++] ?? 0) : 0; },
     async prepare(images) { calls.push(`prepare:${images.length}`); return options.prepare ?? null; },
     async custody(_d, images) {
@@ -175,7 +179,7 @@ function fakeEngine(dir: string, options: FakeOptions = {}) {
     async supervisorReadySinceStart() { return options.ready ? options.ready(live.supervisor) : true; },
     async removeImages(images) { calls.push(`rm:${images.join(",")}`); return images.filter((image) => options.inUse?.(image) ?? false); },
   };
-  return { engine, calls, live: () => live };
+  return { engine, calls, reports, live: () => live };
 }
 const fastClock = () => {
   let t = 1_000_000;
@@ -209,6 +213,24 @@ describe("runRunnerUpdate", () => {
     const second = fakeEngine(dir);
     expect(await runRunnerUpdate(second.engine, { dir, ...fastClock() })).toMatchObject({ outcome: "current", generation: 1 });
     expect(second.calls).toEqual(["read"]);
+  });
+
+  it("CTC-6924: the first run reports nothing; the next run reports the first run's outcome on its read", async () => {
+    const first = fakeEngine(dir);
+    await runRunnerUpdate(first.engine, { dir, ...fastClock() });
+    expect(first.reports).toEqual([undefined]);
+    const second = fakeEngine(dir);
+    await runRunnerUpdate(second.engine, { dir, ...fastClock() });
+    expect(JSON.parse(second.reports[0]!)).toMatchObject({
+      v: 1, outcome: "updated", detail: "updated:runner,supervisor,watchdog", applied: 1, offered: 1,
+    });
+  });
+
+  it("CTC-6924: --check sends no report, so a look never counts as a run", async () => {
+    await runRunnerUpdate(fakeEngine(dir).engine, { dir, ...fastClock() });
+    const look = fakeEngine(dir);
+    await runRunnerUpdate(look.engine, { dir, check: true, ...fastClock() });
+    expect(look.reports).toEqual([undefined]);
   });
 
   it("a setup run that puts the old images back after an update is moved back to the applied release", async () => {
@@ -715,5 +737,32 @@ describe("the update schedule", () => {
     const run: SchedulerRun = () => ({ status: 1, stdout: "", stderr: "Failed to connect to bus" });
     expect(enableAutoUpdate({ platform: "linux", home, cli: "c", path: "/bin", run }, "/d")).toMatchObject({ state: "unsupported" });
     expect(existsSync(systemdUnitPaths(home).timer)).toBe(false);
+  });
+});
+
+describe("updateReport (CTC-6924)", () => {
+  const state = (last: { outcome: UpdateOutcome; detail: string; generation: number | null } | null, generation: number | null = 105): ReleaseState =>
+    ({ version: 1, generation, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
+      last: last === null ? null : { atMs: 1_800_000_000_000, ...last } });
+
+  it("before any run there is nothing to report", () => {
+    expect(updateReport(state(null), "0.16.34")).toBeUndefined();
+  });
+
+  it("POSITIVE CONTROL: a refused custody check reports its reason, both generations and the CLI version", () => {
+    expect(JSON.parse(updateReport(state({ outcome: "retained", detail: "custody_reattest_failed:bootstrap_proof_refused:deadline", generation: 106 }), "0.16.34")!))
+      .toEqual({ v: 1, outcome: "retained", detail: "custody_reattest_failed:bootstrap_proof_refused:deadline", applied: 105, offered: 106, atMs: 1_800_000_000_000, cli: "0.16.34" });
+  });
+
+  it("characters the cloud would refuse become _, so an image reference cannot cost the report", () => {
+    const report = JSON.parse(updateReport(state({ outcome: "retained", detail: "image_unverified:ghcr.io/coalesce-labs/catalyst-runner@sha256:AB", generation: 106 }), "0.16.34")!);
+    expect(report.detail).toBe("image_unverified:ghcr.io_coalesce-labs_catalyst-runner_sha256:ab");
+    expect(report.detail).toMatch(/^[a-z0-9_:,.-]{0,160}$/);
+  });
+
+  it("a long detail is cut to 160 characters, and a version that is not one reports null", () => {
+    const report = JSON.parse(updateReport(state({ outcome: "failed", detail: "x".repeat(300), generation: null }, null), "dev")!);
+    expect(report.detail).toHaveLength(160);
+    expect(report).toMatchObject({ applied: null, offered: null, cli: null });
   });
 });
