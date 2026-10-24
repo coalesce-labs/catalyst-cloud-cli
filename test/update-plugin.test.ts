@@ -1,165 +1,156 @@
-// update-plugin.test.ts — the Claude plugin form of the Cloud skills pack moves with the release
-// check (CTC-6791). Claude Code is a fake `claude` that rewrites its own registry files the way the
-// real one does, so the version read back is what the report says. The plugin never moves past the
-// approval, and a run that finds no `claude` changes nothing and names the command.
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { main } from "../src/cli";
 import { systemdUnits, type SchedulerRun } from "../src/runner-auto-update";
-import type { RunnerUpdateEngine } from "../src/runner-update";
 import { runUpdate, updateReportLines, type UpdateOptions } from "../src/update";
-import type { CliExec } from "../src/update-cli";
-import { applyCloudPluginUpdate, CLAUDE_PATH_ENV, CLOUD_PLUGIN_COMMAND, cloudPluginInventory, resolveClaude } from "../src/update-plugin";
+import { spawnCliCommand, type CliExec } from "../src/update-cli";
+import { applyCloudPluginUpdate, CLAUDE_PATH_ENV, CLOUD_PLUGIN_ID, cloudPluginInventory, resolveClaude } from "../src/update-plugin";
+import { stageSkillSource } from "../src/update-skill-source";
 import { setComponentPolicy } from "../src/update-policy";
 import { makeCtx, tempHome } from "./helpers";
-import { approved, fakeCliApply, memberFetch, NEXT, OLD, signIn } from "./update-fixtures";
+import { approved, fakeCliApply, memberFetch, NEXT, OLD, signIn, skillRepository } from "./update-fixtures";
 
-const noDocker = (): RunnerUpdateEngine => {
-  throw new Error("a machine with no runner installation must not reach Docker");
+const claudeBinary = () => {
+  const path = join(tempHome(), "claude");
+  writeFileSync(path, "#!/bin/sh\nexit 0\n"); chmodSync(path, 0o755); return path;
 };
 
-const plugins = (home: string) => join(home, ".claude", "plugins");
-
-/** Claude Code's registry with the Cloud plugin at `version`, and its marketplace checkout serving `served`. */
-function installPlugin(home: string, version: string, served: string): void {
-  mkdirSync(join(plugins(home), "marketplaces", "catalyst-cloud", ".claude-plugin"), { recursive: true });
-  writeRegistry(home, version);
-  serve(home, served);
-}
-
-function writeRegistry(home: string, version: string): void {
-  writeFileSync(
-    join(plugins(home), "installed_plugins.json"),
-    JSON.stringify({ version: 2, plugins: { "catalyst@catalyst-cloud": [{ scope: "user", installPath: "/x", version, installedAt: "2026-10-01T00:00:00.000Z" }] } }),
-  );
-}
-
-function serve(home: string, version: string): void {
-  writeFileSync(join(plugins(home), "marketplaces", "catalyst-cloud", ".claude-plugin", "plugin.json"), JSON.stringify({ name: "catalyst", version }));
-}
-
-/** An executable named `claude` in a fresh directory. */
-function claudeBinary(): string {
-  const dir = mkdtempSync(join(tmpdir(), "claude-bin-"));
-  const path = join(dir, "claude");
-  writeFileSync(path, "#!/bin/sh\nexit 0\n");
-  chmodSync(path, 0o755);
-  return path;
-}
-
-/** A fake Claude Code: a marketplace refresh serves `refreshTo`, and a plugin update installs what is served. */
-function fakeClaude(home: string, refreshTo: string): CliExec & { calls: string[] } {
-  const calls: string[] = [];
-  const exec: CliExec = (argv) => {
-    calls.push(argv.slice(1).join(" "));
-    if (argv[2] === "marketplace") serve(home, refreshTo);
-    else if (argv[2] === "update") {
-      const served = JSON.parse(readFileSync(join(plugins(home), "marketplaces", "catalyst-cloud", ".claude-plugin", "plugin.json"), "utf8")) as { version: string };
-      writeRegistry(home, served.version);
+function installed(version = OLD) {
+  const home = tempHome(), f = skillRepository("cloud", version), target = skillRepository();
+  const env = { PATH: process.env.PATH, CLAUDE_CONFIG_DIR: join(home, "custom-claude"), [CLAUDE_PATH_ENV]: claudeBinary() };
+  const source = stageSkillSource(home, "cloud", f.target, { repositoryUrl: () => f.repo });
+  if (!source.ok) throw new Error(source.detail);
+  const config = env.CLAUDE_CONFIG_DIR;
+  mkdirSync(join(config, "plugins"), { recursive: true });
+  const select = (path: string) => {
+    writeFileSync(join(config, "plugins/known_marketplaces.json"), JSON.stringify({ "catalyst-cloud": { source: { source: "directory", path }, installLocation: path } }));
+    writeFileSync(join(config, "settings.json"), JSON.stringify({ enabledPlugins: { [CLOUD_PLUGIN_ID]: false }, extraKnownMarketplaces: { "catalyst-cloud": { source: { source: "directory", path } }, unrelated: { source: { source: "directory", path: "/unrelated" } } }, unrelated: "keep" }));
+  };
+  const registry = (v: string, scope = "user") => writeFileSync(join(config, "plugins/installed_plugins.json"), JSON.stringify({ version: 2, plugins: { [CLOUD_PLUGIN_ID]: [{ scope, version: v, gitCommitSha: "f".repeat(40) }] } }));
+  select(source.dir); registry(version);
+  writeFileSync(join(config, "plugins/data-sentinel"), "keep");
+  let selected = source.dir;
+  const calls: string[][] = [];
+  const exec: CliExec = (argv, cwd, childEnv) => {
+    if (argv[0] === "git") return spawnCliCommand(argv, cwd, childEnv);
+    calls.push([...argv]);
+    if (argv[2] === "marketplace" && argv[3] === "add") { selected = argv[4] ?? ""; select(selected); }
+    if (argv[2] === "update") {
+      const manifest: unknown = JSON.parse(readFileSync(join(selected, ".claude-plugin/plugin.json"), "utf8"));
+      if (typeof manifest !== "object" || manifest === null || !("version" in manifest) || typeof manifest.version !== "string") throw new Error("fixture manifest");
+      registry(manifest.version);
     }
-    return { status: 0, stdout: "", stderr: "" };
+    return { status: 0, stdout: "child output must not be printed", stderr: "" };
   };
-  return Object.assign(exec, { calls });
+  return { home, env, config, f, target, source, exec, calls, registry };
 }
 
-function applying(home: string, exec: CliExec, env: NodeJS.ProcessEnv): UpdateOptions & { ctx: ReturnType<typeof makeCtx> } {
-  signIn(home);
-  const ctx = makeCtx(home, { env: { CATALYST_SKILLS_OFFLINE: "1", ...env }, fetch: memberFetch(200, { ok: true, release: approved() }) });
-  return {
-    ctx,
-    mode: "apply",
-    imagesDir: join(home, "no-runner"),
-    engine: noDocker,
-    cliApply: fakeCliApply([]),
-    pluginApply: (h, e, target, scope, deps) => applyCloudPluginUpdate(h, e, target, scope, { ...deps, exec }),
-  };
-}
-
-describe("the Cloud plugin follows the approved release", () => {
-  it("POSITIVE CONTROL: a plugin at an older version reports the approved version after the release check", async () => {
-    const home = tempHome();
-    installPlugin(home, OLD, OLD);
-    const claude = fakeClaude(home, NEXT);
-    const { ctx, ...options } = applying(home, claude, { PATH: join(claudeBinary(), "..") });
+describe("approved Cloud plugin", () => {
+  it.each([OLD, NEXT, "0.16.99"])("selects the approved local checkout from %s, including stale cached SHA", (version) => {
+    const f = installed(version);
+    const result = applyCloudPluginUpdate(f.home, f.env, f.target.target, NEXT, "user", { exec: f.exec, repositoryUrl: () => f.target.repo });
+    expect(result).toMatchObject({ outcome: "updated", version: NEXT, commit: f.target.target.commit });
+    expect(f.calls.map((a) => a.slice(1, 4))).toEqual([["plugin", "marketplace", "add"], ["plugin", "update", CLOUD_PLUGIN_ID]]);
+    expect(f.calls.every((a) => a.slice(-2).join(" ") === "--scope user")).toBe(true);
+    expect(cloudPluginInventory(f.home, f.env)).toMatchObject({ commit: f.target.target.commit });
+    const settings = JSON.parse(readFileSync(join(f.config, "settings.json"), "utf8"));
+    expect(settings.enabledPlugins[CLOUD_PLUGIN_ID]).toBe(false);
+    expect(settings.unrelated).toBe("keep");
+    expect(readFileSync(join(f.config, "plugins/data-sentinel"), "utf8")).toBe("keep");
+  });
+  it("restores the previous source after command failure", () => {
+    const f = installed();
+    const result = applyCloudPluginUpdate(f.home, f.env, f.target.target, NEXT, "user", { repositoryUrl: () => f.target.repo, exec: (argv, cwd, env) => argv[2] === "update" ? { status: 1, stdout: "", stderr: "failure" } : f.exec(argv, cwd, env) });
+    expect(result).toMatchObject({ outcome: "failed", detail: "update_failed" });
+    expect(cloudPluginInventory(f.home, f.env)).toMatchObject({ commit: f.f.target.commit });
+  });
+  it("refuses unsupported scope, local edits, missing Claude and manifest mismatch", () => {
+    const f = installed();
+    f.registry(OLD, "project");
+    expect(cloudPluginInventory(f.home, f.env)).toMatchObject({ state: "unknown", reason: "plugin_scope_unsupported" });
+    expect(applyCloudPluginUpdate(f.home, f.env, f.target.target, NEXT, "project", { exec: f.exec })).toMatchObject({ outcome: "failed" });
+    f.registry(OLD);
+    expect(applyCloudPluginUpdate(f.home, f.env, f.target.target, NEXT, "user", { claudePath: null })).toMatchObject({ outcome: "no_claude" });
+    expect(applyCloudPluginUpdate(f.home, f.env, f.target.target, OLD, "user", { exec: f.exec, repositoryUrl: () => f.target.repo })).toMatchObject({ outcome: "failed", detail: "source_mismatch" });
+    writeFileSync(join(f.source.dir, "extra"), "edit");
+    expect(cloudPluginInventory(f.home, f.env)).toMatchObject({ state: "unknown", reason: "local_changes" });
+    expect(f.calls).toEqual([]);
+  });
+  it("updates a plugin-only installation through the coordinator, respects holds, and keeps JSON clean", async () => {
+    const f = installed(); signIn(f.home);
+    const release = approved({ mutate: (r) => { r.skills = { cloud: f.target.target }; } });
+    const ctx = makeCtx(f.home, { env: f.env, fetch: memberFetch(200, { ok: true, release }) });
+    const options: UpdateOptions = { mode: "apply", imagesDir: join(f.home, "absent"), engine: () => { throw new Error("no Docker"); }, cliApply: fakeCliApply([]), pluginApply: (h, e, target, version, scope, deps) => applyCloudPluginUpdate(h, e, target, version, scope, { ...deps, exec: f.exec, repositoryUrl: () => f.target.repo }) };
+    setComponentPolicy(f.home, "skills-cloud", false);
+    expect((await runUpdate(ctx, options)).components.find((c) => c.id === "skills-cloud-plugin")).toMatchObject({ status: "held" });
+    expect(f.calls).toEqual([]);
+    setComponentPolicy(f.home, "skills-cloud", true);
     const report = await runUpdate(ctx, options);
-    expect(report.components.find((c) => c.id === "skills-cloud-plugin")).toMatchObject({ installed: NEXT, approved: NEXT, status: "updated", action: null });
-    expect(claude.calls).toEqual(["plugin marketplace update catalyst-cloud", "plugin update catalyst@catalyst-cloud --scope user"]);
-    expect(cloudPluginInventory(home, {})).toMatchObject({ state: "installed", version: NEXT });
+    expect(report.components.find((c) => c.id === "skills-cloud-plugin")).toMatchObject({ status: "updated", installedCommit: f.target.target.commit });
+    expect(report.components.find((c) => c.id === "skills-cloud")).toMatchObject({ status: "not_installed" });
     expect(updateReportLines(report)).toContain(`Cloud skills plugin: run /reload-plugins in Claude Code, or restart it, to load ${NEXT}.`);
-    expect(report.exitCode).toBe(0);
+    expect(ctx.out).toEqual([]);
   });
-
-  it("a marketplace that serves a version other than the approved one leaves the plugin where it is", async () => {
-    const home = tempHome();
-    installPlugin(home, OLD, OLD);
-    const ahead = `${NEXT.split(".").slice(0, 2).join(".")}.${Number(NEXT.split(".")[2]) + 1}`;
-    const claude = fakeClaude(home, ahead);
-    const { ctx, ...options } = applying(home, claude, { PATH: join(claudeBinary(), "..") });
-    const report = await runUpdate(ctx, options);
-    expect(report.components.find((c) => c.id === "skills-cloud-plugin")).toMatchObject({ installed: OLD, status: "pending", reason: "marketplace_not_approved" });
-    expect(claude.calls).toEqual(["plugin marketplace update catalyst-cloud"]);
-    expect(cloudPluginInventory(home, {})).toMatchObject({ version: OLD });
+  it("adopts only a clean allowlisted Git marketplace and rejects conflicting declarations", () => {
+    const f = installed();
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: f.source.dir });
+    git("remote", "add", "origin", "https://github.com/coalesce-labs/catalyst-cloud-skills.git");
+    const source = { source: "github", repo: "coalesce-labs/catalyst-cloud-skills" };
+    writeFileSync(join(f.config, "plugins/known_marketplaces.json"), JSON.stringify({ "catalyst-cloud": { source, installLocation: f.source.dir } }));
+    writeFileSync(join(f.config, "settings.json"), JSON.stringify({ extraKnownMarketplaces: { "catalyst-cloud": { source } } }));
+    expect(cloudPluginInventory(f.home, f.env)).toMatchObject({ state: "installed", commit: null });
+    writeFileSync(join(f.source.dir, "ignored-extra"), "local");
+    expect(applyCloudPluginUpdate(f.home, f.env, f.target.target, NEXT, "user", { exec: f.exec })).toMatchObject({ outcome: "failed", detail: "local_changes" });
+    rmSync(join(f.source.dir, "ignored-extra"));
+    expect(applyCloudPluginUpdate(f.home, f.env, f.target.target, NEXT, "user", { exec: f.exec, repositoryUrl: () => f.target.repo })).toMatchObject({ outcome: "updated", commit: f.target.target.commit });
+    writeFileSync(join(f.config, "settings.local.json"), JSON.stringify({ extraKnownMarketplaces: { "catalyst-cloud": { source: { source: "directory", path: "/custom" } } } }));
+    expect(cloudPluginInventory(f.home, f.env)).toMatchObject({ state: "unknown", reason: "plugin_scope_unsupported" });
   });
-
-  it("the scheduled run finds claude at the path recorded at setup, with no claude on its PATH", async () => {
-    const home = tempHome();
-    installPlugin(home, OLD, OLD);
-    const claude = fakeClaude(home, NEXT);
-    const recorded = claudeBinary();
-    const used: (string | null | undefined)[] = [];
-    const { ctx, ...options } = applying(home, claude, { PATH: "/usr/bin:/bin", [CLAUDE_PATH_ENV]: recorded });
-    const report = await runUpdate(ctx, {
-      ...options,
-      pluginApply: (h, e, target, scope, deps) => (used.push(deps.claudePath), applyCloudPluginUpdate(h, e, target, scope, { ...deps, exec: claude })),
-    });
-    expect(used).toEqual([recorded]);
-    expect(report.components.find((c) => c.id === "skills-cloud-plugin")).toMatchObject({ installed: NEXT, status: "updated" });
+  it("preserves a Git marketplace ref and verifies content when restoring a failed switch", () => {
+    const f = installed();
+    execFileSync("git", ["remote", "add", "origin", "https://github.com/coalesce-labs/catalyst-cloud-skills.git"], { cwd: f.source.dir });
+    const source = { source: "github", repo: "coalesce-labs/catalyst-cloud-skills", ref: "release/approved" };
+    const restore = () => {
+      writeFileSync(join(f.config, "plugins/known_marketplaces.json"), JSON.stringify({ "catalyst-cloud": { source, installLocation: f.source.dir } }));
+      writeFileSync(join(f.config, "settings.json"), JSON.stringify({ extraKnownMarketplaces: { "catalyst-cloud": { source } } }));
+    };
+    restore();
+    const calls: string[][] = [];
+    const result = applyCloudPluginUpdate(f.home, f.env, f.target.target, NEXT, "user", { repositoryUrl: () => f.target.repo, exec: (argv, cwd, env) => {
+      calls.push([...argv]);
+      if (argv[2] === "update") return { status: 1, stdout: "", stderr: "failure" };
+      if (argv[4] === "coalesce-labs/catalyst-cloud-skills#release/approved") { restore(); return { status: 0, stdout: "", stderr: "" }; }
+      return f.exec(argv, cwd, env);
+    } });
+    expect(result).toMatchObject({ outcome: "failed", detail: "update_failed" });
+    expect(calls.some((argv) => argv[4] === "coalesce-labs/catalyst-cloud-skills#release/approved")).toBe(true);
+    expect(cloudPluginInventory(f.home, f.env)).toMatchObject({ source: { argument: "coalesce-labs/catalyst-cloud-skills#release/approved" } });
   });
-
-  it("claude in Claude Code's usual install location is found with no PATH and no recorded path", () => {
-    const home = tempHome();
-    mkdirSync(join(home, ".local", "bin"), { recursive: true });
-    const path = join(home, ".local", "bin", "claude");
-    writeFileSync(path, "#!/bin/sh\n");
-    chmodSync(path, 0o755);
+  it("reports failed restoration and rejects wrong marketplace names before selection", () => {
+    const f = installed();
+    let selections = 0;
+    const failed = applyCloudPluginUpdate(f.home, f.env, f.target.target, NEXT, "user", { repositoryUrl: () => f.target.repo, exec: (argv, cwd, env) => {
+      if (argv[2] === "update" || argv[2] === "marketplace" && ++selections > 1) return { status: 1, stdout: "", stderr: "failure" };
+      return f.exec(argv, cwd, env);
+    } });
+    expect(failed).toMatchObject({ outcome: "failed", detail: "rollback_failed" });
+    const fresh = installed();
+    writeFileSync(join(fresh.target.repo, ".claude-plugin/marketplace.json"), JSON.stringify({ name: "unrelated", plugins: [{ name: "catalyst", source: "./" }] }));
+    execFileSync("git", ["add", "."], { cwd: fresh.target.repo });
+    execFileSync("git", ["commit", "-qm", "wrong marketplace"], { cwd: fresh.target.repo });
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fresh.target.repo, encoding: "utf8" }).trim();
+    expect(applyCloudPluginUpdate(fresh.home, fresh.env, { ...fresh.target.target, commit }, NEXT, "user", { exec: fresh.exec, repositoryUrl: () => fresh.target.repo })).toMatchObject({ outcome: "failed", detail: "source_mismatch" });
+    expect(fresh.calls).toEqual([]);
+  });
+  it("finds Claude in its usual location", () => {
+    const home = tempHome(); mkdirSync(join(home, ".local/bin"), { recursive: true });
+    const path = join(home, ".local/bin/claude"); writeFileSync(path, "#!/bin/sh\n"); chmodSync(path, 0o755);
     expect(resolveClaude(home, {})).toBe(path);
   });
-
-  it("NEGATIVE: with no claude found, the row reads update available with the one command, and nothing is changed", async () => {
-    const home = tempHome();
-    installPlugin(home, OLD, OLD);
-    const claude = fakeClaude(home, NEXT);
-    const { ctx, ...options } = applying(home, claude, {});
-    const report = await runUpdate(ctx, options);
-    const row = report.components.find((c) => c.id === "skills-cloud-plugin");
-    expect(row).toMatchObject({ installed: OLD, approved: NEXT, status: "update_available", action: CLOUD_PLUGIN_COMMAND });
-    expect(claude.calls).toEqual([]);
-    expect(updateReportLines(report)).toContain(`Cloud skills plugin: this CLI does not install ${NEXT} by itself yet. Run: ${CLOUD_PLUGIN_COMMAND}`);
-    expect(cloudPluginInventory(home, {})).toMatchObject({ version: OLD });
-  });
-
-  it("follows the Cloud skills setting: held, it does not move", async () => {
-    const home = tempHome();
-    installPlugin(home, OLD, OLD);
-    const claude = fakeClaude(home, NEXT);
-    const { ctx, ...options } = applying(home, claude, { PATH: join(claudeBinary(), "..") });
-    setComponentPolicy(home, "skills-cloud", false);
-    const report = await runUpdate(ctx, options);
-    expect(report.components.find((c) => c.id === "skills-cloud-plugin")).toMatchObject({ status: "held", reason: "owner_setting" });
-    expect(claude.calls).toEqual([]);
-  });
-
-  it("a machine without the plugin lists no plugin row", async () => {
-    const home = tempHome();
-    signIn(home);
-    const ctx = makeCtx(home, { fetch: memberFetch(200, { ok: true, release: approved() }) });
-    const report = await runUpdate(ctx, { mode: "check", imagesDir: join(home, "no-runner"), engine: noDocker });
-    expect(report.components.map((c) => c.id)).not.toContain("skills-cloud-plugin");
-  });
 });
-
 describe("catalyst runner auto-update records the claude command", () => {
   it("the schedule carries the claude path found at setup", async () => {
     const home = tempHome();

@@ -8,15 +8,9 @@
 // member route. The runner, supervisor and watchdog move through runner-update.ts's engine with that
 // same read, so the image half and the component half can never come from different approvals.
 //
-// This CLI applies the image components itself, moves the CLI to the approved version (installed
-// beside the running one and selected through the person's own command: update-cli.ts), and then
-// restarts a running local replica on it with its data (update-replica.ts). The Cloud skills pack
-// moves to its own approved version from that version's package, even while the CLI is held
-// (update-skills.ts), and its Claude plugin form moves through Claude Code when the plugin's
-// marketplace serves the approved version (update-plugin.ts). The Dev pack carries no version this CLI can read, so it is reported, never
-// moved. A project's SDK is reported
-// with its update command; an applying run changes a project's files only when its owner turned that
-// project's SDK updates on, and a check never does.
+// Filesystem packs and the user-scope Cloud plugin reconcile exact approved Git commits.
+// CLI, SDK and image versions retain their no-downgrade policies. Each adapter verifies its own
+// installed state, while this coordinator keeps one approval read and rechecks component holds.
 import {
   compareVersions,
   hostApproval,
@@ -32,8 +26,8 @@ import { loadConfig, type Ctx } from "./config.js";
 import { applyCliUpdate, type CliApplyResult } from "./update-cli.js";
 import { readInventory, type Inventory } from "./update-inventory.js";
 import { restartPending, restartReplica, type ReplicaRestartResult } from "./update-replica.js";
-import { applyCloudPackUpdate, type PackApplyResult } from "./update-skills.js";
-import { applyCloudPluginUpdate, CLOUD_PLUGIN_COMMAND, type PluginApplyDeps, type PluginApplyResult } from "./update-plugin.js";
+import { applyPackUpdate } from "./update-skills.js";
+import { applyCloudPluginUpdate, CLOUD_PLUGIN_COMMAND } from "./update-plugin.js";
 import { onboardStatePath, readOnboardJournal } from "./onboard.js";
 import {
   effectivePolicy,
@@ -81,6 +75,8 @@ export type ComponentId = UpdateComponent | "skills-cloud-plugin";
 
 export interface ComponentReport {
   id: ComponentId;
+  installedCommit?: string | null;
+  approvedCommit?: string | null;
   installed: string | null;
   approved: string | null;
   /** Images only: the full digest-pinned references behind the labels above. */
@@ -136,9 +132,9 @@ export interface UpdateOptions {
   /** Restarts a running replica on the selected CLI, expecting `target`; tests pass a fake. */
   replicaRestart?: (target: string) => Promise<ReplicaRestartResult>;
   /** Refreshes the Cloud skills pack in `skillsDir` to `target`; tests pass a fake. */
-  packApply?: (home: string, skillsDir: string, target: string) => PackApplyResult;
+  packApply?: typeof applyPackUpdate;
   /** Moves the Cloud pack's Claude plugin to `target` through Claude Code; tests pass a fake. */
-  pluginApply?: (home: string, env: NodeJS.ProcessEnv, target: string, scope: string, deps: PluginApplyDeps) => PluginApplyResult;
+  pluginApply?: typeof applyCloudPluginUpdate;
 }
 
 export const COMPONENT_LABELS: Readonly<Record<ComponentId, string>> = {
@@ -265,18 +261,15 @@ function componentRows(inventory: Inventory, policy: UpdatePolicy, release: Appr
     const target = release?.skills[pack] ?? null;
     const found = inventory.skills[pack];
     const approved = target?.version ?? null;
-    if (found.state === "not_installed") return finish(r, { installed: null, approved, status: "not_installed", reason: "not_installed", action: null });
-    if (found.state === "unknown") return finish(r, { installed: null, approved, status: "unknown", reason: found.reason, action: null });
-    if (target === null) return finish(r, { installed: found.version, approved: null, status: "approval_unavailable", reason: unavailable, action: null });
-    if (crossTrain) return finish(r, { installed: found.version, approved, status: "cross_train", reason: "cross_train", action: null });
-    const decided = versionStatus(found.version, target.version, r.enabled);
-    return finish(r, {
-      installed: found.version,
-      approved,
-      ...decided,
-      // An applying run moves the Cloud pack itself; the Dev pack's command is the owner's to run.
-      action: decided.status === "update_available" && pack === "dev" ? `npx skills add https://github.com/${target.repository}/tree/${target.commit} --all -g` : null,
-    });
+    const evidence = found.evidence;
+    const base = { installed: evidence?.version ?? (found.state === "installed" ? found.version : null), approved, installedCommit: evidence?.commit ?? null, approvedCommit: target?.commit ?? null, action: null };
+    if (found.state === "not_installed") return finish(r, { ...base, status: "not_installed", reason: "not_installed" });
+    if (target === null) return finish(r, { ...base, status: "approval_unavailable", reason: release ? "pack_not_approved" : unavailable });
+    if (crossTrain) return finish(r, { ...base, status: "cross_train", reason: "cross_train" });
+    if (!r.enabled) return finish(r, { ...base, status: "held", reason: "owner_setting" });
+    if (!evidence?.candidate) return finish(r, { ...base, status: "unknown", reason: evidence?.reason ?? "installation_owner_unknown" });
+    if (evidence.commit === target.commit && evidence.version === target.version) return finish(r, { ...base, status: "current", reason: "current" });
+    return finish(r, { ...base, status: "update_available", reason: evidence.commit === null ? "commit_unrecorded" : "commit_mismatch" });
   };
 
   // CTC-6791: the Claude plugin form follows the Cloud pack's setting, and is listed only where it is installed.
@@ -285,12 +278,14 @@ function componentRows(inventory: Inventory, policy: UpdatePolicy, release: Appr
     if (found.state === "not_installed") return null;
     const r = { ...row("skills-cloud"), id: "skills-cloud-plugin" as const };
     const approved = release?.members.plugin ?? null;
-    if (found.state === "unknown") return finish(r, { installed: null, approved, status: "unknown", reason: found.reason, action: null });
-    if (approved === null) return finish(r, { installed: found.version, approved: null, status: "approval_unavailable", reason: unavailable, action: null });
-    if (crossTrain) return finish(r, { installed: found.version, approved, status: "cross_train", reason: "cross_train", action: null });
-    const decided = versionStatus(found.version, approved, r.enabled);
-    // An applying run moves it through Claude Code; with no `claude` command found, the owner runs it.
-    return finish(r, { installed: found.version, approved, ...decided, action: decided.status === "update_available" && found.claude === null ? CLOUD_PLUGIN_COMMAND : null });
+    const target = release?.skills.cloud;
+    const base = { installed: found.state === "installed" ? found.version : null, approved, installedCommit: found.state === "installed" ? found.commit : null, approvedCommit: target?.commit ?? null, action: null };
+    if (!target || !approved) return finish(r, { ...base, status: "approval_unavailable", reason: release ? "pack_not_approved" : unavailable });
+    if (crossTrain) return finish(r, { ...base, status: "cross_train", reason: "cross_train" });
+    if (!r.enabled) return finish(r, { ...base, status: "held", reason: "owner_setting" });
+    if (found.state === "unknown") return finish(r, { ...base, status: "unknown", reason: found.reason });
+    if (found.commit === target.commit && found.version === approved) return finish(r, { ...base, status: "current", reason: "current" });
+    return finish(r, { ...base, status: "update_available", reason: found.claude === null ? "claude_not_found" : found.commit === null ? "commit_unrecorded" : "commit_mismatch", action: found.claude === null ? CLOUD_PLUGIN_COMMAND : null });
   })();
 
   const replica = row("replica");
@@ -449,29 +444,33 @@ export async function runUpdate(ctx: Ctx, options: UpdateOptions): Promise<Updat
         else Object.assign(cliRow, { status: "updated", reason: moved.detail, installed: moved.version });
       }
     }
-    const packRow = components.find((c) => c.id === "skills-cloud");
-    const pack = inventory.skills.cloud;
-    if (packRow && packRow.status === "update_available" && packRow.approved !== null && pack.state === "installed") {
-      if (!effectivePolicy(current, "skills-cloud").enabled) Object.assign(packRow, { status: "held", reason: "owner_setting" });
-      else {
-        const moved = (options.packApply ?? applyCloudPackUpdate)(ctx.home, pack.dir, packRow.approved);
-        if (moved.outcome === "updated") Object.assign(packRow, { status: "updated", reason: moved.detail, installed: moved.version });
-        else if (moved.outcome === "linked") Object.assign(packRow, { status: "unknown", reason: moved.detail });
-        else Object.assign(packRow, { status: "failed", reason: moved.detail, installed: moved.version ?? packRow.installed });
+    for (const name of ["cloud", "dev"] as const) {
+      const id = name === "cloud" ? "skills-cloud" : "skills-dev";
+      const packRow = components.find((c) => c.id === id);
+      const pack = inventory.skills[name];
+      const target = release.skills[name];
+      if (packRow && target && pack.dir && (packRow.status === "update_available" || packRow.reason === "local_changes")) {
+        if (!effectivePolicy(readEffectivePolicy(ctx), id).enabled) Object.assign(packRow, { status: "held", reason: "owner_setting" });
+        else {
+          const moved = (options.packApply ?? applyPackUpdate)(ctx.home, ctx.env, name, pack.dir, target);
+          if (moved.outcome === "updated" || moved.outcome === "current") Object.assign(packRow, { status: moved.outcome, reason: moved.detail, installed: moved.version, installedCommit: moved.commit ?? null });
+          else if (moved.outcome === "linked") Object.assign(packRow, { status: "unknown", reason: moved.detail });
+          else Object.assign(packRow, { status: "failed", reason: moved.detail, installed: moved.version ?? packRow.installed, installedCommit: null });
+        }
       }
     }
     const pluginRow = components.find((c) => c.id === "skills-cloud-plugin");
     const plugin = inventory.plugin;
-    if (pluginRow && pluginRow.status === "update_available" && pluginRow.approved !== null && plugin.state === "installed" && plugin.claude !== null) {
-      if (!effectivePolicy(current, "skills-cloud").enabled) Object.assign(pluginRow, { status: "held", reason: "owner_setting" });
+    if (pluginRow && pluginRow.status === "update_available" && pluginRow.approved !== null && plugin.state === "installed" && plugin.claude !== null && release.skills.cloud) {
+      if (!effectivePolicy(readEffectivePolicy(ctx), "skills-cloud").enabled) Object.assign(pluginRow, { status: "held", reason: "owner_setting" });
       else {
-        const moved = (options.pluginApply ?? applyCloudPluginUpdate)(ctx.home, ctx.env, pluginRow.approved, plugin.scope, { claudePath: plugin.claude });
-        if (moved.outcome === "updated") Object.assign(pluginRow, { status: "updated", reason: moved.detail, installed: moved.version });
-        else if (moved.outcome === "waiting") Object.assign(pluginRow, { status: "pending", reason: moved.detail });
+        const moved = (options.pluginApply ?? applyCloudPluginUpdate)(ctx.home, ctx.env, release.skills.cloud, pluginRow.approved, plugin.scope, { claudePath: plugin.claude });
+        if (moved.outcome === "updated") Object.assign(pluginRow, { status: "updated", reason: moved.detail, installed: moved.version, installedCommit: moved.commit ?? null });
         else if (moved.outcome === "no_claude") Object.assign(pluginRow, { action: CLOUD_PLUGIN_COMMAND });
         else Object.assign(pluginRow, { status: "failed", reason: moved.detail, installed: moved.version ?? pluginRow.installed });
       }
     }
+    if (pluginRow?.reason === "local_changes" && pluginRow.policy === "on") Object.assign(pluginRow, { status: "failed" });
     if (replicaRow && replicaRow.approved !== null) {
       const cliRuns = cliRow?.status === "updated" || cliRow?.status === "current" || cliRow?.status === "installed_newer";
       const due =
@@ -609,11 +608,21 @@ export function updateReportLines(report: UpdateReport): string[] {
     lines.push(`${cell(COMPONENT_LABELS[c.id], 19)}${cell(c.installed ?? "-", 16)}${cell(c.approved ?? "-", 16)}${STATUS_TEXT[c.status](c)}`);
   for (const project of report.projects)
     for (const r of sdkRows(project)) lines.push(`${cell(r.label, 19)}${cell(r.installed, 16)}${cell(r.approved, 16)}${r.status}`);
+  for (const component of report.components) {
+    if (component.approvedCommit && component.status !== "not_installed")
+      lines.push(`${COMPONENT_LABELS[component.id]} commit: ${component.installedCommit ?? "unknown"} -> ${component.approvedCommit}`);
+    if (component.reason === "pack_not_approved")
+      lines.push(`${COMPONENT_LABELS[component.id]}: no approved pack was provided; the installed pack was kept.`);
+    if (component.status === "failed" && component.approvedCommit)
+      lines.push(`${COMPONENT_LABELS[component.id]}: the approved commit was not installed (${component.reason}).${component.reason === "local_changes" ? " Local changes were kept." : ""} Run catalyst update --check --json to inspect the result.`);
+  }
   if (report.projects.length === 0) lines.push("SDK projects: none registered");
 
   for (const c of report.components)
     if (c.action !== null && (c.status === "update_available" || c.status === "pending"))
-      lines.push(`${COMPONENT_LABELS[c.id]}: this CLI does not install ${c.approved ?? "it"} by itself yet. Run: ${c.action}`);
+      lines.push(c.id === "skills-cloud-plugin" && c.reason === "claude_not_found"
+        ? `Cloud skills plugin: Claude Code was not found. Make the claude command available, then run catalyst update.`
+        : `${COMPONENT_LABELS[c.id]}: this CLI does not install ${c.approved ?? "it"} by itself yet. Run: ${c.action}`);
   for (const project of report.projects)
     if (project.command !== null && project.applied?.outcome !== "updated") lines.push(`Update this project's SDK: ${project.command}`);
   // CTC-6741: a failed CLI move leaves the running version in place; say so, and when it is tried again.

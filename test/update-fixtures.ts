@@ -1,7 +1,8 @@
+import { execFileSync } from "node:child_process";
 // update-fixtures.ts — shared builders for the CTC-6708 release-check tests: an approved component
 // record, the host desired-release answer that carries it, a fake image engine that counts its calls,
 // a runner installation, a signed-in config, an installed Cloud skills pack and an SDK project.
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configPathFor, readManifest, type CustomerConfig } from "../src/config";
@@ -9,6 +10,7 @@ import type { DesiredReleaseRead, ReleaseComponent, RunnerUpdateEngine } from ".
 import type { SdkExec } from "../src/update-sdk";
 import type { CliApplyResult } from "../src/update-cli";
 import type { ReplicaRestartResult } from "../src/update-replica";
+import type { ApprovedSkillPack } from "../src/approved-release";
 import type { PackApplyResult } from "../src/update-skills";
 
 const hex = (c: string) => c.repeat(64);
@@ -235,8 +237,35 @@ export function fakeReplicaRestart(calls: string[], outcome: ReplicaRestartResul
 
 /** Stands in for the Cloud pack refresh: records each target and answers `outcome`. */
 export function fakePackApply(calls: string[], outcome: PackApplyResult["outcome"] = "updated") {
-  return (_home: string, _dir: string, target: string): PackApplyResult => {
-    calls.push(target);
-    return outcome === "failed" ? { outcome, detail: "install_failed", version: null } : { outcome, detail: "refreshed", version: target };
+  return (_home: string, _env: NodeJS.ProcessEnv, _pack: "cloud" | "dev", _dir: string, target: ApprovedSkillPack): PackApplyResult => {
+    calls.push(target.version);
+    return outcome === "failed" ? { outcome, detail: "install_failed", version: null } : { outcome, detail: "approved_commit_installed", version: target.version, commit: target.commit };
   };
+}
+
+/** A real Git transport fixture: A is approved while branch head B has different bytes. */
+export function skillRepository(pack: "cloud" | "dev" = "cloud", version = NEXT) {
+  const repo = mkdtempSync(join(tmpdir(), "skill-repository-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+  git("init", "-q");
+  git("config", "user.email", "fixture@example.test");
+  git("config", "user.name", "Fixture");
+  const name = pack === "cloud" ? "catalyst-onboard" : "research-codebase";
+  mkdirSync(join(repo, "skills", name), { recursive: true });
+  mkdirSync(join(repo, ".claude-plugin"));
+  if (pack === "cloud") {
+    // These committed metadata links also exist in the published Cloud repository.
+    mkdirSync(join(repo, ".claude"));
+    symlinkSync("../.agents/rules", join(repo, ".claude/rules"));
+    symlinkSync("../.agents/skills", join(repo, ".claude/skills"));
+  }
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ version }));
+  writeFileSync(join(repo, ".claude-plugin/plugin.json"), JSON.stringify({ name: "catalyst", version, skills: "./skills/" }));
+  writeFileSync(join(repo, ".claude-plugin/marketplace.json"), JSON.stringify({ name: "catalyst-cloud", owner: { name: "Fixture" }, plugins: [{ name: "catalyst", source: "./" }] }));
+  writeFileSync(join(repo, "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: fixture\n---\n<!-- vendored-from: @catalyst-cloud/catalyst-skills@${version} -->\napproved A\n`);
+  git("add", "."); git("commit", "-qm", "approved A");
+  const commit = git("rev-parse", "HEAD");
+  writeFileSync(join(repo, "skills", name, "SKILL.md"), "later B\n");
+  git("add", "."); git("commit", "-qm", "later B");
+  return { repo, name, target: { version, repository: `coalesce-labs/catalyst-${pack}-skills`, commit } };
 }
