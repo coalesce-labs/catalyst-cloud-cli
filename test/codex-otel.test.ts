@@ -53,9 +53,10 @@ describe("the exporter tables of a config.toml", () => {
   });
 
   test("a line of a multi-line array is never read as a table, so the copied tables stay whole", () => {
-    const text = '[otel]\nresource = [\n  [ "a", "b" ],\n  "c",\n]\nenvironment = "dev"\n[tui]\nz = 1\n';
-    expect(otelTables(text)).toBe('[otel]\nresource = [\n  [ "a", "b" ],\n  "c",\n]\nenvironment = "dev"\n');
-    expect(hasOtel('a = [\n  "[otel]",\n]\n')).toBe(false);
+    // The element lines have no trailing comma, so they look exactly like table headers on their own.
+    const text = '[otel]\nresource = [\n  "c",\n  [ "a", "b" ]\n]\nenvironment = "dev"\n[tui]\nz = 1\n';
+    expect(otelTables(text)).toBe('[otel]\nresource = [\n  "c",\n  [ "a", "b" ]\n]\nenvironment = "dev"\n');
+    expect(hasOtel('a = [\n  [otel]\n]\n')).toBe(false);
   });
 
   test.each([["x = 1\n"], ["x = 1"], [""], ["a = 1\n\n"]])("the block comes out of %j byte for byte", (original) => {
