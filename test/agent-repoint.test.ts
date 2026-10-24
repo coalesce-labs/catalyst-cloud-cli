@@ -407,3 +407,74 @@ describe("bin/postinstall.js", () => {
     expect(readFileSync(plist, "utf8")).toBe(before);
   });
 });
+
+// CTC-7030: a Mac's thoughts custody records the node it was set up with, and every update refuses any
+// other. The agent runs this install under that node, and an agent already on this install is fixed.
+describe("a Mac with a thoughts custody keeps its custody's node", () => {
+  const custodyNodeAt = (node: string, executable = true) => {
+    if (executable) {
+      mkdirSync(dirname(node), { recursive: true });
+      writeFileSync(node, "#!/bin/sh\n");
+      chmodSync(node, 0o755);
+    }
+    const state = join(dirname(dir), "darwin-thoughts-custody");
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, "runtime.json"), JSON.stringify({ version: 1, nodeExecutable: node, nodeExecutableSha256: "a".repeat(64) }));
+    return node;
+  };
+  const args = (plist: string) => {
+    const array = /<key>ProgramArguments<\/key><array>(.*?)<\/array>/.exec(readFileSync(plist, "utf8"))?.[1] ?? "";
+    return [...array.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]);
+  };
+
+  it("POSITIVE: an agent already on this install, under another node, is rewritten to run under the custody's node", () => {
+    const node = custodyNodeAt(join(root, "brew", "Cellar", "node", "bin", "node"));
+    const self = install("node", "0.16.37");
+    const plist = writeAgent(self);
+    const before = readFileSync(plist, "utf8");
+
+    expect(repoint(self, "0.16.37")).toEqual({ action: "repointed", from: self, fromVersion: "0.16.37", to: self, backup: `${plist}.before-0.16.37`, node });
+    expect(args(plist)).toEqual([node, self, "runner", "update", "--auto", "--dir", dir]);
+    expect(readFileSync(`${plist}.before-0.16.37`, "utf8")).toBe(before);
+    expect(readFileSync(join(dir, "update.log"), "utf8")).toContain(`under ${node}, the node this machine's thoughts custody was set up with,`);
+    // The rewritten agent is recognized, and a second install leaves it alone.
+    expect(repoint(self, "0.16.37")).toEqual({ action: "skipped", reason: "already_current" });
+  });
+
+  it("an agent on an older CLI moves to this install under the custody's node", () => {
+    const node = custodyNodeAt(join(root, "brew", "Cellar", "node", "bin", "node"));
+    const stale = install("brew", "0.16.31");
+    const self = install("node", "0.16.37");
+    const plist = writeAgent(stale);
+    expect(repoint(self, "0.16.37")).toMatchObject({ action: "repointed", from: stale, fromVersion: "0.16.31", node });
+    expect(args(plist)).toEqual([node, self, "runner", "update", "--auto", "--dir", dir]);
+  });
+
+  it("NEGATIVE: with no custody, an agent already on this install is left exactly as it is", () => {
+    const self = install("node", "0.16.37");
+    const plist = writeAgent(self);
+    const before = readFileSync(plist, "utf8");
+    expect(repoint(self, "0.16.37")).toEqual({ action: "skipped", reason: "already_current" });
+    expect(readFileSync(plist, "utf8")).toBe(before);
+  });
+
+  it("NEGATIVE: a custody whose node is gone names no node, so the agent keeps running by its own line", () => {
+    custodyNodeAt(join(root, "gone", "bin", "node"), false);
+    const stale = install("brew", "0.16.31");
+    const self = install("node", "0.16.37");
+    const plist = writeAgent(stale);
+    const result = repoint(self, "0.16.37");
+    expect(result).toMatchObject({ action: "repointed" });
+    expect(result).not.toHaveProperty("node");
+    expect(args(plist)).toEqual([self, "runner", "update", "--auto", "--dir", dir]);
+  });
+
+  it("NEGATIVE: a systemd timer never takes a node from a custody file", () => {
+    custodyNodeAt(join(root, "brew", "Cellar", "node", "bin", "node"));
+    const self = install("node", "0.16.37");
+    const service = writeAgent(self, "linux");
+    const before = readFileSync(service, "utf8");
+    expect(repoint(self, "0.16.37", "linux")).toEqual({ action: "skipped", reason: "already_current" });
+    expect(readFileSync(service, "utf8")).toBe(before);
+  });
+});
