@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.37
+
+On a Mac with thoughts custody, every runner update failed after 0.16.35 or 0.16.36 pointed the runner update agent at a CLI installed under a different node. The update log showed `custody_restore_failed:runtime_custody_mismatch`. The custody records the node it was set up with, and refuses any other. The update agent now runs the CLI under that recorded node, whether `catalyst runner auto-update on` or the global install writes it. Installing this release globally repairs an agent that was already moved, and keeps the previous agent file beside it, as `<file>.before-0.16.37`. A Mac without thoughts custody, and Linux, are unchanged.
+
 ## 0.16.36
 
 `catalyst setup --only codex-attribution` turns on Codex attribution on a machine that is already set up, without running the other setup steps. It adds the codex function to `~/.zshrc` and `~/.bashrc`, and on a Mac the login agent. Before it first changes an rc file, it keeps a byte-for-byte copy beside it, ending in `.before-codex-attribution`, and never overwrites an earlier copy. Running it again changes nothing. `--dry-run` shows exactly what it would add and changes nothing, and `--json` prints the result as one document.
