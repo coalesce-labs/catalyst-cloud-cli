@@ -80,7 +80,7 @@ describe("the release check lists every component against the approved release",
     const col = (text: string, width: number) => (text.length >= width ? `${text} ` : text.padEnd(width));
     const pad = (a: string, b: string, c: string, d: string) => `${col(a, 19)}${col(b, 16)}${col(c, 16)}${d}`;
     expect(updateReportLines(report)).toEqual([
-      `Approved release: example-89, generation 89, train ${TRAIN}`,
+      `Approved release: example-3, generation 3, train ${TRAIN}`,
       pad("Component", "Installed", "Approved", "Status"),
       pad("Runner", "generation 88", "generation 89", "update available"),
       pad("Supervisor", "generation 88", "generation 89", "update available"),
@@ -104,7 +104,7 @@ describe("the release check lists every component against the approved release",
   it("--json carries full digests, every component, and the project with its command", async () => {
     const { ctx, options } = hostCase();
     const json = updateReportJson(await runUpdate(ctx, options("check")));
-    expect(json).toMatchObject({ schemaVersion: 1, mode: "check", release: { id: "example-89", generation: 89, releaseLine: TRAIN, source: "host" }, projects: [] });
+    expect(json).toMatchObject({ schemaVersion: 1, mode: "check", release: { id: "example-3", generation: 3, releaseLine: TRAIN, source: "host" }, projects: [] });
     const components = json.components as { id: string; installedReference?: string; approvedReference?: string; status: string }[];
     expect(components.map((c) => c.id)).toEqual(["runner", "supervisor", "watchdog", "cli", "skills-cloud", "skills-dev", "replica"]);
     expect(components[1]).toMatchObject({ installedReference: ref("supervisor", "8"), approvedReference: ref("supervisor", "2") });
@@ -355,7 +355,7 @@ describe("when the approval cannot be used, nothing moves", () => {
     const report = await runUpdate(makeCtx(home, { fetch: down }), { mode: "check", imagesDir: "/nonexistent-runner", engine: noDocker });
     expect(updateReportLines(report)).toEqual([
       "Approved release unavailable: the service could not be reached.",
-      "Last observed release: example-89, generation 89. It was not used to apply updates.",
+      "Last observed release: example-3, generation 3. It was not used to apply updates.",
       "Nothing was changed.",
     ]);
     expect(report.exitCode).toBe(1);
@@ -434,7 +434,7 @@ describe("a runner that cannot read its release (review fix)", () => {
     const engine = countingEngine({ kind: "no_credential" });
     const report = await runUpdate(makeCtx(home, { fetch: fetchImpl }), { mode: "check", imagesDir: runnerInstall(), engine: () => engine });
     expect(fetchImpl.calls).toHaveLength(1);
-    expect(report.release).toMatchObject({ id: "example-89", source: "network" });
+    expect(report.release).toMatchObject({ id: "example-3", source: "network" });
     expect(report.components.find((c) => c.id === "cli")).toMatchObject({ approved: NEXT, status: "update_available" });
     expect(report.components[0]).toMatchObject({ status: "approval_unavailable" });
   });
