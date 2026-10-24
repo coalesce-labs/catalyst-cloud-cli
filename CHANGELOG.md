@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.34
+
+`catalyst runner update` now tells Catalyst how its previous run went when it reads the approved release. A self-hosted machine that keeps waiting, refusing or rolling back an update shows up without anyone reading its local log. It sends a short report: the outcome, its reason code, the release it runs, the release that run was offered, when it ran and the CLI version. `--check` sends nothing, and nothing beyond that fixed set of words leaves the machine. When a self-hosted Mac cannot re-check its private storage during an update, the update log now names the reason instead of a generic failure.
+
+`catalyst update` now puts the Cloud and Dev skills packs and the Cloud Claude plugin at the exact commits the approved release names. Before, a matching version number read as current even from a different commit, and a pack ahead of the approved release stayed ahead. The Cloud plugin moves through Claude Code from the same verified copy, and the CLI no longer copies its bundled skills over an approved installation when it starts.
+
+`catalyst codex-env` adds the AI account and the machine name to the telemetry attributes a Codex launch reports, so its usage can be summed per account. `--print` prints the value, `--apply` sets it for apps opened from the Dock on macOS, and `--refresh` fetches the workspace's AI accounts again. `catalyst setup` now installs this for you when Codex is on the machine: a small `codex` wrapper in `~/.zshrc` and `~/.bashrc` for terminal launches, and on macOS a login item that covers Codex opened from the Dock. If the CLI cannot answer, Codex starts exactly as before. `catalyst setup --no-shell-hook` skips both, `catalyst setup --remove-codex-attribution` removes them, and `catalyst status` says whether they are installed.
+
 ## 0.16.33
 
 On a self-hosted machine, `catalyst update` now sees the approved versions of the CLI and the Cloud and Dev skills, and moves them. Before this release it reported "no approved version" for all three on every self-hosted machine and left them where they were. The runner images were not affected.
