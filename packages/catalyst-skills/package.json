@@ -1,6 +1,6 @@
 {
   "name": "@catalyst-cloud/catalyst-skills",
-  "version": "0.16.36",
+  "version": "0.16.37",
   "description": "Deprecated name of @catalyst-cloud/cli. Installs the same Catalyst Cloud CLI release, with the catalyst command and the old catalyst-skills name. Install @catalyst-cloud/cli instead.",
   "license": "MIT",
   "type": "module",
@@ -28,7 +28,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@catalyst-cloud/cli": "0.16.36"
+    "@catalyst-cloud/cli": "0.16.37"
   },
   "scripts": {
     "prepublishOnly": "node ../../scripts/release-train-check.mjs --publish cli"
