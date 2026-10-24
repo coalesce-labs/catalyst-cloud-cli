@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.38
+
+On a Mac with thoughts custody, a runner update agent that 0.16.35 or 0.16.36 moved kept failing every update with `custody_restore_failed:runtime_custody_mismatch`, even after the CLI updated itself to 0.16.37. The scheduled update installs the new CLI beside the old one, not globally, so the 0.16.37 repair never ran. Now `catalyst runner update` checks which node it runs under. When that differs from the node the custody was set up with, it runs the same command again under the custody's node and exits with that run's result. The agent file is left as it is, and no run in progress is interrupted. `--check` and `--fleet`, a Mac without thoughts custody, and Linux are unchanged.
+
+`catalyst setup --only codex-attribution --codex-home <dir>` gives a second Codex home the default home's telemetry exporter, so its usage is reported too. It does this only for a home logged in to one of the workspace's coding accounts that has no exporter of its own. Before it changes that home's `config.toml`, it keeps a copy beside it, and the new file is never more readable than the original. A `config.toml` that is a link is left alone. `--dry-run` shows the exporter it would copy with every value except the endpoint, protocol and environment shown as `<hidden>`. `catalyst setup --remove-codex-attribution --codex-home <dir>` takes the copied exporter back out.
+
 ## 0.16.37
 
 On a Mac with thoughts custody, every runner update failed after 0.16.35 or 0.16.36 pointed the runner update agent at a CLI installed under a different node. The update log showed `custody_restore_failed:runtime_custody_mismatch`. The custody records the node it was set up with, and refuses any other. The update agent now runs the CLI under that recorded node, whether `catalyst runner auto-update on` or the global install writes it. Installing this release globally repairs an agent that was already moved, and keeps the previous agent file beside it, as `<file>.before-0.16.37`. A Mac without thoughts custody, and Linux, are unchanged.
