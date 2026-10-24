@@ -30,6 +30,8 @@ Every write spends one unit of the per-host daily budget (`thresholds.hostDailyW
 
 `--label`, `--add` and `--remove` take a label's name or its UUID. A UUID is sent as a label id; every other value is sent as a name, and the proxy resolves it in the ticket's team. When the contract lists one of Catalyst's own labels (the ask marker, the hold label, the release label) as absent from the workspace, the CLI refuses rather than inventing it.
 
+For work-type and component choices, load [ticket classification](ticket-classification.md) and the project's `.agents/references/ticket-labels.json` when present. Those files define recommendations, not live IDs. Verify the current team's label scope and the ticket's existing memberships before changing any classification label. A case-only duplicate needs a synchronization check, a disposable canary and delayed readback in both systems before wider cleanup. Include archived labels and issues in the inventory.
+
 Two labels are a human's, not yours: the release label (which frees a ticket the shape detector held) is applied by a human; the hold labels on a pull request are `catalyst-github`'s subject.
 
 ## A new ticket takes the team key
