@@ -1,0 +1,186 @@
+// agent-repoint.ts — CTC-6975. A machine set up before 0.16.33 runs its runner update agent from a CLI
+// that can never move itself: those CLIs read no approved component release on a self-hosted machine,
+// so the agent's own copy stays where it was installed, while the daily job installs the newest CLI
+// into its own global prefix. npm runs this from that install (bin/postinstall.js) and points an older
+// agent at the copy updates do move.
+//
+// It only ever moves the agent forward, touches only this CLI's own agent, keeps the agent's runner
+// directory and PATH, and never fails the install. Removing the stale copy is the installer's job.
+import { appendFileSync, existsSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { compareVersions, exactVersion } from "./approved-release.js";
+import { readManifest } from "./config.js";
+import {
+  enableAutoUpdate,
+  launchAgentPath,
+  scheduledPath,
+  systemdUnitPaths,
+  type SchedulerRun,
+} from "./runner-auto-update.js";
+import { CLAUDE_PATH_ENV, resolveClaude } from "./update-plugin.js";
+
+export interface RepointDeps {
+  platform?: NodeJS.Platform;
+  home: string;
+  uid?: number;
+  /** The `catalyst` command this install put on PATH. */
+  self: string;
+  /** This install's version. */
+  version: string;
+  /** The node running this install, so the agent's PATH finds it. */
+  nodeExecutable: string;
+  env: NodeJS.ProcessEnv;
+  run?: SchedulerRun;
+}
+
+export type RepointResult =
+  | { action: "skipped"; reason: "unsupported_platform" | "no_agent" | "agent_unrecognized" | "already_current" | "agent_cli_unrecognized" | "agent_cli_not_older" }
+  | { action: "repointed"; from: string; fromVersion: string | null; to: string }
+  | { action: "failed"; detail: string };
+
+interface AgentProgram {
+  cli: string;
+  dir: string;
+  path: string | null;
+  claude: string | null;
+}
+
+const unxml = (value: string) =>
+  value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+
+/** The agent's command, from a plist this CLI wrote (launchAgentPlist). Anything else is unrecognized. */
+function plistProgram(text: string): AgentProgram | null {
+  const array = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1];
+  if (array === undefined) return null;
+  const args = [...array.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((m) => unxml(m[1] ?? ""));
+  const env = (key: string) => {
+    const m = new RegExp(`<key>${key}</key>\\s*<string>([\\s\\S]*?)</string>`).exec(text);
+    return m ? unxml(m[1] ?? "") : null;
+  };
+  return programOf(args, env("PATH"), env(CLAUDE_PATH_ENV));
+}
+
+/** systemd's quoted words, as systemdUnits writes them. */
+function unitWords(line: string): string[] {
+  return [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => (m[1] ?? "").replace(/\\(.)/g, "$1").replace(/%%/g, "%"));
+}
+
+function unitProgram(text: string): AgentProgram | null {
+  const lines = text.split("\n");
+  const exec = lines.find((l) => l.startsWith("ExecStart="));
+  if (exec === undefined) return null;
+  const envs = lines.filter((l) => l.startsWith("Environment=")).flatMap((l) => unitWords(l));
+  const env = (key: string) => envs.find((e) => e.startsWith(`${key}=`))?.slice(key.length + 1) ?? null;
+  return programOf(unitWords(exec), env("PATH"), env(CLAUDE_PATH_ENV));
+}
+
+function programOf(args: string[], path: string | null, claude: string | null): AgentProgram | null {
+  const [cli, ...rest] = args;
+  if (cli === undefined || !cli.startsWith("/") || rest.length !== 5) return null;
+  const [a, b, c, d, dir] = rest;
+  if (a !== "runner" || b !== "update" || c !== "--auto" || d !== "--dir" || dir === undefined || !dir.startsWith("/")) return null;
+  return { cli, dir, path, claude };
+}
+
+const real = (path: string): string | null => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+};
+
+/** The version of the catalyst package a command belongs to, or null when it is not one. */
+export function cliVersionAt(command: string): string | null {
+  const resolved = real(command);
+  if (resolved === null) return null;
+  let dir = dirname(resolved);
+  for (let i = 0; i < 4; i++) {
+    const manifest = join(dir, "package.json");
+    if (existsSync(manifest)) {
+      try {
+        const pkg = JSON.parse(readFileSync(manifest, "utf8")) as { name?: unknown; version?: unknown };
+        if (pkg.name === "@catalyst-cloud/cli" || pkg.name === "@catalyst-cloud/catalyst-skills") return exactVersion(pkg.version);
+      } catch {
+        return null;
+      }
+      return null;
+    }
+    dir = dirname(dir);
+  }
+  return null;
+}
+
+/** Point an older runner update agent at this install. Never throws. */
+export function repointAgent(deps: RepointDeps): RepointResult {
+  try {
+    const platform = deps.platform ?? process.platform;
+    let program: AgentProgram | null;
+    if (platform === "darwin") {
+      const path = launchAgentPath(deps.home);
+      if (!existsSync(path)) return { action: "skipped", reason: "no_agent" };
+      program = plistProgram(readFileSync(path, "utf8"));
+    } else if (platform === "linux") {
+      const { service } = systemdUnitPaths(deps.home);
+      if (!existsSync(service)) return { action: "skipped", reason: "no_agent" };
+      program = unitProgram(readFileSync(service, "utf8"));
+    } else {
+      return { action: "skipped", reason: "unsupported_platform" };
+    }
+    if (program === null) return { action: "skipped", reason: "agent_unrecognized" };
+
+    const from = real(program.cli);
+    if (from !== null && from === real(deps.self)) return { action: "skipped", reason: "already_current" };
+    // A program that no longer exists runs nothing, so any working copy is better. One that exists
+    // moves only when it is a catalyst CLI older than this one.
+    let fromVersion: string | null = null;
+    if (from !== null) {
+      fromVersion = cliVersionAt(program.cli);
+      if (fromVersion === null) return { action: "skipped", reason: "agent_cli_unrecognized" };
+      if (compareVersions(fromVersion, deps.version) >= 0) return { action: "skipped", reason: "agent_cli_not_older" };
+    }
+
+    const status = enableAutoUpdate(
+      {
+        platform,
+        home: deps.home,
+        uid: deps.uid,
+        cli: deps.self,
+        path: scheduledPath(deps.self, deps.nodeExecutable, program.path ?? deps.env.PATH),
+        claude: program.claude ?? resolveClaude(deps.home, deps.env),
+        run: deps.run,
+      },
+      program.dir,
+    );
+    if (status.state !== "on") return { action: "failed", detail: status.detail };
+    const result: RepointResult = { action: "repointed", from: program.cli, fromVersion, to: deps.self };
+    try {
+      appendFileSync(join(program.dir, "update.log"), `${new Date().toISOString()} ${repointLine(result, deps.version)}\n`);
+    } catch {
+      // the agent's log is a courtesy; the agent itself is already moved
+    }
+    return result;
+  } catch (err) {
+    return { action: "failed", detail: (err instanceof Error ? err.message : String(err)).slice(0, 160) };
+  }
+}
+
+/** One line for the person, or null when there is nothing to say. */
+export function repointLine(result: RepointResult, version: string): string | null {
+  if (result.action === "repointed")
+    return `catalyst: the runner update agent now runs ${result.to} (${version}) instead of ${result.from} (${result.fromVersion ?? "missing"}).`;
+  if (result.action === "failed")
+    return `catalyst: could not point the runner update agent at this install (${result.detail}). Run: catalyst runner auto-update on`;
+  return null;
+}
+
+/** npm's postinstall, for a global install: this install's own command, version and node. */
+export function postinstallRepoint(env: NodeJS.ProcessEnv = process.env): string | null {
+  const version = readManifest().version;
+  const linked = env.npm_config_prefix ? join(env.npm_config_prefix, "bin", "catalyst") : null;
+  const self = linked !== null && existsSync(linked) ? linked : fileURLToPath(new URL("../bin/catalyst.js", import.meta.url));
+  const home = env.HOME;
+  if (!home) return null;
+  return repointLine(repointAgent({ home, self, version, nodeExecutable: process.execPath, env }), version);
+}
