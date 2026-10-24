@@ -716,6 +716,21 @@ const OUTCOME_TEXT: Record<UpdateOutcome, string> = {
   failed: "The update could not finish. Look at the runner with docker compose ps.",
 };
 
+/** The last run's record when it ended badly: a failed or rolled-back update a person should know
+ *  about even after a later check reads clean (CTC-6709). Null otherwise. */
+export function lastProblem(state: ReleaseState): NonNullable<ReleaseState["last"]> | null {
+  const last = state.last;
+  return last !== null && (last.outcome === "failed" || last.outcome === "rolled_back") ? last : null;
+}
+
+/** One line naming the last failed or rolled-back update, for `runner update --check`. */
+export function lastProblemLines(state: ReleaseState): string[] {
+  const last = lastProblem(state);
+  if (last === null) return [];
+  const what = last.outcome === "rolled_back" ? "was rolled back" : "failed";
+  return [`The last update, at ${new Date(last.atMs).toISOString()}, ${what} (${last.detail}; offered generation ${last.generation ?? "none"}).`];
+}
+
 export function updateResultLines(result: UpdateResult): string[] {
   return [
     OUTCOME_TEXT[result.outcome],

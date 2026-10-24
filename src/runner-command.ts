@@ -17,6 +17,8 @@ import {
   runnerDir,
   runRunnerUpdate,
   updateResultLines,
+  lastProblem,
+  lastProblemLines,
   type RunnerUpdateEngine,
   type UpdateResult,
 } from "./runner-update.js";
@@ -163,10 +165,12 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
         else for (const line of updateResultLines(result)) ctx.stdout(line);
         return result.exitCode;
       }
+      // A check also names the last failed or rolled-back update, which a clean read would hide (CTC-6709).
+      const state = readReleaseState(dir());
       if (args.json) {
         const { schemaVersion, release, components, projects } = updateReportJson(report);
-        ctx.stdout(JSON.stringify({ ...result, schemaVersion, release, components, projects }));
-      } else for (const line of [...updateResultLines(result), ...updateReportLines(report)]) ctx.stdout(line);
+        ctx.stdout(JSON.stringify({ ...result, schemaVersion, release, components, projects, lastProblem: lastProblem(state) }));
+      } else for (const line of [...updateResultLines(result), ...lastProblemLines(state), ...updateReportLines(report)]) ctx.stdout(line);
       return result.exitCode;
     }
     return print(result, await components(result));
