@@ -42,6 +42,18 @@ describe("desiredRelease reads the container's one JSON line and nothing else", 
     expect(calls[0]).toEqual(expect.arrayContaining(["--project-name", "catalyst-host", "run", "--rm", "-T", "--no-deps", "--entrypoint", "bun", "supervisor"]));
   });
 
+  it("CTC-6924: a report rides into the container as one environment value, and none without a report", async () => {
+    const answer = { code: 0, stdout: JSON.stringify({ kind: "answered", status: 200, body: { ok: true }, hostId: HOST }) };
+    const { exec, calls } = scripted((args) => (has(args, "run", "--rm", "supervisor") ? answer : undefined));
+    const engine = dockerRunnerUpdateEngine({ exec, env: {} });
+    await engine.desiredRelease(install(), undefined, '{"v":1}');
+    await engine.desiredRelease(install());
+    const [withReport, without] = calls;
+    expect(withReport!.slice(withReport!.indexOf("-e"), withReport!.indexOf("-e") + 2)).toEqual(["-e", 'CATALYST_UPDATE_REPORT={"v":1}']);
+    expect(withReport!.indexOf("-e")).toBeLessThan(withReport!.indexOf("supervisor"));
+    expect(without!.filter((a) => a.startsWith("CATALYST_UPDATE_REPORT="))).toEqual([]);
+  });
+
   it("an unreachable read keeps a short detail", async () => {
     const { result } = await read({ code: 0, stdout: JSON.stringify({ kind: "unreachable", detail: "x".repeat(200), hostId: HOST }) });
     expect(result).toEqual({ kind: "unreachable", detail: "x".repeat(80), hostId: HOST });
