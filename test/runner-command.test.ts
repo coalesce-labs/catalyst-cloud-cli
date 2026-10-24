@@ -86,6 +86,25 @@ describe("catalyst runner update", () => {
     expect(ctx.out).toEqual(["2026-10-17T13:30:00.000Z retained release_unavailable generation=none"]);
   });
 
+  it("the schedule's run sends the previous run's outcome on its one release read, and --check sends none (CTC-6999)", async () => {
+    const reports: Array<string | undefined> = [];
+    const recording = (): RunnerUpdateEngine => {
+      const base = engine(503);
+      return { ...base, desiredRelease: async (dir, signal, report) => (reports.push(report), base.desiredRelease(dir, signal, report)) };
+    };
+    const dir = install();
+    writeFileSync(join(dir, "release-state.json"), JSON.stringify({
+      version: 1, generation: 112, releaseId: "hr-112", appliedAtMs: 1, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
+      last: { atMs: 1_800_000_000_000, outcome: "current", detail: "not_newer", generation: 112 },
+    }));
+    expect(await main(["runner", "update", "--auto", "--dir", dir], makeCtx(tempHome()), { runner: { engine: recording() } })).toBe(0);
+    expect(reports).toHaveLength(1);
+    expect(JSON.parse(reports[0] ?? "")).toMatchObject({ v: 1, outcome: "current", detail: "not_newer", applied: 112, offered: 112, atMs: 1_800_000_000_000 });
+    reports.length = 0;
+    expect(await main(["runner", "update", "--check", "--dir", dir], makeCtx(tempHome()), { runner: { engine: recording() } })).toBe(0);
+    expect(reports).toEqual([undefined]);
+  });
+
   it("a machine with no runner installed fails and says so", async () => {
     const ctx = makeCtx(tempHome());
     const empty = mkdtempSync(join(tmpdir(), "runner-none-"));
