@@ -40,7 +40,7 @@ describe("an approved skill source is refused before any fetch", () => {
 
   it("refuses another repository, a malformed commit or an inexact version, and runs no git", () => {
     const calls: string[][] = [];
-    const exec: CliExec = (argv) => (calls.push(argv), { status: 0, stdout: "", stderr: "" });
+    const exec: CliExec = (argv) => (calls.push([...argv]), { status: 0, stdout: "", stderr: "" });
     const good = { version: NEXT, repository: CLOUD, commit: "a".repeat(40) };
     const home = tempHome();
     for (const target of [{ ...good, repository: "someone/else" }, { ...good, commit: "A".repeat(40) }, { ...good, commit: "abc" }, { ...good, version: "0.16" }]) {
