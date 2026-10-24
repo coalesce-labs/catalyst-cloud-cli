@@ -852,7 +852,7 @@ export interface CodexAttributionOnly {
   files: RcOutcome[];
   /** Each copy kept beside the file it was taken from, and whether this run made it. */
   backups: { path: string; backup: string; kept: "new" | "earlier" }[];
-  agent: AgentOutcome | { state: "would_load"; path: string };
+  agent: AgentOutcome | { state: "would_load"; path: string } | { state: "codex_absent" };
   lines: string[];
 }
 
@@ -882,7 +882,7 @@ export function onlyCodexAttribution(
     return result;
   }
   if (codexPresence(ctx, deps) === null) {
-    result.agent = { state: "not_macos" };
+    result.agent = { state: "codex_absent" };
     result.lines.push(CODEX_ABSENT_LINE);
     return result;
   }
@@ -952,6 +952,7 @@ export function onlyCodexAttribution(
   const d = resolved(ctx, deps);
   if (d.platform !== "darwin") {
     result.agent = { state: "not_macos" };
+    if (dryRun) result.lines.push("Dry run: nothing was changed.");
     return result;
   }
   if (dryRun) {

@@ -1294,6 +1294,7 @@ describe("Scenario: An existing install turns on Codex attribution alone (CTC-69
     expect(ctx.out).toEqual([
       "Would create ~/.zshrc with this block:",
       ...codexBlock({ created: true }).replace(/\n$/, "").split("\n"),
+      "Dry run: nothing was changed.",
     ]);
     expect(existsSync(zshrc())).toBe(false);
   });
@@ -1356,6 +1357,16 @@ describe("Scenario: An existing install turns on Codex attribution alone (CTC-69
     expect(await only(ctx, linux())).toBe(0);
     expect(ctx.out).toEqual([CODEX_ABSENT_LINE]);
     expect(readFileSync(zshrc(), "utf8")).toBe("export A=1\n");
+  });
+
+  test("on a Mac with Codex not installed the agent is reported absent, not as a non-Mac, and launchctl is never called", async () => {
+    rmSync(join(home, "Applications", "Codex.app"), { recursive: true });
+    const f = fakeLaunchctl();
+    const ctx = ctxWith({ SHELL: "/bin/zsh", PATH: "/nowhere" });
+    expect(await only(ctx, deps(f.run), "--json")).toBe(0);
+    expect(JSON.parse(ctx.out[0] ?? "").agent).toEqual({ state: "codex_absent" });
+    expect(f.calls).toEqual([]);
+    expect(existsSync(codexAgentPlistPath(home))).toBe(false);
   });
 
   test("under a HOME that is not this account's own it changes nothing and fails", async () => {
