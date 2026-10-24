@@ -1,6 +1,6 @@
 import { closeSync, existsSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Ctx } from "./config.js";
+import { readManifest, type Ctx } from "./config.js";
 import { CliError } from "./errors.js";
 import { onboardStateRoot } from "./onboard.js";
 import { darwinThoughtsInstallRefusal } from "./onboard-runner-custody.js";
@@ -256,7 +256,8 @@ export type CustodyAttestation = { authority: string } | { refused: string };
 
 /** Everything the update touches outside its own files. The docker one is below; tests use fakes. */
 export interface RunnerUpdateEngine {
-  desiredRelease(dir: string, signal?: AbortSignal): Promise<DesiredReleaseRead>;
+  /** `report` is the previous run's outcome (`updateReport`), sent on the read so the cloud sees it. */
+  desiredRelease(dir: string, signal?: AbortSignal, report?: string): Promise<DesiredReleaseRead>;
   /** Attempt containers for this host in any state, or null when Docker could not be read. */
   attemptContainers(dir: string, hostId: string, signal?: AbortSignal): Promise<number | null>;
   /** Pull and verify each image natively for this engine. Null when ready, else why not. */
@@ -339,6 +340,24 @@ async function running(engine: RunnerUpdateEngine, dir: string, images: Images, 
   return engine.supervisorReadySinceStart(dir, signal);
 }
 
+const REPORT_DETAIL = /[^a-z0-9_:,.-]/g;
+
+/** The previous run's outcome as the release read reports it (CTC-6924), or undefined before the
+ *  first run. Only the fixed outcome vocabulary leaves the machine: anything outside the cloud's
+ *  detail characters becomes `_`, so an image reference cannot make the cloud drop the report. */
+export function updateReport(state: ReleaseState, cliVersion: string): string | undefined {
+  if (state.last === null) return undefined;
+  return JSON.stringify({
+    v: 1,
+    outcome: state.last.outcome,
+    detail: state.last.detail.toLowerCase().replace(REPORT_DETAIL, "_").slice(0, 160),
+    applied: state.generation,
+    offered: state.last.generation,
+    atMs: state.last.atMs,
+    cli: /^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(cliVersion) ? cliVersion : null,
+  });
+}
+
 async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, now: () => number): Promise<UpdateResult> {
   const { dir, signal } = options;
   const envPath = join(dir, ".env");
@@ -346,7 +365,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   const done = (outcome: UpdateOutcome, detail: string, extra: Partial<UpdateResult> = {}): UpdateResult =>
     ({ outcome, detail, generation: state.generation, exitCode: 0, ...extra });
 
-  const read = await engine.desiredRelease(dir, signal);
+  const read = await engine.desiredRelease(dir, signal, options.check ? undefined : updateReport(state, readManifest().version));
   const decision = decideRelease(state.generation, read);
   if (decision.action === "retain")
     return decision.reason === "not_newer"
@@ -552,10 +571,12 @@ export const DESIRED_RELEASE_SCRIPT = `(async () => {
   if (!state || state.version !== 1 || typeof state.secret !== "string" || !e ||
       typeof e.tenant !== "string" || typeof e.hostId !== "string" || !base) return out({ kind: "no_credential" });
   const tenant = Buffer.from(e.tenant, "utf8").toString("base64url");
+  const report = (process.env.CATALYST_UPDATE_REPORT || "").length <= 512 ? process.env.CATALYST_UPDATE_REPORT : "";
   try {
     const response = await fetch(new URL(${JSON.stringify(DESIRED_RELEASE_PATH)}, base).href, {
       redirect: "error", signal: AbortSignal.timeout(15000),
-      headers: { authorization: "Bearer ctc_host_" + tenant + "." + e.hostId + "." + state.secret, accept: "application/json" },
+      headers: { authorization: "Bearer ctc_host_" + tenant + "." + e.hostId + "." + state.secret, accept: "application/json",
+        ...(report ? { "x-catalyst-update-report": report } : {}) },
     });
     let body = null;
     try { body = await response.json(); } catch {}
@@ -583,10 +604,11 @@ export function dockerRunnerUpdateEngine(
     }
   };
   return {
-    async desiredRelease(dir, signal) {
+    async desiredRelease(dir, signal, report) {
       const compose = runnerComposeArgs(dir);
       if (!compose) return { kind: "no_credential" };
-      const read = await docker([...compose, "run", "--rm", "-T", "--no-deps", "--entrypoint", "bun", "supervisor", "-e", DESIRED_RELEASE_SCRIPT],
+      const reportEnv = report ? ["-e", `CATALYST_UPDATE_REPORT=${report}`] : [];
+      const read = await docker([...compose, "run", "--rm", "-T", "--no-deps", ...reportEnv, "--entrypoint", "bun", "supervisor", "-e", DESIRED_RELEASE_SCRIPT],
         { cwd: dir, signal, timeoutMs: 120_000 });
       if (read.code !== 0) return { kind: "no_credential" };
       try {
