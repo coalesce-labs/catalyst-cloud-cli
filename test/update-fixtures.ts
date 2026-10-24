@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 // update-fixtures.ts — shared builders for the CTC-6708 release-check tests: an approved component
 // record, the host desired-release answer that carries it, a fake image engine that counts its calls,
 // a runner installation, a signed-in config, an installed Cloud skills pack and an SDK project.
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configPathFor, readManifest, type CustomerConfig } from "../src/config";
@@ -252,6 +252,12 @@ export function skillRepository(pack: "cloud" | "dev" = "cloud", version = NEXT)
   const name = pack === "cloud" ? "catalyst-onboard" : "research-codebase";
   mkdirSync(join(repo, "skills", name), { recursive: true });
   mkdirSync(join(repo, ".claude-plugin"));
+  if (pack === "cloud") {
+    // These committed metadata links also exist in the published Cloud repository.
+    mkdirSync(join(repo, ".claude"));
+    symlinkSync("../.agents/rules", join(repo, ".claude/rules"));
+    symlinkSync("../.agents/skills", join(repo, ".claude/skills"));
+  }
   writeFileSync(join(repo, "package.json"), JSON.stringify({ version }));
   writeFileSync(join(repo, ".claude-plugin/plugin.json"), JSON.stringify({ name: "catalyst", version, skills: "./skills/" }));
   writeFileSync(join(repo, ".claude-plugin/marketplace.json"), JSON.stringify({ name: "catalyst-cloud", owner: { name: "Fixture" }, plugins: [{ name: "catalyst", source: "./" }] }));

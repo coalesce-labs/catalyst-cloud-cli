@@ -133,14 +133,15 @@ describe("pack transaction safety", () => {
     const lock = xdg ? join(home, "state/skills/.skill-lock.json") : join(home, ".agents/.skill-lock.json");
     mkdirSync(join(lock, ".."), { recursive: true });
     const foreign = { source: "someone/custom", custom: true };
-    writeFileSync(lock, JSON.stringify({ version: 3, skills: { custom: foreign, [f.name]: { source: f.target.repository, sourceType: "github", skillPath: `skills/${f.name}`, skillFolderHash: skillTreeHash(canonical) } } }));
+    writeFileSync(lock, JSON.stringify({ version: 3, skills: { custom: foreign, [f.name]: { source: f.target.repository, sourceType: "github", skillPath: `skills/${f.name}/SKILL.md`, skillFolderHash: skillTreeHash(canonical) } } }));
     expect(applyPackUpdate(home, env, "cloud", dir, f.target)).toMatchObject({ outcome: "updated", commit: f.target.commit });
     expect(readFileSync(join(dir, f.name, "SKILL.md"), "utf8")).toContain("approved A");
     expect(readFileSync(join(independent, "SKILL.md"), "utf8")).toBe("independent");
     const after = JSON.parse(readFileSync(lock, "utf8"));
     expect(after.skills.custom).toEqual(foreign);
-    expect(after.skills[f.name]).toMatchObject({ ref: f.target.commit, skillFolderHash: skillTreeHash(canonical) });
+    expect(after.skills[f.name]).toMatchObject({ skillPath: `skills/${f.name}/SKILL.md`, ref: f.target.commit, skillFolderHash: skillTreeHash(canonical) });
     expect(inspectSkillInstallation(home, env, "cloud", dir)).toMatchObject({ commit: f.target.commit });
+    expect(applyPackUpdate(home, env, "cloud", dir, f.target)).toMatchObject({ outcome: "current", commit: f.target.commit });
     // A changed lock source cannot authorize a later replacement through the receipt.
     after.skills[f.name].source = "someone/else"; writeFileSync(lock, JSON.stringify(after));
     expect(inspectSkillInstallation(home, env, "cloud", dir)).toMatchObject({ candidate: false, reason: "source_mismatch" });

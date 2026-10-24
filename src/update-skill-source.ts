@@ -1,7 +1,7 @@
 // Exact approved Git checkouts. No lifecycle scripts or floating branches are executed.
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { exactVersion, SKILL_PACK_REPOSITORIES, type SkillPack, type ApprovedSkillPack } from "./approved-release.js";
 import { configDirFor } from "./config.js";
@@ -20,12 +20,20 @@ export const repositoryFor = (pack: SkillPack): string => SKILL_PACK_REPOSITORIE
 export const skillReleaseDir = (home: string, pack: SkillPack, commit: string): string => join(configDirFor(home), "skill-releases", pack, commit);
 
 /** Hash all bytes, names and executable modes, including ignored and untracked files.
- * Refuse symlinks and special files rather than dereferencing an untrusted checkout. */
+ * Hash checkout metadata links without following them. Skill trees and manifests
+ * still refuse symlinks, and special files are refused everywhere. */
 export function contentDigest(dir: string, checkout = false): string {
   const hash = createHash("sha256");
   const visit = (path: string, relative: string) => {
     const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) throw new Error("unsafe_path");
+    if (stat.isSymbolicLink()) {
+      if (!checkout || relative === "" || ["skills", "package.json", ".claude-plugin"].some((root) => relative === root || relative.startsWith(`${root}/`))) throw new Error("unsafe_path");
+      const target = readlinkSync(path);
+      const resolved = resolve(dirname(path), target);
+      if (isAbsolute(target) || resolved !== resolve(dir) && !resolved.startsWith(`${resolve(dir)}${sep}`)) throw new Error("unsafe_path");
+      hash.update(`symlink\0${relative}\0${target}\0`);
+      return;
+    }
     if (stat.isDirectory()) {
       hash.update(`directory\0${relative}\0`);
       for (const name of readdirSync(path).sort()) {

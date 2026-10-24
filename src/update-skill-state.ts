@@ -39,6 +39,8 @@ const receiptsPath = (home: string) => join(configDirFor(home), "skill-installat
 export const skillLockPath = (home: string, env: NodeJS.ProcessEnv): string => env.XDG_STATE_HOME ? join(env.XDG_STATE_HOME, "skills/.skill-lock.json") : join(home, ".agents/.skill-lock.json");
 const canonicalDir = (home: string) => join(home, ".agents/skills");
 const unknown = (present: boolean, reason = "installation_owner_unknown"): SkillInstallation => ({ present, candidate: false, commit: null, version: null, kind: "unknown", reason, destinations: [] });
+// The global npx lock records the SKILL.md path; receipts use its containing tree.
+const lockSkillFolder = (path: unknown): string | null => typeof path === "string" ? path.replace(/\/SKILL\.md$/, "") : null;
 
 /** Reject linked ancestors too, so a receipt cannot authorize writes through a changed root. */
 export function plainDirectory(path: string): boolean {
@@ -96,7 +98,7 @@ export function inspectSkillInstallation(home: string, env: NodeJS.ProcessEnv, p
           const lock = readSkillLock(receipt.lockPath);
           if (!lock || !receipt.destinations.every((destination) => {
             const entry = lock.skills[destination.name];
-            return record(entry) && entry.source === receipt.repository && entry.sourceType === "github" && entry.skillPath === destination.skillPath && entry.ref === receipt.commit && entry.skillFolderHash === destination.lockHash;
+            return record(entry) && entry.source === receipt.repository && entry.sourceType === "github" && lockSkillFolder(entry.skillPath) === destination.skillPath && entry.ref === receipt.commit && entry.skillFolderHash === destination.lockHash;
           })) return { ...unknown(true, "source_mismatch"), receipt, destinations: receipt.destinations, lockPath: receipt.lockPath };
         }
         const valid = receipt.destinations.every(destinationMatches);
@@ -111,7 +113,7 @@ export function inspectSkillInstallation(home: string, env: NodeJS.ProcessEnv, p
   if (owned.length > 0) {
     const destinations: SkillDestination[] = [];
     for (const [name, entry] of owned) {
-      if (!safeName(name) || !record(entry) || entry.sourceType !== "github" || entry.skillPath !== `skills/${name}` || typeof entry.skillFolderHash !== "string" || !/^[a-f0-9]{40}$/.test(entry.skillFolderHash)) return unknown(true);
+      if (!safeName(name) || !record(entry) || entry.sourceType !== "github" || lockSkillFolder(entry.skillPath) !== `skills/${name}` || typeof entry.skillFolderHash !== "string" || !/^[a-f0-9]{40}$/.test(entry.skillFolderHash)) return unknown(true);
       const path = join(canonicalDir(home), name);
       if (!existsSync(path)) continue;
       if (!plainDirectory(path)) return unknown(true);

@@ -31,16 +31,20 @@ describe("skill installation evidence", () => {
     expect(inspectSkillInstallation(home, {}, "cloud", dir)).toMatchObject({ commit: null, reason: "local_changes" });
     expect(readFileSync(join(home, ".config/catalyst-cloud/skill-installations.json"), "utf8")).toBe(before);
   });
-  it("recognizes only supported global lock sources and existing canonical links", () => {
+  it.each(["", "/SKILL.md"])("recognizes supported global lock paths ending in '%s' and existing canonical links", (suffix) => {
     const { home, dir, f, source } = fixture();
     const canonical = join(home, ".agents/skills", f.name);
     mkdirSync(join(home, ".agents/skills"), { recursive: true });
     cpSync(join(source.dir, "skills", f.name), canonical, { recursive: true });
     rmSync(join(dir, f.name), { recursive: true }); symlinkSync(canonical, join(dir, f.name));
     const lock = join(home, ".agents/.skill-lock.json");
-    const entry = { source: f.target.repository, sourceType: "github", skillPath: `skills/${f.name}`, skillFolderHash: skillTreeHash(canonical) };
+    const entry = { source: f.target.repository, sourceType: "github", skillPath: `skills/${f.name}${suffix}`, skillFolderHash: skillTreeHash(canonical) };
     writeFileSync(lock, JSON.stringify({ version: 3, skills: { [f.name]: entry } }));
     expect(inspectSkillInstallation(home, {}, "cloud", dir)).toMatchObject({ kind: "npx", candidate: true, commit: null });
+    for (const skillPath of [null, `skills/../skills/${f.name}/SKILL.md`, `/skills/${f.name}/SKILL.md`, `skills/${f.name}/other.md`]) {
+      writeFileSync(lock, JSON.stringify({ version: 3, skills: { [f.name]: { ...entry, skillPath } } }));
+      expect(inspectSkillInstallation(home, {}, "cloud", dir).candidate).toBe(false);
+    }
     writeFileSync(lock, JSON.stringify({ version: 4, skills: { [f.name]: entry } }));
     expect(inspectSkillInstallation(home, {}, "cloud", dir).candidate).toBe(false);
     writeFileSync(lock, JSON.stringify({ version: 3, skills: { [f.name]: { ...entry, source: "someone/else" } } }));
