@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.36
+
+`catalyst setup --only codex-attribution` turns on Codex attribution on a machine that is already set up, without running the other setup steps. It adds the codex function to `~/.zshrc` and `~/.bashrc`, and on a Mac the login agent. Before it first changes an rc file, it keeps a byte-for-byte copy beside it, ending in `.before-codex-attribution`, and never overwrites an earlier copy. Running it again changes nothing. `--dry-run` shows exactly what it would add and changes nothing, and `--json` prints the result as one document.
+
+A scheduled `catalyst runner update` now sends the report of its previous run, as 0.16.34 described. Before, the report was dropped on the scheduled run, so nothing reached Catalyst. An applying `catalyst update` sends it too. `--check` still sends nothing.
+
 ## 0.16.35
 
 On a self-hosted machine set up before 0.16.33, the runner update agent kept running the CLI it was installed with, and that CLI could not update itself. The daily job installed newer versions into its own folder, but the agent never ran them. Installing this release globally (`npm install -g @catalyst-cloud/cli`) now points that agent at the newly installed copy. It only ever moves the agent to a newer catalyst, and keeps the agent's runner folder and PATH. It saves the previous agent file beside it, as `<file>.before-0.16.35`, so you can roll back. On a Mac it waits for an update already in progress to finish. An agent file you cannot change is left alone. Each outcome is written to the runner's `update.log`, and a failed attempt puts the agent back exactly as it was. The install itself never fails because of this. To turn it off, set `CATALYST_NO_AGENT_REPOINT=1`.
