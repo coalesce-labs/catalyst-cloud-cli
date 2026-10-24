@@ -109,6 +109,12 @@ import { cmdRepo } from "./repo.js";
 import { cmdLease, cmdWork } from "./lease.js";
 import { cmdLegacy, type LegacyDeps } from "./legacy.js";
 import { cmdCodexEnv, type CodexEnvDeps } from "./codex-env.js";
+import {
+  codexAttributionAfterSetup,
+  codexAttributionStatusLine,
+  removeCodexAttribution,
+  type CodexAttributionDeps,
+} from "./codex-attribution.js";
 import { cmdIdentity, type IdentityDeps } from "./identity.js";
 import { cmdMessages, type MessagesDeps } from "./messages.js";
 import { cmdConnections, type ConnectionsDeps } from "./connections.js";
@@ -210,7 +216,8 @@ export function usageText(): string {
     "  catalyst login --key <personal-key> [--base-url <url>]   (or CATALYST_CLOUD_TOKEN, for a key)",
     "  catalyst join ...   (deprecated alias of login; removed in the next minor version)",
     "  catalyst install [--skills-dir <dir>] [--force]   (repair path; your agent's own command installs the skills)",
-    "  catalyst onboard [--resume-from <step>] [--only <step>] [--runner|--no-runner] [--yes] [--dry-run] [--json]",
+    "  catalyst onboard [--resume-from <step>] [--only <step>] [--runner|--no-runner] [--no-shell-hook] [--yes] [--dry-run] [--json]",
+    "  catalyst setup --remove-codex-attribution   (take out the Codex launch hook and login agent setup added)",
     `  catalyst ${SETUP_USAGE}`,
     "  catalyst status | notice | me | ready | accounts",
     "  catalyst seat checkout --size big|med --harness claude,codex,opencode [--session-id ID] [--stage STAGE]",
@@ -292,6 +299,8 @@ export interface MainDeps {
   team?: TeamDeps;
   legacy?: LegacyDeps;
   codexEnv?: CodexEnvDeps;
+  /** The Codex launch hooks setup installs; tests pass a fake launchctl and their fixture HOME. */
+  codexAttribution?: CodexAttributionDeps;
   loadSdk?: () => Promise<unknown>;
   /** Injected by the tests so no suite ever touches a real terminal. */
   isTty?: () => boolean;
@@ -460,6 +469,16 @@ export async function main(
             throw new UsageError(`--${flag} needs --headless`);
         if (typeof args.flags.runner === "string" && !onboardHeadlessRequested(args, ctx.env))
           throw new UsageError("--runner yes|no needs --headless; use --runner or --no-runner interactively");
+        // The Codex launch hooks' removal runs on its own, with no onboarding around it.
+        if (args.flags["remove-codex-attribution"] === true) {
+          if (args.flags["dry-run"] === true)
+            throw new UsageError("--remove-codex-attribution changes files; run it without --dry-run");
+          deps.setupUi?.dispose();
+          const removal = removeCodexAttribution(ctx, deps.codexAttribution);
+          if (args.json) ctx.stdout(JSON.stringify({ removed: removal.ok, files: removal.files, agent: removal.agent }));
+          else for (const line of removal.lines) ctx.stdout(line);
+          return removal.ok ? 0 : 1;
+        }
         // Headless runs drop the terminal UI, browser sign-in and every browser action (CTC-4633).
         const runOnboard = async (
           args: ParsedArgs,
@@ -657,6 +676,8 @@ export async function main(
           terminal?.destroy();
         }
         for (const line of jsonLines) ctx.stdout(line);
+        // The Codex launch hooks follow every full run, done or waiting, and never change its exit code.
+        codexAttributionAfterSetup(args, ctx, deps.codexAttribution);
         return code;
         };
         if (!onboardHeadlessRequested(args, ctx.env))
@@ -681,7 +702,7 @@ export async function main(
       case "notice":
         return 0;
       case "status":
-        return cmdStatus(ctx);
+        return cmdStatus(ctx, deps);
       case "me":
         return await cmdMe(args, ctx);
       case "contract":
@@ -1091,7 +1112,7 @@ function cmdInstall(args: ParsedArgs, ctx: Ctx): number {
   return 0;
 }
 
-function cmdStatus(ctx: Ctx): number {
+function cmdStatus(ctx: Ctx, deps: MainDeps = {}): number {
   const manifest = readManifest();
   const cfg = loadConfig(ctx.home);
   if (!cfg) {
@@ -1122,6 +1143,7 @@ function cmdStatus(ctx: Ctx): number {
   ctx.stdout(
     `Contract: ${existsSync(contractPathFor(ctx.home)) ? contractPathFor(ctx.home) : "not cached (run: catalyst contract --refresh)"}`,
   );
+  ctx.stdout(codexAttributionStatusLine(ctx, deps.codexAttribution));
   return 0;
 }
 
