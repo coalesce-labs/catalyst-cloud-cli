@@ -51,10 +51,13 @@ import {
   HOST_NAME_ATTRIBUTE,
   attrValue,
   defaultCodexHome,
+  NO_LOGIN_SLOT,
   readCodexAccountId,
   readCodexAccountsCache,
   resolveSlot,
+  UNREGISTERED_SLOT,
 } from "./codex-env.js";
+import { hasOtel, maskedOtel, otelTables, withOtel, withoutOtel } from "./codex-otel.js";
 import { configDirFor, loadConfig, type Ctx } from "./config.js";
 import {
   defaultRun,
@@ -853,7 +856,135 @@ export interface CodexAttributionOnly {
   /** Each copy kept beside the file it was taken from, and whether this run made it. */
   backups: { path: string; backup: string; kept: "new" | "earlier" }[];
   agent: AgentOutcome | { state: "would_load"; path: string } | { state: "codex_absent" };
+  /** Each Codex home named with `--codex-home`, and whether it got the telemetry exporter (CTC-7028). */
+  homes: HomeOutcome[];
   lines: string[];
+}
+
+export type HomeOutcome =
+  | { home: string; state: "added" | "would_add" | "unchanged" | "removed" | "absent" }
+  | { home: string; state: "skipped"; why: string };
+
+/** The workspace's coding-account list as this machine cached it, or null when it is for another
+ *  workspace, missing, or this machine is logged out. */
+function accountsCache(ctx: Ctx) {
+  let workspace: string | null;
+  try {
+    workspace = loadConfig(ctx.home)?.account ?? null;
+  } catch {
+    workspace = null;
+  }
+  const cached = workspace === null ? null : readCodexAccountsCache(ctx.home);
+  return cached !== null && cached.workspace === workspace ? cached : null;
+}
+
+/** Why a named home cannot take the exporter, or null when it can: it is logged in to one of the
+ *  workspace's coding accounts and is not the default home the exporter comes from. */
+function homeRefusal(ctx: Ctx, home: string): string | null {
+  if (resolve(home) === resolve(defaultCodexHome(ctx)))
+    return "it is the default Codex home, which the exporter is copied from";
+  const slot = resolveSlot(readCodexAccountId(home), accountsCache(ctx));
+  if (slot === NO_LOGIN_SLOT) return "there is no Codex login in it";
+  if (slot === UNREGISTERED_SLOT)
+    return "its Codex login is not one of this workspace's coding accounts (run catalyst codex-env --refresh if it was added just now)";
+  return null;
+}
+
+/** A home's config.toml as it is now: its text and mode, or why it cannot be changed. */
+function readHomeConfig(target: string): { text: string; mode: number; existed: boolean } | { why: string } {
+  let stat: Stats;
+  try {
+    stat = lstatSync(target);
+  } catch {
+    return { text: "", mode: 0o600, existed: false };
+  }
+  if (stat.isSymbolicLink()) return { why: "its config.toml is a link, which setup does not follow" };
+  if (!stat.isFile()) return { why: "its config.toml is not a regular file" };
+  try {
+    return { text: readFileSync(target, "utf8"), mode: stat.mode & 0o7777, existed: true };
+  } catch (err) {
+    return { why: `its config.toml could not be read (${message(err)})` };
+  }
+}
+
+/** CTC-7028: each named Codex home gets the default home's exporter, after a copy of its config.toml
+ *  is kept beside it. Header values are never printed. */
+function exportFromHomes(ctx: Ctx, homes: readonly string[], ops: FileOps, dryRun: boolean, result: CodexAttributionOnly): void {
+  if (homes.length === 0) return;
+  const sourcePath = join(defaultCodexHome(ctx), "config.toml");
+  const source = readOr(sourcePath);
+  const block = source === null ? null : otelTables(source);
+  // The copy carries the collector credential, so the target is never left more readable than the
+  // file it came from.
+  let sourceMode = 0o600;
+  try {
+    sourceMode = statSync(sourcePath).mode & 0o777;
+  } catch {
+    // no source means no block, and nothing is written
+  }
+  for (const raw of homes) {
+    const home = resolve(raw);
+    const target = join(home, "config.toml");
+    const name = tilde(target, ctx.home);
+    const skip = (why: string) => {
+      result.homes.push({ home, state: "skipped", why });
+      result.lines.push(`Left ${tilde(home, ctx.home)} as it is: ${why}.`);
+    };
+    const refusal = homeRefusal(ctx, home);
+    if (refusal !== null) {
+      skip(refusal);
+      continue;
+    }
+    const config = readHomeConfig(target);
+    if ("why" in config) {
+      skip(config.why);
+      continue;
+    }
+    if (hasOtel(config.text)) {
+      result.homes.push({ home, state: "unchanged" });
+      result.lines.push(`${name} already has a telemetry exporter (unchanged).`);
+      continue;
+    }
+    if (block === null) {
+      skip(`${tilde(sourcePath, ctx.home)} has no [otel] exporter to copy`);
+      continue;
+    }
+    const backup = `${target}${RC_BACKUP_SUFFIX}`;
+    if (dryRun) {
+      result.homes.push({ home, state: "would_add" });
+      result.lines.push(
+        config.existed
+          ? `Would add the telemetry exporter from ${tilde(sourcePath, ctx.home)} to ${name}, after keeping a copy of the file as ${tilde(backup, ctx.home)}${existsSync(backup) ? " (an earlier copy is already there and would be kept)" : ""}. Values other than the endpoint, protocol and environment are shown as <hidden>:`
+          : `Would create ${name} with the telemetry exporter from ${tilde(sourcePath, ctx.home)}. Values other than the endpoint, protocol and environment are shown as <hidden>:`,
+        ...maskedOtel(block),
+      );
+      continue;
+    }
+    try {
+      if (config.existed) {
+        if (existsSync(backup)) result.backups.push({ path: target, backup, kept: "earlier" });
+        else {
+          writeRcAtomic(backup, readFileSync(target), config.mode, ops);
+          result.backups.push({ path: target, backup, kept: "new" });
+        }
+      }
+      writeRcAtomic(target, withOtel(config.text, block), config.mode & sourceMode, ops);
+    } catch (err) {
+      result.ok = false;
+      skip(`its config.toml could not be written (${message(err)})`);
+      continue;
+    }
+    result.homes.push({ home, state: "added" });
+    const kept = result.backups.find((b) => b.path === target);
+    result.lines.push(
+      `Codex launches with ${tilde(home, ctx.home)} send their telemetry: the exporter from ${tilde(sourcePath, ctx.home)} is in ${name}.` +
+        (kept === undefined
+          ? ""
+          : kept.kept === "new"
+            ? ` The file as it was is kept at ${tilde(kept.backup, ctx.home)}.`
+            : ` An earlier copy of the file is kept at ${tilde(kept.backup, ctx.home)}.`),
+    );
+  }
 }
 
 /** `catalyst setup --only codex-attribution`: the hooks setup adds after a full run, and nothing else.
@@ -863,7 +994,7 @@ export interface CodexAttributionOnly {
 export function onlyCodexAttribution(
   ctx: Ctx,
   deps: CodexAttributionDeps = {},
-  options: { dryRun?: boolean } = {},
+  options: { dryRun?: boolean; codexHomes?: readonly string[] } = {},
 ): CodexAttributionOnly {
   const dryRun = options.dryRun === true;
   const result: CodexAttributionOnly = {
@@ -872,6 +1003,7 @@ export function onlyCodexAttribution(
     files: [],
     backups: [],
     agent: { state: "other_home" },
+    homes: [],
     lines: [],
   };
   if (!ownsHome(ctx.home, deps)) {
@@ -949,6 +1081,7 @@ export function onlyCodexAttribution(
     result.lines.push(
       "No shell rc file got the Codex launch hook: there is no ~/.zshrc or ~/.bashrc, and your login shell is neither zsh nor bash.",
     );
+  exportFromHomes(ctx, options.codexHomes ?? [], ops, dryRun, result);
   const d = resolved(ctx, deps);
   if (d.platform !== "darwin") {
     result.agent = { state: "not_macos" };
@@ -1008,13 +1141,50 @@ export interface CodexAttributionRemoval {
   ok: boolean;
   files: RcOutcome[];
   agent: AgentRemoval;
+  homes: HomeOutcome[];
   lines: string[];
+}
+
+/** Takes the copied exporter block out of each named home's config.toml. With nothing edited after
+ *  setup added it, the file is byte for byte what it was. */
+function removeHomeExporters(ctx: Ctx, homes: readonly string[], ops: FileOps): { homes: HomeOutcome[]; lines: string[] } {
+  const out: HomeOutcome[] = [];
+  const lines: string[] = [];
+  for (const raw of homes) {
+    const home = resolve(raw);
+    const target = join(home, "config.toml");
+    const name = tilde(target, ctx.home);
+    const config = readHomeConfig(target);
+    if ("why" in config) {
+      out.push({ home, state: "skipped", why: config.why });
+      lines.push(`Left ${tilde(home, ctx.home)} as it is: ${config.why}.`);
+      continue;
+    }
+    const restored = config.existed ? withoutOtel(config.text) : null;
+    if (restored === null) {
+      out.push({ home, state: "absent" });
+      lines.push(`${name} had no telemetry exporter from setup.`);
+      continue;
+    }
+    try {
+      writeRcAtomic(target, restored, config.mode, ops);
+    } catch (err) {
+      const why = `its config.toml could not be written (${message(err)})`;
+      out.push({ home, state: "skipped", why });
+      lines.push(`Left ${tilde(home, ctx.home)} as it is: ${why}.`);
+      continue;
+    }
+    out.push({ home, state: "removed" });
+    lines.push(`Took the copied telemetry exporter out of ${name}; the file is as it was before setup added it.`);
+  }
+  return { homes: out, lines };
 }
 
 /** `catalyst setup --remove-codex-attribution`. Run twice, the second run finds nothing to remove. */
 export function removeCodexAttribution(
   ctx: Ctx,
   deps: CodexAttributionDeps = {},
+  codexHomes: readonly string[] = [],
 ): CodexAttributionRemoval {
   const files = shellRcFiles(ctx).flatMap((file): RcOutcome[] => {
     try {
@@ -1066,13 +1236,17 @@ export function removeCodexAttribution(
     lines.push(
       `Could not change ${ENV_NAME} in the launch environment. Run launchctl getenv ${ENV_NAME} to see it, and launchctl unsetenv ${ENV_NAME} to clear it.`,
     );
+  const homes = removeHomeExporters(ctx, codexHomes, fileOps(deps));
+  lines.push(...homes.lines);
   return {
     ok:
       files.every((f) => f.state !== "skipped") &&
+      homes.homes.every((h) => h.state !== "skipped") &&
       agent.agent !== "failed" &&
       agent.environment !== "failed",
     files,
     agent,
+    homes: homes.homes,
     lines,
   };
 }
