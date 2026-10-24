@@ -44,7 +44,7 @@ export const CAPABILITIES: readonly Capability[] = [
   {verb:"runner update|auto-update",does:"move this machine's self-hosted runner to the release Catalyst approved, and check for one every 15 minutes",needs:"member",routes:[],since:"0.16.16"},
   {verb:"update",does:"list every installed component against the release Catalyst approved, move the runner images to it, and name the command for the rest",needs:"member",routes:[],since:"0.16.31"},
   {verb:"update sdk",does:"move one project's Catalyst SDK to the approved versions with its own package manager, when the person asks",needs:"member",routes:[],since:"0.16.31"},
-  {verb:"update policy",does:"turn automatic updates off or on for one installed component, or set a project's SDK to notify only",needs:"member",routes:[],since:"0.16.31"},
+  {verb:"update policy",does:"turn automatic updates off or on for one installed component, set a project's SDK to notify only, or set the times of day runner releases apply",needs:"member",routes:[],since:"0.16.31"},
   {verb:"runner status|stop|start",does:"stop this machine's self-hosted runner taking work, or start it again with the same registration",needs:"member",routes:[],since:"0.16.27"},
   {verb:"runner uninstall",does:"remove this machine's self-hosted runner and revoke its registration and runner key",needs:"admin",routes:[],since:"0.16.27"},
   // CTC-4680: plain `catalyst setup` runs the onboard flow, so install.sh may hand off to it. install.sh

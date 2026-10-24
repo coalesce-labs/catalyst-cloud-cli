@@ -15,6 +15,7 @@ import { isAbsolute, join } from "node:path";
 import { configDirFor } from "./config.js";
 import { CliError, UsageError } from "./errors.js";
 import { isRecord, writePrivateAtomic } from "./runner-update.js";
+import { isTimeZone, normalizeWindowTimes, type UpdateWindows } from "./update-windows.js";
 
 export const UPDATE_POLICY_FILE = "updates.json";
 const LOCK_STALE_MS = 30_000;
@@ -46,6 +47,8 @@ export interface UpdatePolicy {
   version: 1;
   components: Partial<Record<UpdateComponent, ComponentPolicy>>;
   projects: ProjectPolicy[];
+  /** The owner's update windows; absent means the defaults (update-windows.ts). */
+  windows?: UpdateWindows;
 }
 
 export interface EffectivePolicy {
@@ -100,6 +103,13 @@ function parsePolicy(input: unknown): UpdatePolicy | null {
       if (typeof value.dev !== "number" || typeof value.ino !== "number") return null;
       policy.projects.push({ path: value.path, sdk: value.sdk, source: value.source, dev: value.dev, ino: value.ino });
     }
+  }
+  if (input.windows !== undefined) {
+    if (!isRecord(input.windows) || !Array.isArray(input.windows.times)) return null;
+    const times = input.windows.times.every((t): t is string => typeof t === "string") ? normalizeWindowTimes(input.windows.times) : null;
+    const zone = input.windows.timeZone;
+    if (times === null || !(zone === null || (typeof zone === "string" && isTimeZone(zone)))) return null;
+    policy.windows = { times, timeZone: zone };
   }
   return policy;
 }
@@ -208,4 +218,12 @@ export function setProjectSdkPolicy(home: string, path: string, sdk: ProjectPoli
     saved = entry;
   });
   return saved ?? { ...project, sdk, source: "owner" };
+}
+
+/** Save the owner's update windows, or go back to the defaults with null. */
+export function setWindowPolicy(home: string, windows: UpdateWindows | null): UpdatePolicy {
+  return updateUpdatePolicy(home, (policy) => {
+    if (windows === null) delete policy.windows;
+    else policy.windows = windows;
+  });
 }
