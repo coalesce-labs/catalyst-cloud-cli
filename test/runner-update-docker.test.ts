@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { RunnerExec } from "../src/onboard-runner";
+import { dockerRunnerEngine, type RunnerExec } from "../src/onboard-runner";
 import { dockerRunnerUpdateEngine, runnerDir, updateResultLines } from "../src/runner-update";
 
 // The docker-backed engine, driven through a scripted `docker` command: each test answers the exact
@@ -172,6 +172,29 @@ describe("services, stop, readiness and cleanup", () => {
     const engine = dockerRunnerUpdateEngine({ exec, env: {} });
     expect(await engine.stopSupervisor(install())).toBe(false);
     expect(await engine.attemptContainers(install(), HOST)).toBeNull();
+  });
+});
+
+describe("custody records only the installer's fixed refusal reasons", () => {
+  const images = { runner: REF, supervisor: REF, watchdog: REF };
+  const exec: RunnerExec = async () => ({ code: 1, stdout: "", stderr: "" });
+
+  it("an installer refusal answers the installer's own reason", async () => {
+    // An aborted signal makes the real installer refuse before it touches the machine.
+    const aborted = AbortSignal.abort();
+    expect(await dockerRunnerUpdateEngine({ exec, env: {} }).custody(install(), images, aborted)).toEqual({ refused: "installation_cancelled" });
+  });
+
+  it("NEGATIVE: any other exception is unclassified, and its text never reaches the answer", async () => {
+    const setup = { ...dockerRunnerEngine({ exec, env: {} }), nativeThoughtsCustody: async () => { throw new Error("token=secret"); } };
+    const answer = await dockerRunnerUpdateEngine({ exec, env: {}, setup }).custody(install(), images);
+    expect(answer).toEqual({ refused: "unclassified" });
+    expect(JSON.stringify(answer)).not.toContain("secret");
+  });
+
+  it("NEGATIVE: a setup engine without the custody step answers capability_missing", async () => {
+    const setup = { ...dockerRunnerEngine({ exec, env: {} }), nativeThoughtsCustody: undefined };
+    expect(await dockerRunnerUpdateEngine({ exec, env: {}, setup }).custody(install(), images)).toEqual({ refused: "capability_missing" });
   });
 });
 

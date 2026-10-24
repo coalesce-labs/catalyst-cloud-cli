@@ -134,8 +134,8 @@ interface FakeOptions {
   composeUp?: boolean[];
   /** Whether a supervisor on this image reports host_ready. Default: always. */
   ready?: (supervisorImage: string) => boolean;
-  /** The authority custody returns for these images. Default: the installed one, unchanged. */
-  custody?: (images: Images) => string | null;
+  /** The authority custody returns for these images, or `{ refused }`. Default: the installed one, unchanged. */
+  custody?: (images: Images) => string | { refused: string };
   /** What is running before the update. Default: what `.env` names. */
   live?: Images;
   stop?: boolean;
@@ -153,7 +153,11 @@ function fakeEngine(dir: string, options: FakeOptions = {}) {
     async desiredRelease() { calls.push("read"); return options.read ?? answered(release()); },
     async attemptContainers(_d, hostId) { calls.push(`attempts:${hostId}`); return options.busy ? (options.busy[looks++] ?? 0) : 0; },
     async prepare(images) { calls.push(`prepare:${images.length}`); return options.prepare ?? null; },
-    async custody(_d, images) { calls.push(`custody:${images.supervisor}`); return options.custody ? options.custody(images) : "AUTH"; },
+    async custody(_d, images) {
+      calls.push(`custody:${images.supervisor}`);
+      const answer = options.custody ? options.custody(images) : "AUTH";
+      return typeof answer === "string" ? { authority: answer } : answer;
+    },
     async services() {
       return {
         supervisor: { image: live.supervisor, running: !stopped, startedAtMs: 1 },
@@ -370,11 +374,15 @@ describe("runRunnerUpdate", () => {
       expect(readFileSync(join(d, ".env"), "utf8")).toContain(`CATALYST_THOUGHTS_CUSTODY_AUTHORITY='${envAuthority}'`);
     });
 
-    it.each([["fails", null], ["returns a different authority", "{}"]])("NEGATIVE: when re-attestation %s, storage is attested back on the old supervisor and nothing else changes", async (_label, answer) => {
+    it.each([
+      ["is refused", { refused: "bootstrap_proof_refused:deadline" }, "custody_reattest_failed:bootstrap_proof_refused:deadline"],
+      ["returns a different authority", "{}", "custody_reattest_failed:authority_changed"],
+    ] as const)("NEGATIVE: when re-attestation %s, storage is attested back on the old supervisor, nothing else changes, and the detail says why", async (_label, answer, detail) => {
       const { dir: d, envAuthority } = custodyInstall();
       const before = readFileSync(join(d, ".env"), "utf8");
       const { engine, calls } = fakeEngine(d, { custody: (images) => (images.supervisor === TARGET.supervisor ? answer : envAuthority) });
-      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "retained", detail: "custody_reattest_failed" });
+      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "retained", detail });
+      expect(readReleaseState(d).last).toMatchObject({ outcome: "retained", detail });
       expect(custodyCalls(calls)).toEqual([`custody:${TARGET.supervisor}`, `custody:${OLD.supervisor}`]);
       expect(calls).not.toContain("stop");
       expect(readFileSync(join(d, ".env"), "utf8")).toBe(before);
@@ -382,8 +390,18 @@ describe("runRunnerUpdate", () => {
 
     it("NEGATIVE: if storage cannot be attested back either, the run fails and asks a person to look", async () => {
       const { dir: d } = custodyInstall();
-      const { engine } = fakeEngine(d, { custody: () => null });
-      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "failed", detail: "custody_restore_failed", exitCode: 1 });
+      const { engine } = fakeEngine(d, { custody: (images) => ({ refused: images.supervisor === TARGET.supervisor ? "bootstrap_cleanup_unproved" : "engine_authority_mismatch" }) });
+      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "failed", detail: "custody_restore_failed:engine_authority_mismatch", exitCode: 1 });
+    });
+
+    it("NEGATIVE: a rollback whose storage cannot be attested back names the restore's reason", async () => {
+      const { dir: d, envAuthority } = custodyInstall();
+      const { engine } = fakeEngine(d, {
+        custody: (images) => (images.supervisor === TARGET.supervisor ? envAuthority : { refused: "bootstrap_signed_receipt_unavailable" }),
+        ready: (image) => image === OLD.supervisor,
+      });
+      expect(await runRunnerUpdate(engine, { dir: d, ...fastClock(), readyDeadlineMs: 20_000 }))
+        .toMatchObject({ outcome: "failed", detail: "custody_restore_failed:bootstrap_signed_receipt_unavailable", exitCode: 1 });
     });
 
     it("a rollback attests storage back on the old supervisor too", async () => {
