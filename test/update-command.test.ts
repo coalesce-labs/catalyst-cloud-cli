@@ -56,12 +56,66 @@ describe("catalyst update policy", () => {
     [["update", "policy", "cli", "off", "--project", "/tmp"], /--project goes with update policy sdk/],
     [["update", "--dir", "relative"], /--dir must be an absolute path/],
     [["update", "now"], /catalyst update/],
+    [["update", "policy", "windows", "25:00"], /24-hour times/],
+    [["update", "policy", "windows", "03:00", "--time-zone", "Mars/Olympus"], /unknown time zone: Mars\/Olympus/],
+    [["update", "policy", "windows", "default", "--time-zone", "UTC"], /leave out --time-zone/],
+    [["update", "policy", "windows"], /catalyst update/],
+    [["update", "policy", "cli", "off", "--time-zone", "UTC"], /--time-zone goes with update policy windows/],
   ])("NEGATIVE: %j is a usage error that changes no setting", async (argv, message) => {
     const home = tempHome();
     const ctx = makeCtx(home);
     expect(await main(argv, ctx)).toBe(1);
     expect(ctx.err.join("\n")).toMatch(message);
     expect(() => readFileSync(updatePolicyPathFor(home))).toThrow();
+  });
+});
+
+describe("catalyst update policy windows (CTC-6709)", () => {
+  it("POSITIVE CONTROL: an owner saves window times in a zone, the listing shows them, and default goes back", async () => {
+    const home = tempHome();
+    const ctx = makeCtx(home);
+    expect(await main(["update", "policy", "windows", "15:00,03:00", "--time-zone", "America/Chicago"], ctx)).toBe(0);
+    expect(ctx.out).toEqual(["Runner releases now apply at 03:00, 15:00 (America/Chicago). catalyst runner update still applies one at once."]);
+    expect(readUpdatePolicy(home).windows).toEqual({ times: ["03:00", "15:00"], timeZone: "America/Chicago" });
+    const listed = makeCtx(home);
+    expect(await main(["update", "policy"], listed)).toBe(0);
+    expect(listed.out).toContain("Runner releases apply at 03:00, 15:00 (America/Chicago; owner)");
+    const json = makeCtx(home);
+    expect(await main(["update", "policy", "--json"], json)).toBe(0);
+    expect(JSON.parse(json.out[0]!).windows).toEqual({ times: ["03:00", "15:00"], timeZone: "America/Chicago", source: "owner" });
+
+    const reset = makeCtx(home);
+    expect(await main(["update", "policy", "windows", "default"], reset)).toBe(0);
+    expect(reset.out).toEqual(["Runner releases now apply at 03:00, 11:00, 16:00, 22:00 (this machine's time zone). catalyst runner update still applies one at once."]);
+    expect(readUpdatePolicy(home).windows).toBeUndefined();
+  });
+
+  it("NEGATIVE: a settings file with a bad window time is never read as the defaults", async () => {
+    const home = tempHome();
+    expect(await main(["update", "policy", "cli", "off"], makeCtx(home))).toBe(0);
+    const path = updatePolicyPathFor(home);
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), windows: { times: ["25:00"], timeZone: null } }));
+    expect(() => readUpdatePolicy(home)).toThrow(/not a settings record/);
+  });
+
+  it("the scheduled run waits for the next window once this one is settled, and still moves the other components", async () => {
+    const home = tempHome();
+    expect(await main(["update", "policy", "windows", "03:00,11:00,16:00,22:00", "--time-zone", "UTC"], makeCtx(home))).toBe(0);
+    const dir = runnerInstall();
+    const state = JSON.parse(readFileSync(join(dir, "release-state.json"), "utf8"));
+    writeFileSync(join(dir, "release-state.json"), JSON.stringify({ ...state, windowSettledMs: Date.parse("2026-10-23T11:00:00.000Z") }));
+    const engine = countingEngine(answered(hostRelease({ components: approved() })));
+    const ctx = makeCtx(home, { now: () => new Date("2026-10-23T15:00:00.000Z") });
+    const cli: string[] = [];
+    const components = { cliApply: fakeCliApply(cli), replicaRestart: fakeReplicaRestart([]), packApply: fakePackApply([]) };
+    expect(await main(["runner", "update", "--auto", "--dir", dir], ctx, { runner: { engine, components } })).toBe(0);
+    expect(ctx.out).toEqual([
+      "2026-10-23T15:00:00.000Z waiting_window next_window:2026-10-23T16:00:00.000Z generation=88",
+      "2026-10-23T15:00:00.000Z components cli=updated skills-cloud=not_installed skills-dev=not_installed replica=not_installed",
+    ]);
+    // The image engine read the release and moved nothing.
+    expect(engine.calls).toEqual({ desiredRelease: 1 });
+    expect(cli).toEqual([NEXT]);
   });
 });
 

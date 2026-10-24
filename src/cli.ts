@@ -217,7 +217,7 @@ export function usageText(): string {
     "  catalyst hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name>",
     "  catalyst runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts]   (this machine's self-hosted runner)",
     "  catalyst runner update [--check] | runner auto-update [status|on|off]   (move this machine's runner to the approved release)",
-    "  catalyst update [--check] [--project <path>] | update policy [<component> on|off]   (every installed component against the approved release)",
+    "  catalyst update [--check] [--project <path>] | update policy [<component> on|off] | update policy windows <HH:MM,...>|default   (every installed component against the approved release)",
     "  catalyst mcp add|list|remove (vault references only) | mcp status <name>   (a server's state, grants and last 50 tool calls)",
     "  catalyst contract [--refresh] [--path <a.b.c>]",
     "  catalyst query <issues|issue <id>|pulls|pull <id>|projects|cycles|search <terms>|changes --since <cursor|head>>",

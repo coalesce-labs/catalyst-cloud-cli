@@ -410,6 +410,81 @@ describe("runRunnerUpdate", () => {
 
 // CTC-6709: a release whose supervisor reads the same journal as the one a failure goes back to is
 // taken with phases running; any other release still waits for an idle machine.
+describe("the schedule takes a newer release only in an update window (CTC-6709)", () => {
+  let dir: string;
+  beforeEach(() => { dir = install(); });
+  const window = (lastOpenedMs: number) => ({ lastOpenedMs, nextOpensMs: lastOpenedMs + 5 * 3_600_000 });
+  const GEN2 = answered(release({ generation: 2, digits: ["4", "5", "6"] }));
+  const W1 = 1_800_000_000_000;
+  const W2 = W1 + 5 * 3_600_000;
+  /** Apply generation 1 on the schedule in window W1, which settles it. */
+  const settleW1 = async () => {
+    expect(await runRunnerUpdate(fakeEngine(dir).engine, { dir, ...fastClock(), window: window(W1) })).toMatchObject({ outcome: "updated", generation: 1 });
+    expect(readReleaseState(dir).windowSettledMs).toBe(W1);
+  };
+
+  it("POSITIVE CONTROL: a newer release seen later in a settled window waits for the next one, then applies there", async () => {
+    await settleW1();
+    const waiting = fakeEngine(dir, { read: GEN2 });
+    const result = await runRunnerUpdate(waiting.engine, { dir, ...fastClock(), window: window(W1) });
+    expect(result).toMatchObject({ outcome: "waiting_window", detail: `next_window:${new Date(W2).toISOString()}`, generation: 1, exitCode: 0 });
+    expect(waiting.calls).toEqual(["read"]);
+    expect(imagesIn(readFileSync(join(dir, ".env"), "utf8"))).toEqual(TARGET);
+    expect(readReleaseState(dir)).toMatchObject({ generation: 1, windowSettledMs: W1, last: { outcome: "waiting_window" } });
+
+    const next = fakeEngine(dir, { read: GEN2 });
+    expect(await runRunnerUpdate(next.engine, { dir, ...fastClock(), window: window(W2) })).toMatchObject({ outcome: "updated", generation: 2 });
+    expect(readReleaseState(dir).windowSettledMs).toBe(W2);
+  });
+
+  it("a check that finds nothing pending settles the window, so a release approved after it waits", async () => {
+    await settleW1();
+    expect(await runRunnerUpdate(fakeEngine(dir).engine, { dir, ...fastClock(), window: window(W2) })).toMatchObject({ outcome: "current" });
+    expect(readReleaseState(dir).windowSettledMs).toBe(W2);
+    expect(await runRunnerUpdate(fakeEngine(dir, { read: GEN2 }).engine, { dir, ...fastClock(), window: window(W2) }))
+      .toMatchObject({ outcome: "waiting_window" });
+  });
+
+  it("an owner's own run (no window) applies the waiting release at once", async () => {
+    await settleW1();
+    expect(await runRunnerUpdate(fakeEngine(dir, { read: GEN2 }).engine, { dir, ...fastClock() })).toMatchObject({ outcome: "updated", generation: 2 });
+    // The owner's run settles no window.
+    expect(readReleaseState(dir).windowSettledMs).toBe(W1);
+  });
+
+  it("a machine with no settled window yet takes a release on its first scheduled run", async () => {
+    expect(readReleaseState(dir).windowSettledMs).toBeNull();
+    await settleW1();
+  });
+
+  it("a busy deferral leaves the window open, so the next check in it tries again", async () => {
+    await settleW1();
+    expect(await runRunnerUpdate(fakeEngine(dir, { read: GEN2, busy: [1] }).engine, { dir, ...fastClock(), window: window(W2) }))
+      .toMatchObject({ outcome: "deferred_busy" });
+    expect(readReleaseState(dir).windowSettledMs).toBe(W1);
+    expect(await runRunnerUpdate(fakeEngine(dir, { read: GEN2 }).engine, { dir, ...fastClock(), window: window(W2) }))
+      .toMatchObject({ outcome: "updated", generation: 2 });
+  });
+
+  it("a rolled-back update settles the window, so the supervisor is not restarted again until the next one", async () => {
+    await settleW1();
+    const failing = fakeEngine(dir, { read: GEN2, ready: (image) => image !== ref("supervisor", "5") });
+    expect(await runRunnerUpdate(failing.engine, { dir, ...fastClock(), readyDeadlineMs: 20_000, window: window(W2) }))
+      .toMatchObject({ outcome: "rolled_back" });
+    expect(readReleaseState(dir).windowSettledMs).toBe(W2);
+    const again = fakeEngine(dir, { read: GEN2 });
+    expect(await runRunnerUpdate(again.engine, { dir, ...fastClock(), window: window(W2) })).toMatchObject({ outcome: "waiting_window" });
+    expect(again.calls).not.toContain("stop");
+  });
+
+  it("drift on the applied generation is put right between windows", async () => {
+    await settleW1();
+    writeFileSync(join(dir, ".env"), ORIGINAL_ENV, { mode: 0o600 });
+    expect(await runRunnerUpdate(fakeEngine(dir).engine, { dir, ...fastClock(), window: window(W1) })).toMatchObject({ outcome: "updated", generation: 1 });
+    expect(imagesIn(readFileSync(join(dir, ".env"), "utf8"))).toEqual(TARGET);
+  });
+});
+
 describe("an update in place, decided by the supervisor's journal format", () => {
   const withFormat = (format: unknown, component: ReleaseComponent = "supervisor") =>
     (b: Record<string, unknown>) => { (b[component] as Record<string, unknown>).journalFormat = format; };
@@ -435,6 +510,23 @@ describe("an update in place, decided by the supervisor's journal format", () =>
   it("an applied release records its supervisor's format; one that names none records nothing", async () => {
     expect(readReleaseState(await applied(2)).journal).toEqual({ format: 2, supervisor: TARGET.supervisor });
     expect(readReleaseState(await applied()).journal).toBeNull();
+  });
+
+  it("a release an older CLI applied without a format gets it recorded once its supervisor is seen running", async () => {
+    const d = await applied(2);
+    const state = JSON.parse(readFileSync(join(d, RELEASE_STATE_FILE), "utf8"));
+    writeFileSync(join(d, RELEASE_STATE_FILE), JSON.stringify({ ...state, journal: null }));
+    const read = answered(release({ mutate: withFormat(2) }));
+    // --check never writes.
+    expect(await runRunnerUpdate(fakeEngine(d, { read }).engine, { dir: d, check: true })).toMatchObject({ outcome: "current" });
+    expect(readReleaseState(d).journal).toBeNull();
+    const seen = fakeEngine(d, { read });
+    expect(await runRunnerUpdate(seen.engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "current", detail: "not_newer" });
+    expect(seen.calls).toEqual(["read"]);
+    expect(readReleaseState(d).journal).toEqual({ format: 2, supervisor: TARGET.supervisor });
+    // So the next release with the same format goes in place, with phases running.
+    expect(await runRunnerUpdate(fakeEngine(d, { read: next(2), busy: [2, 2] }).engine, { dir: d, ...fastClock() }))
+      .toMatchObject({ outcome: "updated", detail: "updated:runner,supervisor,watchdog:in_place" });
   });
 
   it("POSITIVE CONTROL: the same format with phases running updates in place and never looks for phases", async () => {
