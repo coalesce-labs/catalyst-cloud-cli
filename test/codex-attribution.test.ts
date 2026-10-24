@@ -1145,6 +1145,7 @@ describe("Scenario: The login agent and the launch environment when launchd does
       removed: true,
       files: [{ path: zshrc(), state: "removed" }],
       agent: { agent: "not_macos", environment: "untouched" },
+      homes: [],
     });
     expect(readFileSync(zshrc(), "utf8")).toBe("export A=1\n");
   });
@@ -1347,6 +1348,7 @@ describe("Scenario: An existing install turns on Codex attribution alone (CTC-69
       files: [{ path: zshrc(), state: "added" }],
       backups: [{ path: zshrc(), backup: backup(), kept: "new" }],
       agent: { state: "not_macos" },
+      homes: [],
     });
   });
 
