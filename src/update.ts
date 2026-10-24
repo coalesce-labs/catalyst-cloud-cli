@@ -552,7 +552,6 @@ const UNAVAILABLE_TEXT: Record<ApprovalUnavailable, string> = {
   unreachable: "the service could not be reached.",
   not_provided: "this workspace does not yet provide component versions.",
   response_invalid: "the service sent a release this CLI cannot read.",
-  envelope_mismatch: "the image and component approvals name different releases.",
 };
 
 const cell = (text: string, width: number) => (text.length >= width ? `${text} ` : text.padEnd(width));

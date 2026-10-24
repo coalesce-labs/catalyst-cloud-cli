@@ -52,7 +52,7 @@ const npm: CliExec = (argv, cwd, env) => {
   return { status: 0, stdout: "", stderr: "" };
 };
 
-/** A runner on generation 88, a Cloud pack from OLD, and an approval naming generation 89 and NEXT. */
+/** A runner on generation 88, a Cloud pack from OLD, images at generation 89 and a component approval naming NEXT. */
 function install() {
   const home = tempHome();
   signIn(home);
