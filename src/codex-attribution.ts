@@ -914,6 +914,14 @@ function exportFromHomes(ctx: Ctx, homes: readonly string[], ops: FileOps, dryRu
   const sourcePath = join(defaultCodexHome(ctx), "config.toml");
   const source = readOr(sourcePath);
   const block = source === null ? null : otelTables(source);
+  // The copy carries the collector credential, so the target is never left more readable than the
+  // file it came from.
+  let sourceMode = 0o600;
+  try {
+    sourceMode = statSync(sourcePath).mode & 0o777;
+  } catch {
+    // no source means no block, and nothing is written
+  }
   for (const raw of homes) {
     const home = resolve(raw);
     const target = join(home, "config.toml");
@@ -946,8 +954,8 @@ function exportFromHomes(ctx: Ctx, homes: readonly string[], ops: FileOps, dryRu
       result.homes.push({ home, state: "would_add" });
       result.lines.push(
         config.existed
-          ? `Would add the telemetry exporter from ${tilde(sourcePath, ctx.home)} to ${name}, after keeping a copy of the file as ${tilde(backup, ctx.home)}${existsSync(backup) ? " (an earlier copy is already there and would be kept)" : ""}. Header values are shown as <hidden>:`
-          : `Would create ${name} with the telemetry exporter from ${tilde(sourcePath, ctx.home)}. Header values are shown as <hidden>:`,
+          ? `Would add the telemetry exporter from ${tilde(sourcePath, ctx.home)} to ${name}, after keeping a copy of the file as ${tilde(backup, ctx.home)}${existsSync(backup) ? " (an earlier copy is already there and would be kept)" : ""}. Values other than the endpoint, protocol and environment are shown as <hidden>:`
+          : `Would create ${name} with the telemetry exporter from ${tilde(sourcePath, ctx.home)}. Values other than the endpoint, protocol and environment are shown as <hidden>:`,
         ...maskedOtel(block),
       );
       continue;
@@ -960,7 +968,7 @@ function exportFromHomes(ctx: Ctx, homes: readonly string[], ops: FileOps, dryRu
           result.backups.push({ path: target, backup, kept: "new" });
         }
       }
-      writeRcAtomic(target, withOtel(config.text, block), config.mode, ops);
+      writeRcAtomic(target, withOtel(config.text, block), config.mode & sourceMode, ops);
     } catch (err) {
       result.ok = false;
       skip(`its config.toml could not be written (${message(err)})`);

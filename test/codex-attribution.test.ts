@@ -1418,7 +1418,7 @@ describe("Scenario: A named Codex home sends its telemetry (CTC-7028)", () => {
     main(["setup", "--only", "codex-attribution", "--codex-home", extra(), ...flags], ctx, { codexAttribution: linux() });
   const otelOnly = OTEL.replace(/\n$/, "") + "\n";
 
-  test("a registered home gets the default home's [otel] tables, after a byte-for-byte copy with its mode", async () => {
+  test("a registered home gets the default home's [otel] tables, after a byte-for-byte copy, and is never left wider than the source", async () => {
     await setup();
     const original = '[projects."/work"]\ntrust_level = "trusted"\n';
     writeFileSync(config(), original, { mode: 0o640 });
@@ -1429,7 +1429,9 @@ describe("Scenario: A named Codex home sends its telemetry (CTC-7028)", () => {
     expect(text).toContain(otelOnly);
     expect(text).not.toContain("[tui]");
     expect(readFileSync(copy(), "utf8")).toBe(original);
-    expect(statSync(config()).mode & 0o777).toBe(0o640);
+    // The source is 600, so the credential never becomes group-readable; the copy of the file as it
+    // was, which holds no credential, keeps its own mode.
+    expect(statSync(config()).mode & 0o777).toBe(0o600);
     expect(statSync(copy()).mode & 0o777).toBe(0o640);
     expect(ctx.out.join("\n")).toContain(
       "Codex launches with ~/homes/second send their telemetry: the exporter from ~/.codex/config.toml is in ~/homes/second/config.toml. The file as it was is kept at ~/homes/second/config.toml.before-codex-attribution.",
@@ -1527,6 +1529,18 @@ describe("Scenario: A named Codex home sends its telemetry (CTC-7028)", () => {
     expect(await main(["setup", "--only", "codex-attribution", "--codex-home", extra()], ctx, { codexAttribution: failing })).toBe(1);
     expect(readFileSync(config(), "utf8")).toBe("x = 1\n");
     expect(ctx.out.join("\n")).toContain("its config.toml could not be written (disk full)");
+  });
+
+  test("a config.toml that is a link is left alone, and the link's target is untouched", async () => {
+    await setup();
+    const elsewhere = join(home, "elsewhere.toml");
+    writeFileSync(elsewhere, "x = 1\n", { mode: 0o600 });
+    symlinkSync(elsewhere, config());
+    const ctx = ctxWith();
+    expect(await only(ctx, "--json")).toBe(0);
+    expect(JSON.parse(ctx.out[0] ?? "").homes[0].state).toBe("skipped");
+    expect(readFileSync(elsewhere, "utf8")).toBe("x = 1\n");
+    expect(lstatSync(config()).isSymbolicLink()).toBe(true);
   });
 
   test("NEGATIVE: --codex-home without the Codex attribution paths is a usage error", async () => {
