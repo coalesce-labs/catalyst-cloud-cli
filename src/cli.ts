@@ -12,7 +12,7 @@ import {
 import { existsSync, openSync, closeSync } from "node:fs";
 import { ReadStream as TerminalInput } from "node:tty";
 import { Writable } from "node:stream";
-import { flagBool, parseArgs, positionals, verbHelp, type ParsedArgs } from "./args.js";
+import { flagBool, flagList, parseArgs, positionals, verbHelp, type ParsedArgs } from "./args.js";
 import { reportCliVersion } from "./cli-version.js";
 import {
   CONFIG_MODE,
@@ -218,7 +218,7 @@ export function usageText(): string {
     "  catalyst join ...   (deprecated alias of login; removed in the next minor version)",
     "  catalyst install [--skills-dir <dir>] [--force]   (repair path; your agent's own command installs the skills)",
     "  catalyst onboard [--resume-from <step>] [--only <step>] [--runner|--no-runner] [--no-shell-hook] [--yes] [--dry-run] [--json]",
-    "  catalyst setup --only codex-attribution [--dry-run] [--json]   (add only the Codex launch hook and login agent, keeping a copy of each rc file it changes)",
+    "  catalyst setup --only codex-attribution [--codex-home <dir>]... [--dry-run] [--json]   (add only the Codex launch hook and login agent, keeping a copy of each rc file it changes; each --codex-home also gets the default home's telemetry exporter)",
     "  catalyst setup --remove-codex-attribution   (take out the Codex launch hook and login agent setup added)",
     `  catalyst ${SETUP_USAGE}`,
     "  catalyst status | notice | me | ready | accounts",
@@ -471,13 +471,17 @@ export async function main(
             throw new UsageError(`--${flag} needs --headless`);
         if (typeof args.flags.runner === "string" && !onboardHeadlessRequested(args, ctx.env))
           throw new UsageError("--runner yes|no needs --headless; use --runner or --no-runner interactively");
+        // CTC-7028: further Codex homes go with the hooks' own two paths only.
+        const codexHomes = flagList(args, "codex-home");
+        if (codexHomes.length > 0 && args.flags.only !== "codex-attribution" && args.flags["remove-codex-attribution"] !== true)
+          throw new UsageError("--codex-home goes with --only codex-attribution or --remove-codex-attribution");
         // The Codex launch hooks' removal runs on its own, with no onboarding around it.
         if (args.flags["remove-codex-attribution"] === true) {
           if (args.flags["dry-run"] === true)
             throw new UsageError("--remove-codex-attribution changes files; run it without --dry-run");
           deps.setupUi?.dispose();
-          const removal = removeCodexAttribution(ctx, deps.codexAttribution);
-          if (args.json) ctx.stdout(JSON.stringify({ removed: removal.ok, files: removal.files, agent: removal.agent }));
+          const removal = removeCodexAttribution(ctx, deps.codexAttribution, codexHomes);
+          if (args.json) ctx.stdout(JSON.stringify({ removed: removal.ok, files: removal.files, agent: removal.agent, homes: removal.homes }));
           else for (const line of removal.lines) ctx.stdout(line);
           return removal.ok ? 0 : 1;
         }
@@ -486,8 +490,8 @@ export async function main(
           if (args.flags["no-shell-hook"] === true)
             throw new UsageError("--only codex-attribution adds the Codex launch hooks; --no-shell-hook says not to");
           deps.setupUi?.dispose();
-          const only = onlyCodexAttribution(ctx, deps.codexAttribution, { dryRun: args.flags["dry-run"] === true });
-          if (args.json) ctx.stdout(JSON.stringify({ ok: only.ok, dryRun: only.dryRun, files: only.files, backups: only.backups, agent: only.agent }));
+          const only = onlyCodexAttribution(ctx, deps.codexAttribution, { dryRun: args.flags["dry-run"] === true, codexHomes });
+          if (args.json) ctx.stdout(JSON.stringify({ ok: only.ok, dryRun: only.dryRun, files: only.files, backups: only.backups, agent: only.agent, homes: only.homes }));
           else for (const line of only.lines) ctx.stdout(line);
           return only.ok ? 0 : 1;
         }
