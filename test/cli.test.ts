@@ -76,7 +76,7 @@ describe("dispatcher", () => {
 
     saveConfig(home, joinedConfig(server, { lastSkillBundleVersion: "0.0.1" }));
     expect(await main(["capabilities", "--json"], makeCtx(home))).toBe(0);
-    expect(readFileSync(join(skill, "SKILL.md"), "utf8")).not.toBe(old);
+    expect(readFileSync(join(skill, "SKILL.md"), "utf8")).toBe(old);
   });
   test("status names the credential: 'personal key' for a key config, 'your login (expires …)' for an oauth one", async () => {
     await seedJoined(home, server, { config: { user: undefined } });

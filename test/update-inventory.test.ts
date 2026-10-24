@@ -40,14 +40,14 @@ describe("imageInventory", () => {
 });
 
 describe("cloudPackInventory", () => {
-  it("reads the oldest stamped skill; an unstamped copy is unknown", () => {
+  it("reads a stamped adoption candidate; an unstamped copy remains unowned", () => {
     const home = tempHome();
     const dir = cloudPack(OLD);
-    expect(cloudPackInventory(makeCtx(home, { env: { CATALYST_SKILLS_CLAUDE_DIR: dir } }), null)).toEqual({ state: "installed", version: OLD, dir });
+    expect(cloudPackInventory(makeCtx(home, { env: { CATALYST_SKILLS_CLAUDE_DIR: dir } }), null)).toMatchObject({ state: "installed", version: OLD, dir, evidence: { candidate: true, commit: null } });
     const unstamped = mkdtempSync(join(tmpdir(), "unstamped-"));
     mkdirSync(join(unstamped, "unstick"));
     writeFileSync(join(unstamped, "unstick", "SKILL.md"), "---\nname: unstick\n---\n<!-- vendored-from: @catalyst-cloud/catalyst-skills — old -->\n");
-    expect(cloudPackInventory(makeCtx(home, { env: { CATALYST_SKILLS_CLAUDE_DIR: unstamped } }), null)).toMatchObject({ state: "unknown", reason: "version_unstamped" });
+    expect(cloudPackInventory(makeCtx(home, { env: { CATALYST_SKILLS_CLAUDE_DIR: unstamped } }), null)).toMatchObject({ state: "unknown", reason: "installation_owner_unknown" });
   });
 });
 
@@ -56,7 +56,7 @@ describe("devPackInventory", () => {
     const dir = mkdtempSync(join(tmpdir(), "dev-pack-"));
     mkdirSync(join(dir, "research-codebase"));
     writeFileSync(join(dir, "research-codebase", "SKILL.md"), "---\nname: research-codebase\n---\n");
-    expect(devPackInventory(makeCtx(tempHome(), { env: { CATALYST_SKILLS_CLAUDE_DIR: dir } }), null)).toEqual({ state: "unknown", reason: "version_unrecorded", dir });
+    expect(devPackInventory(makeCtx(tempHome(), { env: { CATALYST_SKILLS_CLAUDE_DIR: dir } }), null)).toMatchObject({ state: "unknown", reason: "installation_owner_unknown", dir });
   });
 });
 
