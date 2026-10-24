@@ -9,7 +9,6 @@
 export const DEFAULT_WINDOW_TIMES = ["03:00", "11:00", "16:00", "22:00"] as const;
 
 const TIME = /^([01][0-9]|2[0-3]):([0-5][0-9])$/;
-const DAY_MS = 86_400_000;
 
 export interface UpdateWindows {
   /** Wall-clock times, `HH:MM`, sorted and distinct. */
@@ -86,17 +85,20 @@ function instantOf(year: number, month: number, day: number, hour: number, minut
 export function windowBounds(nowMs: number, windows: UpdateWindows): WindowBounds {
   const timeZone = windows.timeZone ?? machineTimeZone();
   const times = normalizeWindowTimes(windows.times) ?? [...DEFAULT_WINDOW_TIMES];
+  const today = wallClock(nowMs, timeZone);
   const candidates: number[] = [];
-  // Yesterday through tomorrow in the zone always holds the window before and the one after now.
-  for (const shift of [-DAY_MS, 0, DAY_MS]) {
-    const d = wallClock(nowMs + shift, timeZone);
+  // Two calendar days either side of today's date in the zone. Stepping by date, not by 24 hours,
+  // keeps a 23- or 25-hour day around a clock change from skipping a date or reading one twice.
+  for (let shift = -2; shift <= 2; shift++) {
+    const date = new Date(Date.UTC(today.year, today.month - 1, today.day + shift));
     for (const time of times) {
       const [hour, minute] = time.split(":").map(Number) as [number, number];
-      candidates.push(instantOf(d.year, d.month, d.day, hour, minute, timeZone));
+      candidates.push(instantOf(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), hour, minute, timeZone));
     }
   }
   candidates.sort((a, b) => a - b);
-  const lastOpenedMs = candidates.filter((ms) => ms <= nowMs).pop()!;
-  const nextOpensMs = candidates.find((ms) => ms > nowMs)!;
+  const lastOpenedMs = candidates.filter((ms) => ms <= nowMs).pop();
+  const nextOpensMs = candidates.find((ms) => ms > nowMs);
+  if (lastOpenedMs === undefined || nextOpensMs === undefined) throw new Error(`no update window around ${new Date(nowMs).toISOString()} in ${timeZone}`);
   return { lastOpenedMs, nextOpensMs, timeZone };
 }

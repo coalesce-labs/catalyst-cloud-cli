@@ -36,6 +36,16 @@ describe("the window before and after now, in the machine's zone", () => {
     expect(b.nextOpensMs).toBe(at("2026-11-01T09:00:00Z"));
   });
 
+  it.each([
+    // [what, now, window times, last opened, next]
+    ["an ordinary day (control)", "2026-10-20T05:30:00Z", ["00:15"], "2026-10-20T05:15:00Z", "2026-10-21T05:15:00Z"],
+    ["00:30 daylight time on the 25-hour day", "2026-11-01T05:30:00Z", ["00:15"], "2026-11-01T05:15:00Z", "2026-11-02T06:15:00Z"],
+    ["23:30 standard time on the 25-hour day", "2026-11-02T05:30:00Z", ["23:45"], "2026-11-01T04:45:00Z", "2026-11-02T05:45:00Z"],
+    ["00:30 the day after the 23-hour day", "2027-03-15T05:30:00Z", ["22:00"], "2027-03-15T03:00:00Z", "2027-03-16T03:00:00Z"],
+  ])("both bounds exist around a clock change: %s", (_what, now, times, last, next) => {
+    expect(windowBounds(at(now), { times, timeZone: "America/Chicago" })).toEqual({ lastOpenedMs: at(last), nextOpensMs: at(next), timeZone: "America/Chicago" });
+  });
+
   it("an owner's own times and zone are used, sorted", () => {
     const b = windowBounds(at("2026-10-23T12:00:00Z"), { times: ["18:30", "06:00"], timeZone: "UTC" });
     expect(b).toEqual({ lastOpenedMs: at("2026-10-23T06:00:00Z"), nextOpensMs: at("2026-10-23T18:30:00Z"), timeZone: "UTC" });
