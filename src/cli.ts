@@ -112,6 +112,7 @@ import { cmdCodexEnv, type CodexEnvDeps } from "./codex-env.js";
 import {
   codexAttributionAfterSetup,
   codexAttributionStatusLine,
+  onlyCodexAttribution,
   removeCodexAttribution,
   type CodexAttributionDeps,
 } from "./codex-attribution.js";
@@ -217,6 +218,7 @@ export function usageText(): string {
     "  catalyst join ...   (deprecated alias of login; removed in the next minor version)",
     "  catalyst install [--skills-dir <dir>] [--force]   (repair path; your agent's own command installs the skills)",
     "  catalyst onboard [--resume-from <step>] [--only <step>] [--runner|--no-runner] [--no-shell-hook] [--yes] [--dry-run] [--json]",
+    "  catalyst setup --only codex-attribution [--dry-run] [--json]   (add only the Codex launch hook and login agent, keeping a copy of each rc file it changes)",
     "  catalyst setup --remove-codex-attribution   (take out the Codex launch hook and login agent setup added)",
     `  catalyst ${SETUP_USAGE}`,
     "  catalyst status | notice | me | ready | accounts",
@@ -478,6 +480,16 @@ export async function main(
           if (args.json) ctx.stdout(JSON.stringify({ removed: removal.ok, files: removal.files, agent: removal.agent }));
           else for (const line of removal.lines) ctx.stdout(line);
           return removal.ok ? 0 : 1;
+        }
+        // CTC-6993: the Codex launch hooks alone, on an install that is already set up.
+        if (args.flags.only === "codex-attribution") {
+          if (args.flags["no-shell-hook"] === true)
+            throw new UsageError("--only codex-attribution adds the Codex launch hooks; --no-shell-hook says not to");
+          deps.setupUi?.dispose();
+          const only = onlyCodexAttribution(ctx, deps.codexAttribution, { dryRun: args.flags["dry-run"] === true });
+          if (args.json) ctx.stdout(JSON.stringify({ ok: only.ok, dryRun: only.dryRun, files: only.files, backups: only.backups, agent: only.agent }));
+          else for (const line of only.lines) ctx.stdout(line);
+          return only.ok ? 0 : 1;
         }
         // Headless runs drop the terminal UI, browser sign-in and every browser action (CTC-4633).
         const runOnboard = async (
