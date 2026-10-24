@@ -1,9 +1,12 @@
+import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { flagBool, flagString, positionals, type ParsedArgs } from "./args.js";
 import type { Ctx } from "./config.js";
 import { CliError, UsageError } from "./errors.js";
 import {
   autoUpdateStatus,
+  custodyNode,
   disableAutoUpdate,
   enableAutoUpdate,
   scheduledPath,
@@ -40,6 +43,45 @@ export interface RunnerCommandDeps extends RunnerLifecycleDeps {
   scheduler?: Partial<AutoUpdateDeps>;
   /** The scheduled run's component movers; tests pass fakes. */
   components?: Pick<UpdateOptions, "cliApply" | "replicaRestart" | "packApply" | "pluginApply" | "sdkExec">;
+  /** How an update re-runs itself under its custody's node (CTC-7046); tests pass fakes. */
+  custody?: CustodyRerunDeps;
+}
+
+export interface CustodyRerunDeps {
+  platform?: NodeJS.Platform;
+  /** The node running this process. */
+  execPath?: string;
+  /** This process's own command line: the script, then its arguments. */
+  argv?: readonly string[];
+  /** The custody's recorded node for a runner directory, or null. */
+  node?: (dir: string) => string | null;
+  /** Runs the command with inherited output and returns its exit code. */
+  run?: (command: string, args: readonly string[], env: NodeJS.ProcessEnv) => number;
+}
+
+/** Set on the re-run, so it never re-runs itself again. */
+export const CUSTODY_RERUN_ENV = "CATALYST_CUSTODY_NODE_RERUN";
+
+const real = (path: string): string => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
+
+/** CTC-7046: a Mac's thoughts custody refuses any update run under another node than the one it was
+ *  set up with. An update run under another node, by an agent written before 0.16.37 or by a person's
+ *  shell, re-runs itself under the custody's node and answers with that run's exit code. This works
+ *  whatever wrote the agent, and never reloads the agent mid-run. Null: carry on in this process. */
+function custodyRerun(ctx: Ctx, deps: CustodyRerunDeps, dir: string): number | null {
+  if ((deps.platform ?? process.platform) !== "darwin" || ctx.env[CUSTODY_RERUN_ENV] === "1") return null;
+  const node = (deps.node ?? custodyNode)(dir);
+  if (node === null || real(node) === real(deps.execPath ?? process.execPath)) return null;
+  const [script, ...rest] = deps.argv ?? process.argv.slice(1);
+  if (script === undefined) return null;
+  const run = deps.run ?? ((command, args, env) => spawnSync(command, [...args], { stdio: "inherit", env }).status ?? 1);
+  return run(node, [script, ...rest], { ...ctx.env, [CUSTODY_RERUN_ENV]: "1" });
 }
 
 const USAGE =
@@ -113,6 +155,10 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     const auto = flagBool(args, "auto");
     const fleet = flagBool(args, "fleet");
     if (fleet && dirFlag === undefined) throw new UsageError("--fleet needs --dir, the directory that holds compose.json");
+    if (!fleet && !check) {
+      const rerun = custodyRerun(ctx, deps.custody ?? {}, dir());
+      if (rerun !== null) return rerun;
+    }
     // One desired-release read serves the image check and the component report (CTC-6708).
     const engine = sharedReleaseRead(deps.engine ?? dockerRunnerUpdateEngine({ env: ctx.env }));
     // The 15-minute schedule runs `runner update --auto`. After the images it carries on with every
