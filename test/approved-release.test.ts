@@ -19,7 +19,7 @@ import { answered, approved, hostRelease, memberFetch, NEXT, signIn, TRAIN } fro
 describe("parseApprovedRelease", () => {
   it("POSITIVE CONTROL: a complete record parses, members on different patches of one train included", () => {
     const parsed = parseApprovedRelease(approved());
-    expect(parsed).toMatchObject({ ok: true, release: { approvalId: "example-89", generation: 89, releaseLine: TRAIN } });
+    expect(parsed).toMatchObject({ ok: true, release: { approvalId: "example-3", generation: 3, releaseLine: TRAIN } });
     if (!parsed.ok) throw new Error("expected a parsed record");
     expect(parsed.release.members.cli).toBe(NEXT);
     expect(parsed.release.members["sdk-replica-node"]).toBe(`${TRAIN}.1`);
@@ -55,16 +55,21 @@ describe("parseApprovedRelease", () => {
 });
 
 describe("hostApproval: the component record on the host's desired-release answer", () => {
-  it("POSITIVE CONTROL: a host answer carrying components at the same generation is the approval", () => {
-    expect(hostApproval(answered(hostRelease({ components: approved() })))).toMatchObject({ kind: "approved", source: "host", release: { generation: 89 } });
+  it("POSITIVE CONTROL: a host answer carrying components is the approval, with the components' own generation", () => {
+    expect(hostApproval(answered(hostRelease({ components: approved() })))).toMatchObject({ kind: "approved", source: "host", release: { generation: 3 } });
   });
 
   it("a legacy image-only answer provides no component versions", () => {
     expect(hostApproval(answered(hostRelease()))).toEqual({ kind: "unavailable", reason: "not_provided" });
   });
 
-  it("components from another generation never mix with the images", () => {
-    expect(hostApproval(answered(hostRelease({ generation: 90, components: approved() })))).toEqual({ kind: "unavailable", reason: "envelope_mismatch" });
+  it("the component and host generations count separate ledgers, so differing numbers are still the approval (CTC-6890)", () => {
+    // Production on 2026-10-24: host release generation 104, component release generation 3.
+    expect(hostApproval(answered(hostRelease({ generation: 104, components: approved({ generation: 3 }) })))).toMatchObject({
+      kind: "approved",
+      source: "host",
+      release: { approvalId: "example-3", generation: 3, members: { cli: NEXT } },
+    });
   });
 
   it("refusals and failures are reasons", () => {
@@ -81,7 +86,7 @@ describe("readMemberApproval: a signed-in CLI reads the member route", () => {
     signIn(home);
     const fetchImpl = memberFetch(200, { ok: true, release: approved() });
     const read = await readMemberApproval(makeCtx(home, { fetch: fetchImpl }));
-    expect(read).toMatchObject({ kind: "approved", source: "network", release: { approvalId: "example-89" } });
+    expect(read).toMatchObject({ kind: "approved", source: "network", release: { approvalId: "example-3" } });
     expect(fetchImpl.calls).toEqual(["https://cloud.example.test/api/v1/releases/approved"]);
   });
 

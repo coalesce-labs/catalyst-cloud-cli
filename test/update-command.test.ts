@@ -126,7 +126,7 @@ describe("catalyst update --check", () => {
     const engine = countingEngine(answered(hostRelease({ components: approved() })));
     const ctx = makeCtx(home);
     expect(await main(["update", "--check", "--dir", dir], ctx, { update: { engine } })).toBe(0);
-    expect(ctx.out[0]).toBe(`Approved release: example-89, generation 89, train ${NEXT.split(".").slice(0, 2).join(".")}`);
+    expect(ctx.out[0]).toBe(`Approved release: example-3, generation 3, train ${NEXT.split(".").slice(0, 2).join(".")}`);
     expect(ctx.out.at(-1)).toBe("Checked the approved release; nothing was changed.");
 
     const json = makeCtx(home);
