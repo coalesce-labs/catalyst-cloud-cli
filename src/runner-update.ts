@@ -164,11 +164,13 @@ export interface ReleaseState {
   journal: { format: number; supervisor: string } | null;
   /** Replaced images that could not be removed yet; every later run tries again. */
   pendingRemoval: string[];
+  /** The update window the schedule last settled (update-windows.ts); null before the first. */
+  windowSettledMs: number | null;
   last: { atMs: number; outcome: UpdateOutcome; detail: string; generation: number | null } | null;
 }
 
 export function readReleaseState(dir: string): ReleaseState {
-  const empty: ReleaseState = { version: 1, generation: null, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], last: null };
+  const empty: ReleaseState = { version: 1, generation: null, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null, last: null };
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(dir, RELEASE_STATE_FILE), "utf8"));
     if (!isRecord(parsed) || parsed.version !== 1) return empty;
@@ -184,6 +186,7 @@ export function readReleaseState(dir: string): ReleaseState {
       pendingRemoval: Array.isArray(parsed.pendingRemoval)
         ? parsed.pendingRemoval.filter((ref): ref is string => typeof ref === "string").slice(0, PENDING_REMOVAL_KEPT)
         : [],
+      windowSettledMs: posInt(parsed.windowSettledMs) ? parsed.windowSettledMs : null,
       last: isRecord(parsed.last) ? (parsed.last as ReleaseState["last"]) : null,
     };
   } catch {
@@ -226,6 +229,7 @@ export type UpdateOutcome =
   | "updated"
   | "planned"
   | "deferred_busy"
+  | "waiting_window"
   | "retained"
   | "rolled_back"
   | "failed";
@@ -275,7 +279,13 @@ export interface RunnerUpdateOptions {
   sleep?: (ms: number) => Promise<void>;
   readyDeadlineMs?: number;
   signal?: AbortSignal;
+  /** The schedule's run: a newer release waits until a window opens that no run has settled yet. */
+  window?: { lastOpenedMs: number; nextOpensMs: number };
 }
+
+/** Outcomes that settle a window: nothing was pending, or the machine restarted onto (or tried) a
+ *  release. A busy deferral or a passing refusal leaves the window open for the next check. */
+const SETTLES_WINDOW: ReadonlySet<UpdateOutcome> = new Set(["current", "recorded", "updated", "rolled_back", "failed"]);
 
 /** One serialized update run. A second concurrent run returns `retained` with `update_running`. */
 export async function runRunnerUpdate(engine: RunnerUpdateEngine, options: RunnerUpdateOptions): Promise<UpdateResult> {
@@ -292,7 +302,8 @@ export async function runRunnerUpdate(engine: RunnerUpdateEngine, options: Runne
     const result = await update(engine, options, now);
     if (!options.check) {
       const state = readReleaseState(dir);
-      writeReleaseState(dir, { ...state, last: { atMs: now(), outcome: result.outcome, detail: result.detail, generation: result.generation } });
+      const windowSettledMs = options.window && SETTLES_WINDOW.has(result.outcome) ? options.window.lastOpenedMs : state.windowSettledMs;
+      writeReleaseState(dir, { ...state, windowSettledMs, last: { atMs: now(), outcome: result.outcome, detail: result.detail, generation: result.generation } });
     }
     return result;
   } finally {
@@ -338,6 +349,13 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
       ? done("current", "not_newer")
       : done("retained", decision.reason, { exitCode: decision.reason === "credential_refused" || decision.reason === "no_credential" ? 1 : 0 });
   const { release } = decision;
+  const tagged = { releaseId: release.releaseId };
+  // A newer release on the schedule waits for a window no run has settled. A machine that has
+  // settled none yet (its first run on this CLI) takes it now, and drift on the applied generation
+  // is put right at once, as before.
+  const { window } = options;
+  if (window && !options.check && decision.action === "update" && state.windowSettledMs !== null && window.lastOpenedMs <= state.windowSettledMs)
+    return done("waiting_window", `next_window:${new Date(window.nextOpensMs).toISOString()}`, tagged);
   const target = Object.fromEntries(RELEASE_COMPONENTS.map((c) => [c, release.images[c].reference])) as Images;
   const envText = readFileSync(envPath, "utf8");
   const env = readEnvFile(envPath) ?? {};
@@ -347,10 +365,15 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   // (no log read). A match is current; any drift is moved back below like any other update.
   if (decision.action === "verify" && changed.length === 0) {
     const live = await engine.services(dir, signal);
-    if (live?.supervisor?.running && live.supervisor.image === target.supervisor && live.watchdog?.image === target.watchdog)
+    if (live?.supervisor?.running && live.supervisor.image === target.supervisor && live.watchdog?.image === target.watchdog) {
+      // A CLI before 0.16.31 applied this release without recording its journal format. Its
+      // supervisor is the one running, so record the format now: the next release can then go in
+      // place instead of waiting for one more applied generation.
+      if (!options.check && state.journal === null && release.journalFormat !== null)
+        writeReleaseState(dir, { ...state, journal: { format: release.journalFormat, supervisor: target.supervisor } });
       return done("current", "not_newer");
+    }
   }
-  const tagged = { releaseId: release.releaseId };
   const record = (outcome: UpdateOutcome, detail: string, previous: Images | null, unremoved: string[] = []): UpdateResult => {
     const journal = release.journalFormat === null ? null : { format: release.journalFormat, supervisor: target.supervisor };
     const pendingRemoval = [...new Set([...state.pendingRemoval, ...unremoved])].slice(-PENDING_REMOVAL_KEPT);
@@ -653,6 +676,7 @@ const OUTCOME_TEXT: Record<UpdateOutcome, string> = {
   updated: "The runner moved to the approved release.",
   planned: "Checked the approved release; nothing was changed.",
   deferred_busy: "A phase is running here, so the update waits for the next check.",
+  waiting_window: "An approved release waits for this machine's next update window.",
   retained: "Kept the current images.",
   rolled_back: "The new supervisor did not become ready, so the previous images were restored.",
   failed: "The update could not finish. Look at the runner with docker compose ps.",

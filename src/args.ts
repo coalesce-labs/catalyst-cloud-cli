@@ -64,6 +64,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     check: { value: false, help: "read the approved release and list every component against it, without changing anything" },
     project: { value: true, help: "also check this project's SDK (an absolute path); with policy sdk, the project the setting is for" },
     dir: { value: true, help: "the runner directory (default: the one setup created)" },
+    "time-zone": { value: true, help: "policy windows: the time zone the window times are in (default: this machine's)" },
   },
   login: {
     "start-replica": {
@@ -615,7 +616,7 @@ export const VERB_USAGE: Record<string, string> = {
   runner:
     "runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts] | runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off] [--json]",
   update:
-    "update [--check] [--project <absolute path>] [--dir <runner directory>] | update sdk --project <absolute path> | update policy [<component> on|off] | update policy sdk on|off --project <absolute path> [--json]   (components: runner, supervisor, watchdog, cli, skills-cloud, skills-dev, replica)",
+    "update [--check] [--project <absolute path>] [--dir <runner directory>] | update sdk --project <absolute path> | update policy [<component> on|off] | update policy sdk on|off --project <absolute path> | update policy windows <HH:MM,...>|default [--time-zone <zone>] [--json]   (components: runner, supervisor, watchdog, cli, skills-cloud, skills-dev, replica)",
   setup:
     "setup [onboard options]   (sets up Catalyst step by step; same as catalyst onboard) | setup --engine <file> --engine-sha256 <hex> [-- <install options>]   (run by install.sh; install.sh --help lists the options)",
   login:

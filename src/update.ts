@@ -40,6 +40,7 @@ import {
   type UpdatePolicy,
 } from "./update-policy.js";
 import { applySdkUpdate, inspectSdkProject, type SdkApplyResult, type SdkExec, type SdkProject } from "./update-sdk.js";
+import { DEFAULT_WINDOW_TIMES } from "./update-windows.js";
 import {
   decideRelease,
   isRecord,
@@ -347,7 +348,7 @@ function applyImageResult(rows: ComponentReport[], result: UpdateResult): void {
       row.reason = result.outcome;
       row.installed = row.approved;
       row.installedReference = row.approvedReference ?? row.installedReference ?? null;
-    } else if (result.outcome === "deferred_busy" || result.outcome === "retained") {
+    } else if (result.outcome === "deferred_busy" || result.outcome === "waiting_window" || result.outcome === "retained") {
       if (row.status === "update_available") {
         row.status = "pending";
         row.reason = result.detail;
@@ -687,6 +688,8 @@ export function policyLines(policy: UpdatePolicy): string[] {
   if (policy.projects.length === 0) lines.push("SDK projects: none registered");
   for (const project of policy.projects)
     lines.push(`${cell(`SDK ${project.path}`, 19)}${cell(project.sdk === "auto" ? "on" : "off", 5)}(${project.source}${project.sdk === "notify" ? ", notify only" : ""})`);
+  const windows = policy.windows;
+  lines.push(`Runner releases apply at ${(windows?.times ?? DEFAULT_WINDOW_TIMES).join(", ")} (${windows?.timeZone ?? "this machine's time zone"}; ${windows ? "owner" : "default"})`);
   return lines;
 }
 
