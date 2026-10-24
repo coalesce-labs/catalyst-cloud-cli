@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.33
+
+On a self-hosted machine, `catalyst update` now sees the approved versions of the CLI and the Cloud and Dev skills, and moves them. Before this release it reported "no approved version" for all three on every self-hosted machine and left them where they were. The runner images were not affected.
+
 ## 0.16.32
 
 The 15-minute release check now moves a self-hosted machine to a newer runner release at set times of day, 03:00, 11:00, 16:00 and 22:00 in the machine's time zone, instead of whenever a release is approved. `catalyst update policy windows 06:00,18:00 --time-zone America/Chicago` sets your own times, `catalyst update policy windows default` goes back to these, and `catalyst update policy` lists them. `catalyst runner update` and `catalyst update` still apply a release at once. A machine that an earlier CLI moved onto the current release now records what it needs to take the next release in place, so it no longer waits for one more release first.
