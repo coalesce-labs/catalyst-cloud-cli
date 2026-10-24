@@ -122,6 +122,14 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       value: false,
       help: "print setup in plain text, without colour or the Catalyst Cloud mark",
     },
+    "no-shell-hook": {
+      value: false,
+      help: "do not add the Codex launch hooks: the codex function in ~/.zshrc and ~/.bashrc, and on macOS the dev.catalystcloud.codex-attribution LaunchAgent",
+    },
+    "remove-codex-attribution": {
+      value: false,
+      help: "remove the Codex launch hooks setup added (each rc file goes back to what it was), unload and delete the LaunchAgent, and take its attributes out of the launch environment; runs nothing else",
+    },
     "resume-from": {
       value: true,
       help: "resume at a verified onboarding step",
@@ -637,7 +645,7 @@ export const VERB_USAGE: Record<string, string> = {
   login:
     "login [--base-url <url>] [--start-replica]   (keyless; or --key <personal-key> / CATALYST_CLOUD_TOKEN)",
   onboard:
-    "onboard [--team <ID|key>] [--repo <owner/name>]... [--coding-account <slot>] [--resume-from <step>] [--only <step>] [--local-sync] [--remove-local-data] [--runner|--no-runner] [--no-color] [--yes] [--dry-run] [--json] | onboard --headless [--key-file <path>] [--team ...] [--repo ...]... [--coding-account ...] [--runner yes|no] [--remove-local-data] [--json]",
+    "onboard [--team <ID|key>] [--repo <owner/name>]... [--coding-account <slot>] [--resume-from <step>] [--only <step>] [--local-sync] [--remove-local-data] [--runner|--no-runner] [--no-shell-hook] [--no-color] [--yes] [--dry-run] [--json] | onboard --remove-codex-attribution [--json] | onboard --headless [--key-file <path>] [--team ...] [--repo ...]... [--coding-account ...] [--runner yes|no] [--remove-local-data] [--json]",
   install: "install [--skills-dir <dir>] [--force]",
   status: "status",
   notice: "notice",

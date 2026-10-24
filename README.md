@@ -138,6 +138,14 @@ catalyst ready --onboarding --json
 
 The dry run writes no files. `--only <step>` runs one step and reports its scope separately from full onboarding. Exit 10 means a failed step, 11 means waiting, and 12 means a guard refused the action. The private receipt is `install/last-run.json` under your machine's Catalyst state directory; credentials stay in the login config. A fake HOME reports old services and keeps them intact.
 
+### Codex launches name their coding account
+
+When Codex is on this computer (a `codex` command on your PATH, or `Codex.app` in `/Applications` or `~/Applications`), setup adds a `codex` shell function to `~/.zshrc` and `~/.bashrc`, between the lines `# >>> catalyst codex attribution >>>` and `# <<< catalyst codex attribution <<<`. It writes to each of those files that exists, and creates one only for your login shell (`$SHELL`), so a Mac that uses only zsh gets no `~/.bashrc`. Bash on macOS reads `~/.bash_profile` rather than `~/.bashrc`, so if you use bash and your `~/.bash_profile` does not already source `~/.bashrc`, add the line `[ -f ~/.bashrc ] && . ~/.bashrc` to it. Each time you run `codex`, the function asks `catalyst codex-env --print` which coding account the Codex home in use (`$CODEX_HOME`, else `~/.codex`) is signed in to, and passes the answer to that one launch as `OTEL_RESOURCE_ATTRIBUTES`. The answer comes from a local cache, so a launch never waits on the network. Running setup again replaces the block in place. Setup leaves a file alone, and says why, when it already defines `codex` as a function or an alias of yours, or when it is a link to a file outside your home folder. A link to a file inside your home folder is followed, and the file keeps its permissions.
+
+On a Mac, setup also installs the `dev.catalystcloud.codex-attribution` LaunchAgent. It runs `catalyst codex-env --apply` when you log in, and again whenever Codex signs in to another account in its default home, so apps you start from the Dock or Finder, the Codex desktop app included, carry the same attributes. An app that is already open keeps the environment it started with. It picks up a change the next time it starts. On Linux, setup adds the shell function only. Without Codex, setup adds nothing and says it skipped this. Run `catalyst setup` again after you install Codex to add it.
+
+`catalyst status` ends with one line that says whether this is installed, which coding account the Codex home resolves to, and how old the cached account list is. `catalyst setup --no-shell-hook` skips all of it. `catalyst setup --remove-codex-attribution` removes it and runs nothing else. Each file goes back to exactly what it was before the block was added, the LaunchAgent is unloaded and deleted, and the two attributes it set (the coding account and the machine name) are taken back out of the launch environment. Attributes you set there yourself are kept. A fake HOME gets none of this.
+
 ### Headless setup (CI, image builds, agent VMs)
 
 `catalyst onboard --headless` (or `CATALYST_ONBOARD_HEADLESS=1`) is for a machine with no person at it. It assumes every browser approval already happened: the person's key exists, and Linear and GitHub are connected for the workspace and the person. It never prompts, never opens a browser and never starts the device sign-in. Every input comes from a flag, an environment variable or a file:
@@ -298,6 +306,7 @@ The package pins the contract range `1.x || 2.x`, recorded in `package.json` und
 - `~/.config/catalyst-cloud/customer.json`, written with mode `0600`, holding your personal key, who you are, and the CLI path.
 - `~/.config/catalyst-cloud/contract.json`, your account's cached contract.
 - `~/.config/catalyst-cloud/published.json`, the cached answer to "what is the newest release" — no credential in it.
+- The Codex launch hook: one marked block in `~/.zshrc` and `~/.bashrc`, and on a Mac `~/Library/LaunchAgents/dev.catalystcloud.codex-attribution.plist` with its log at `~/.config/catalyst-cloud/codex-attribution.log` (see "Codex launches name their coding account").
 - After `catalyst update` moves the CLI: `~/.config/catalyst-cloud/cli-runtimes/`, one directory per CLI version it installed and `active.json` naming the one your `catalyst` command runs.
 - Only if you start them: `~/.config/catalyst-cloud/replica.db` with its `.pid`, `.writer.lock` and `.writer.state` sidecars, `$XDG_STATE_HOME/catalyst/events/<tenant>/backbone/` (or the home-directory fallback) with bounded daily event segments, and `~/.config/catalyst-cloud/watch-cursor.json`.
 
@@ -333,10 +342,12 @@ Remove the skills the way you installed them: `/plugin uninstall catalyst@cataly
 
 ```sh
 catalyst replica stop
+catalyst setup --remove-codex-attribution
 rm -f ~/.config/catalyst-cloud/customer.json ~/.config/catalyst-cloud/contract.json ~/.config/catalyst-cloud/published.json ~/.config/catalyst-cloud/watch-cursor.json
 rm -f ~/.config/catalyst-cloud/replica.db ~/.config/catalyst-cloud/replica.db.pid ~/.config/catalyst-cloud/replica.db.writer.lock ~/.config/catalyst-cloud/replica.db.writer.state
 rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/catalyst/events"
 rm -rf ~/.config/catalyst-cloud/cli-runtimes
+rm -f ~/.config/catalyst-cloud/codex-accounts.json ~/.config/catalyst-cloud/codex-attribution.log
 npm uninstall -g @catalyst-cloud/cli
 ```
 
