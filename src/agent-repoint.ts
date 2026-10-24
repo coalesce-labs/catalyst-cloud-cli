@@ -171,8 +171,23 @@ function restore(deps: RepointDeps, platform: NodeJS.Platform, agent: string, or
   unlinkSync(backup);
 }
 
-/** Point an older runner update agent at this install. Never throws. */
+/** Point an older runner update agent at this install. Never throws. Every outcome for an agent this
+ *  CLI recognizes is also appended to the agent's own update.log: npm hides a postinstall's output on
+ *  a global install, so that log is where a person, or a later run, reads what happened. */
 export function repointAgent(deps: RepointDeps): RepointResult {
+  const seen: { dir?: string } = {};
+  const result = decide(deps, seen);
+  if (seen.dir !== undefined) {
+    try {
+      appendFileSync(join(seen.dir, "update.log"), `${new Date().toISOString()} ${logLine(result, deps.version)}\n`);
+    } catch {
+      // the agent's log is a courtesy; the outcome is already decided
+    }
+  }
+  return result;
+}
+
+function decide(deps: RepointDeps, seen: { dir?: string }): RepointResult {
   try {
     const platform = deps.platform ?? process.platform;
     let program: AgentProgram | null;
@@ -189,6 +204,7 @@ export function repointAgent(deps: RepointDeps): RepointResult {
       return { action: "skipped", reason: "unsupported_platform" };
     }
     if (program === null) return { action: "skipped", reason: "agent_unrecognized" };
+    seen.dir = program.dir;
 
     const from = real(program.cli);
     if (from !== null && from === real(deps.self)) return { action: "skipped", reason: "already_current" };
@@ -228,13 +244,7 @@ export function repointAgent(deps: RepointDeps): RepointResult {
       if (status?.state !== "on") restore(deps, platform, agent, original, backup);
     }
     if (status.state !== "on") return { action: "failed", detail: status.detail };
-    const result: RepointResult = { action: "repointed", from: program.cli, fromVersion, to: deps.self, backup };
-    try {
-      appendFileSync(join(program.dir, "update.log"), `${new Date().toISOString()} ${repointLine(result, deps.version)}\n`);
-    } catch {
-      // the agent's log is a courtesy; the agent itself is already moved
-    }
-    return result;
+    return { action: "repointed", from: program.cli, fromVersion, to: deps.self, backup };
   } catch (err) {
     return { action: "failed", detail: (err instanceof Error ? err.message : String(err)).slice(0, 160) };
   }
@@ -251,6 +261,11 @@ export function repointLine(result: RepointResult, version: string): string | nu
   if (result.action === "failed")
     return `catalyst: could not point the runner update agent at this install (${result.detail}). Run: catalyst runner auto-update on`;
   return null;
+}
+
+/** The update.log line for any outcome: the person's line, or for a quiet skip, its reason. */
+export function logLine(result: RepointResult, version: string): string {
+  return repointLine(result, version) ?? `catalyst ${version}: the runner update agent was left as it is (${result.action === "skipped" ? result.reason : result.action}).`;
 }
 
 /** npm's postinstall, for a global install: this install's own command, version and node. */

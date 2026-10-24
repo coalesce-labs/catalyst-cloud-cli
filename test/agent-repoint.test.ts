@@ -329,6 +329,51 @@ describe("postinstallRepoint", () => {
   });
 });
 
+describe("every outcome for a recognized agent reaches its update.log", () => {
+  const log = () => (existsSync(join(dir, "update.log")) ? readFileSync(join(dir, "update.log"), "utf8") : "");
+  const refuse: SchedulerRun = (cmd, args) => {
+    calls.push([cmd, ...args]);
+    return args[0] === "bootstrap" ? { status: 5, stdout: "", stderr: "Bootstrap failed: 5" } : { status: 1, stdout: "", stderr: "" };
+  };
+  const running: SchedulerRun = (cmd, args) => {
+    calls.push([cmd, ...args]);
+    return { status: 0, stdout: "x = {\n\tstate = running\n}", stderr: "" };
+  };
+
+  it("a failed repoint", () => {
+    writeAgent(install("brew", "0.16.31"));
+    repoint(install("node", "0.16.35"), "0.16.35", "darwin", refuse);
+    expect(log()).toMatch(/^\S+Z catalyst: could not point the runner update agent at this install \(launchctl_bootstrap_failed:Bootstrap failed: 5\)/);
+  });
+
+  it("an agent this person cannot change", () => {
+    writeAgent(install("brew", "0.16.31"));
+    repoint(install("node", "0.16.35"), "0.16.35", "darwin", ok, () => false);
+    expect(log()).toContain("this install cannot change it");
+  });
+
+  it("a busy agent", () => {
+    writeAgent(install("brew", "0.16.31"));
+    repoint(install("node", "0.16.35"), "0.16.35", "darwin", running, undefined, { sleep: () => {}, busyWaitMs: 0 });
+    expect(log()).toContain("was busy updating");
+  });
+
+  it.each([
+    ["agent_cli_not_older", "0.16.40"],
+    ["already_current", null],
+  ])("a quiet skip names its reason: %s", (reason, agentVersion) => {
+    const self = install("node", "0.16.35");
+    writeAgent(agentVersion === null ? self : install("brew", agentVersion));
+    repoint(self, "0.16.35");
+    expect(log()).toContain(`catalyst 0.16.35: the runner update agent was left as it is (${reason}).`);
+  });
+
+  it("NEGATIVE: with no agent there is no log to write, and none is created", () => {
+    repoint(install("node", "0.16.35"), "0.16.35");
+    expect(existsSync(join(dir, "update.log"))).toBe(false);
+  });
+});
+
 describe("cliVersionAt", () => {
   it("reads the version of the package a bin link belongs to", () => {
     expect(cliVersionAt(install("brew", "0.16.31"))).toBe("0.16.31");
