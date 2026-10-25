@@ -95,8 +95,9 @@ export interface FixtureServer {
   /** CTC-7158 — serve `/pulls` as a mirror before the state, repo and draft facets: they narrow
    *  nothing. */
   legacyPullFacets?: boolean;
-  /** CTC-7158 — the ticket read's `linked_pulls`, per identifier, instead of the ENG-2 default. */
-  linkedPulls?: Record<string, { repo_id: string; number: number; node_id: string }[]>;
+  /** CTC-7158 — the ticket read's `linked_pulls`, per identifier, instead of the ENG-2 default;
+   *  `null` serves a ticket read with no `linked_pulls` field at all. */
+  linkedPulls?: Record<string, { repo_id: string; number: number; node_id: string | null }[] | null>;
   /** A whole `/api/v1/work-eligibility` body served for one team key instead of the ENG fixture. */
   eligibilityByTeam: Record<string, Record<string, unknown>>;
   /** The contract's `ticket-release` route answers this (status + body) when set; `{outcome: "released"}` otherwise. */
@@ -358,10 +359,12 @@ function issueDetail(
     ],
     activity: [],
     linked_pulls:
-      linkedPulls?.[String(row.identifier)] ??
-      (row.identifier === "ENG-2"
-        ? [{ repo_id: "repo-api", number: 41, node_id: "PR_kwDOfixture41" }]
-        : []),
+      linkedPulls?.[String(row.identifier)] === null
+        ? undefined
+        : (linkedPulls?.[String(row.identifier)] ??
+          (row.identifier === "ENG-2"
+            ? [{ repo_id: "repo-api", number: 41, node_id: "PR_kwDOfixture41" }]
+            : [])),
     agent_sessions: [],
     blocked_by: fixtureBlockers(row, issues),
   };

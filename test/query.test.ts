@@ -820,6 +820,59 @@ describe("pulls facets", () => {
     expect(ctx.err.join("\n")).toMatch(/returned \d+ pull requests outside the asked scope/);
   });
 
+  test("against a cloud that ignores the facets, merged, closed and draft keep the cloud's meanings", async () => {
+    await seedJoined(home, server);
+    server.legacyPullFacets = true;
+    server.pulls = workspace();
+    const numbers = async (argv: string[]) => {
+      const c = makeCtx(home);
+      expect(await main(["query", "pulls", ...argv, "--all", "--json"], c)).toBe(0);
+      return (JSON.parse(c.out.join("\n")) as { number: number }[]).map((r) => r.number).sort((a, b) => a - b);
+    };
+    expect(await numbers(["--state", "closed"])).toEqual([4]);
+    expect((await numbers(["--state", "merged"])).length).toBe(1300);
+    expect(await numbers(["--state", "open", "--draft", "draft"])).toEqual([2]);
+    expect(await numbers(["--state", "open", "--draft", "ready"])).toEqual([1, 3]);
+  });
+
+  test("a blank --state narrows nothing and sends no state", async () => {
+    await seedJoined(home, server);
+    server.pulls = workspace();
+    expect(await main(["query", "pulls", "--state", " ", "--all", "--json"], ctx)).toBe(0);
+    expect((JSON.parse(ctx.out.join("\n")) as unknown[]).length).toBe(1304);
+    for (const call of pullListCalls())
+      expect(new URL(`http://x${call.path}`).searchParams.has("state")).toBe(false);
+  });
+
+  test("--ticket --all returns every linked pull request, skipping a link with no pull id", async () => {
+    await seedJoined(home, server);
+    server.pulls = workspace();
+    server.linkedPulls = {
+      "ENG-2": [
+        { repo_id: "repo-api", number: 1, node_id: "PR_1" },
+        { repo_id: "repo-api", number: 0, node_id: null },
+        { repo_id: "repo-api", number: 4, node_id: "PR_4" },
+      ],
+      "ENG-1": null,
+    };
+    expect(
+      await main(["query", "pulls", "--ticket", "ENG-2", "--all", "--json"], ctx),
+    ).toBe(0);
+    expect((JSON.parse(ctx.out.join("\n")) as { number: number }[]).map((r) => r.number)).toEqual([1, 4]);
+    expect(server.requests.filter((r) => r.path.startsWith("/api/v1/pulls/"))).toHaveLength(2);
+    // A ticket read with no linked_pulls field is a ticket with no linked pull requests.
+    const c2 = makeCtx(home);
+    expect(await main(["query", "pulls", "--ticket", "ENG-1", "--json"], c2)).toBe(0);
+    expect(JSON.parse(c2.out.join("\n"))).toEqual([]);
+  });
+
+  test("a pull request row with no number, state, title or id still prints a line", async () => {
+    await seedJoined(home, server);
+    server.pulls = [{ repo_id: "repo-api" }];
+    expect(await main(["query", "pulls"], ctx)).toBe(0);
+    expect(ctx.out).toEqual(["#?  ?    []"]);
+  });
+
   test("a replica read applies the same facets", async () => {
     await seedJoined(home, server);
     await seedReplica(home, {
