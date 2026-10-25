@@ -466,6 +466,11 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
       help: "import: only send these names (repeatable or comma-separated)",
     },
   },
+  flow: {
+    repo: { value: true, help: "the repository (owner/name); default: this checkout's GitHub origin, when it is a repository of your workspace" },
+    period: { value: true, help: "24h | 2d | 3d | 1w | 2w | 4w | 12w | 26w (default: 2w)" },
+    granularity: { value: true, help: "hour | day (default: the period picks it: 1h for 24h, 2h for 2d, 3h for 3d, a day for weeks)" },
+  },
   team: {
     all: { value: false, help: "check every team, one request at a time" },
     stage: {
@@ -686,6 +691,7 @@ export const VERB_USAGE: Record<string, string> = {
   identity: "identity linear <status|options|set> [<linearUserId>] [--json]",
   messages: "messages read --ticket CTC-N [--since SEQUENCE] [--json]",
   capabilities: "capabilities [--json]",
+  flow: "flow [--repo <owner/name>] [--period 24h|2d|3d|1w|2w|4w|12w|26w] [--granularity hour|day] [--json]   (a repository's open pull requests over time, one row per hour or day; needs login)",
   project:
     "project <list [--json] | wip-limit <get|set <n>|set default> [--team K] [--json]>",
   lease:

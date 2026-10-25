@@ -240,6 +240,32 @@ Paused rows show who paused the repository (their email, or the key or operator 
 
 `--json` preserves the list response for status and prints the refreshed repository row for a write. An older cloud reports that repository status is not served yet and needs a newer cloud. Agents can use `catalyst capabilities --json` to check route availability against the cached cloud contract.
 
+## Open pull requests over time
+
+Print how many pull requests a repository had open, one row per day or per hour:
+
+```sh
+catalyst flow --repo acme/app --period 2w --granularity day
+catalyst flow --repo acme/app --period 24h --granularity hour --json
+catalyst flow
+```
+
+```text
+$ catalyst flow --repo acme/app --period 2w --granularity day
+2026-10-12  27
+2026-10-13  31
+...
+2026-10-25  24  (now)
+```
+
+Each row is one bucket: its start, then the number of pull requests open at its end, drafts included. Daily rows show the date; hourly rows show the time with its UTC offset. Days start at midnight in your workspace's time zone, as the cloud reports it. The last row ends now and is marked `(now)`. A row reads `unavailable` when your workspace cannot attribute pull requests to that repository.
+
+`--period` is one of `24h`, `2d`, `3d`, `1w`, `2w`, `4w`, `12w` or `26w`, and defaults to two weeks. `--granularity` is `hour` or `day`; left out, the period picks the width: one, two or three hours for `24h`, `2d` and `3d`, and a day for the week periods. Hourly rows over a long period can be too much for one answer; the command then exits 2 and suggests daily rows or a shorter period.
+
+Without `--repo`, the command reads this checkout's GitHub origin and uses it when it is a repository of your workspace. Anywhere else it exits 2 and asks for `--repo owner/name`. Any workspace member can read it.
+
+`--json` prints one JSON array with one entry per bucket, exactly as the SDK's `flow.series()` returns them in `series.columns`: `startMs` and `endMs` in epoch milliseconds, `label`, `partial`, and `pr` with `open` and the bucket's other pull request counts.
+
 ## What has to be running
 
 Nothing, by default. After `login`, every read, write, ask and explanation goes to the cloud's origin-fresh API with the config file and the cached contract on disk. Two optional processes exist for people who want them:
