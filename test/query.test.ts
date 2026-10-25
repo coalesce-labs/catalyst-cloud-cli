@@ -823,14 +823,17 @@ describe("pulls facets", () => {
   test("against a cloud that ignores the facets, merged, closed and draft keep the cloud's meanings", async () => {
     await seedJoined(home, server);
     server.legacyPullFacets = true;
-    server.pulls = workspace();
+    // #5 has a merge time but no merged flag: the cloud's `merged` is the flag alone, so it is closed.
+    server.pulls = [...workspace(), pr(5, { state: "closed", merged: 0, merged_at: 1_756_000_000_000 })];
     const numbers = async (argv: string[]) => {
       const c = makeCtx(home);
       expect(await main(["query", "pulls", ...argv, "--all", "--json"], c)).toBe(0);
       return (JSON.parse(c.out.join("\n")) as { number: number }[]).map((r) => r.number).sort((a, b) => a - b);
     };
-    expect(await numbers(["--state", "closed"])).toEqual([4]);
-    expect((await numbers(["--state", "merged"])).length).toBe(1300);
+    expect(await numbers(["--state", "closed"])).toEqual([4, 5]);
+    const merged = await numbers(["--state", "merged"]);
+    expect(merged).toHaveLength(1300);
+    expect(merged).not.toContain(5);
     expect(await numbers(["--state", "open", "--draft", "draft"])).toEqual([2]);
     expect(await numbers(["--state", "open", "--draft", "ready"])).toEqual([1, 3]);
   });
