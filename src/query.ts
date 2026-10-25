@@ -117,7 +117,7 @@ export async function cmdQuery(
         `--source replica but the replica is ${status?.verdict ?? "unavailable"}`,
       );
     }
-    result = await fromReplica(ctx, cfg, sub, rest, filters, deps);
+    result = await fromReplica(ctx, cfg, sub, rest, filters, deps, args);
   } else {
     result = await fromApi(ctx, cfg, sub, rest, filters, args);
   }
@@ -136,6 +136,7 @@ async function fromReplica(
   rest: string[],
   f: Filters,
   deps: QueryDeps,
+  args: ParsedArgs,
 ): Promise<unknown> {
   const sdk = await loadSdk();
   const dbPath = replicaDbPath(cfg, ctx.home, ctx.env);
@@ -159,8 +160,23 @@ async function fromReplica(
       }
       case "issue":
         return replica.issue(needArg(rest, "issue <identifier>"));
-      case "pulls":
-        return replica.pulls({ limit: f.limit });
+      case "pulls": {
+        const scope = pullScope(args);
+        if (!(scope.state || scope.repo || scope.draft || scope.ticket))
+          return replica.pulls({ limit: f.limit });
+        // CTC-7158 — the replica is local, so a narrowed read scans every row rather than only the
+        // newest window: an older pull request linked to the ticket is still found.
+        const kept: Record<string, unknown>[] = [];
+        for (let offset = 0; ; offset += REPLICA_PULL_PAGE) {
+          const page = replica.pulls({
+            limit: REPLICA_PULL_PAGE,
+            offset,
+          }) as unknown as Record<string, unknown>[];
+          kept.push(...page.filter((row) => pullMatches(row, scope)));
+          if (page.length < REPLICA_PULL_PAGE || kept.length >= f.limit) break;
+        }
+        return kept.slice(0, f.limit);
+      }
       case "projects":
         return applyFilters(
           replica.projects({
@@ -222,16 +238,23 @@ async function fromApi(
       return res.status === 404 ? null : res.body;
     }
     case "pulls": {
-      const ticket = flagString(args, "ticket");
+      const scope = pullScope(args);
+      if (scope.ticket) {
+        const rows = await ticketPulls(ctx, api, scope);
+        return f.all ? rows : rows.slice(0, f.limit);
+      }
+      // CTC-7158 — the facets go to the cloud, so `--state open --all` reads the open pull requests
+      // instead of paging every one the workspace has ever had.
+      const query = { state: scope.state, repo: scope.repo, draft: scope.draft };
       if (f.all) {
-        const { rows } = await fetchAllPages(api, "/api/v1/pulls", { ticket });
-        return rows;
+        const { rows } = await fetchAllPages(api, "/api/v1/pulls", query);
+        return keepPullScope(ctx, rows, scope);
       }
       const page = await fetchPage(api, "/api/v1/pulls", {
+        ...query,
         limit: f.limit,
-        ticket,
       });
-      const rows = page.rows.slice(0, f.limit);
+      const rows = keepPullScope(ctx, page.rows, scope).slice(0, f.limit);
       const notice = truncationNotice(page);
       if (notice) ctx.stderr(notice);
       return rows;
@@ -361,6 +384,103 @@ function requireIssueScope(scope: string[] | null, f: Filters): void {
       1,
     );
   }
+}
+
+const REPLICA_PULL_PAGE = 500;
+const PULL_STATES = ["open", "closed", "merged"] as const;
+const PULL_DRAFTS = ["draft", "ready"] as const;
+
+interface PullScope {
+  state?: (typeof PULL_STATES)[number];
+  repo?: string;
+  draft?: (typeof PULL_DRAFTS)[number];
+  ticket?: string;
+}
+
+/** CTC-7158 — the cloud reads an unknown `?state=` or `?draft=` as no narrowing, so a typo would
+ *  page every pull request. Refuse it here instead. */
+function pullScope(args: ParsedArgs): PullScope {
+  const state = trimmedFlag(args, "state")?.toLowerCase();
+  if (state !== undefined && !(PULL_STATES as readonly string[]).includes(state))
+    throw new UsageError(
+      `--state for pulls is one of ${PULL_STATES.join(", ")} (got "${state}")`,
+    );
+  const draft = trimmedFlag(args, "draft")?.toLowerCase();
+  if (draft !== undefined && !(PULL_DRAFTS as readonly string[]).includes(draft))
+    throw new UsageError(
+      `--draft is one of ${PULL_DRAFTS.join(", ")} (got "${draft}")`,
+    );
+  return {
+    state: state as PullScope["state"],
+    repo: trimmedFlag(args, "repo"),
+    draft: draft as PullScope["draft"],
+    ticket: trimmedFlag(args, "ticket"),
+  };
+}
+
+const truthy = (v: unknown) => v === true || v === 1 || v === "1" || v === "true";
+
+/** The cloud's facet rules (the read model's pull scope): `open` and `closed` leave out merged pull
+ *  requests, `merged` is the merged flag alone, `ready` is not a draft, and state and repo match
+ *  without case. */
+function pullMatches(row: Record<string, unknown>, s: PullScope): boolean {
+  const merged = truthy(row.merged);
+  const state = String(row.state ?? "").toLowerCase();
+  if (s.state === "open" && (state !== "open" || merged)) return false;
+  if (s.state === "merged" && !merged) return false;
+  if (s.state === "closed" && (state !== "closed" || merged)) return false;
+  if (s.draft === "draft" && !truthy(row.draft)) return false;
+  if (s.draft === "ready" && truthy(row.draft)) return false;
+  if (s.repo && !sameName(row.repo_id, s.repo)) return false;
+  if (s.ticket && "linear_issue_identifier" in row && !sameName(row.linear_issue_identifier, s.ticket))
+    return false;
+  return true;
+}
+
+/** A cloud that predates a facet returns rows outside it. Drop them and say so, so the answer is
+ *  still the asked scope. */
+function keepPullScope(
+  ctx: Ctx,
+  rows: Record<string, unknown>[],
+  s: PullScope,
+): Record<string, unknown>[] {
+  const kept = rows.filter((row) => pullMatches(row, s));
+  if (kept.length < rows.length)
+    ctx.stderr(
+      `the cloud returned ${rows.length - kept.length} pull requests outside the asked scope; dropped them here`,
+    );
+  return kept;
+}
+
+/** CTC-7158 — `/pulls` has no ticket facet, and an unknown param narrows nothing, so `?ticket=`
+ *  returned the newest page for any ticket. The ticket's own read names its linked pull requests;
+ *  read each of those instead. */
+async function ticketPulls(
+  ctx: Ctx,
+  api: ReturnType<typeof apiClient>,
+  s: PullScope,
+): Promise<Record<string, unknown>[]> {
+  const ticket = s.ticket!;
+  const res = await api.getJson<{ linked_pulls?: { node_id?: string | null }[] }>(
+    `/api/v1/issues/${encodeURIComponent(ticket)}`,
+    { accept: [404] },
+  );
+  if (res.status === 404)
+    throw new CliError(`--ticket ${ticket}: no such ticket`, "not-found", 1);
+  const rows: Record<string, unknown>[] = [];
+  for (const link of res.body.linked_pulls ?? []) {
+    if (!link.node_id) continue;
+    const pr = await api.getJson<Record<string, unknown>>(
+      `/api/v1/pulls/${encodeURIComponent(link.node_id)}`,
+      { accept: [404] },
+    );
+    if (pr.status === 404) {
+      ctx.stderr(`--ticket ${ticket}: linked pull request ${link.node_id} is not in the mirror`);
+      continue;
+    }
+    if (pullMatches(pr.body, { ...s, ticket: undefined })) rows.push(pr.body);
+  }
+  return rows;
 }
 
 function trimmedFlag(args: ParsedArgs, name: string): string | undefined {

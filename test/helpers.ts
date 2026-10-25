@@ -73,7 +73,7 @@ export interface SeedReplicaOptions {
   heartbeatAgeMs?: number;
   lockPid?: number;
   issues?: { id: string; identifier: string; title: string; state: string; team_id: string; project_id?: string | null; priority?: number }[];
-  pulls?: { repo_id: string; number: number; node_id: string; title: string; state: string; linear_issue_identifier?: string }[];
+  pulls?: { repo_id: string; number: number; node_id: string; title: string; state: string; merged?: number; linear_issue_identifier?: string }[];
   projects?: { id: string; name: string; state: string }[];
 }
 
@@ -104,7 +104,7 @@ export async function seedReplica(home: string, opts: SeedReplicaOptions = {}): 
     );
   }
   for (const p of opts.pulls ?? []) {
-    eng.run("INSERT INTO pull_requests (repo_id, number, node_id, title, state, linear_issue_identifier, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", p.repo_id, p.number, p.node_id, p.title, p.state, p.linear_issue_identifier ?? null, 1_756_100_000_000);
+    eng.run("INSERT INTO pull_requests (repo_id, number, node_id, title, state, merged, linear_issue_identifier, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", p.repo_id, p.number, p.node_id, p.title, p.state, p.merged ?? 0, p.linear_issue_identifier ?? null, 1_756_100_000_000);
   }
   for (const p of opts.projects ?? []) {
     eng.run("INSERT INTO projects (id, name, state, updated_at) VALUES (?, ?, ?, ?)", p.id, p.name, p.state, 1_756_100_000_000);
