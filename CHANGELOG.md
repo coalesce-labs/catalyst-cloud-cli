@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.39
+
+`catalyst query pulls` now sends `--state`, `--repo` and `--draft` to Catalyst, so `--state open --all` reads only the workspace's open pull requests instead of paging through every pull request it has ever had. `--state` takes `open`, `closed` or `merged`, and `--draft` takes `draft` or `ready`. Any other value is refused before a request is made. `open` and `closed` leave out merged pull requests, and the repository and state match in any letter case. Against an older Catalyst that ignores these filters, the CLI applies them to the rows it gets back, so the result is the same. A filtered read of the local replica now checks every pull request it holds, so an older pull request linked to a ticket is still found.
+
+The `catalyst-linear` skill reads the project's label definitions before it chooses a ticket's work type and component.
+
 ## 0.16.38
 
 On a Mac with thoughts custody, a runner update agent that 0.16.35 or 0.16.36 moved kept failing every update with `custody_restore_failed:runtime_custody_mismatch`, even after the CLI updated itself to 0.16.37. The scheduled update installs the new CLI beside the old one, not globally, so the 0.16.37 repair never ran. Now `catalyst runner update` checks which node it runs under. When that differs from the node the custody was set up with, it runs the same command again under the custody's node and exits with that run's result. The agent file is left as it is, and no run in progress is interrupted. `--check` and `--fleet`, a Mac without thoughts custody, and Linux are unchanged.
