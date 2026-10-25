@@ -117,6 +117,7 @@ import {
   type CodexAttributionDeps,
 } from "./codex-attribution.js";
 import { cmdIdentity, type IdentityDeps } from "./identity.js";
+import { cmdFlow, type FlowDeps } from "./flow.js";
 import { cmdMessages, type MessagesDeps } from "./messages.js";
 import { cmdConnections, type ConnectionsDeps } from "./connections.js";
 import {
@@ -250,6 +251,7 @@ export function usageText(): string {
     "  catalyst project wip-limit <get|set <n>|set default> [--team K]   (a project's new-start WIP limit; members read, owners and admins set)",
     "  catalyst repo pause <owner/name> --reason <text> | repo resume <owner/name> [--reason <text>]   (owner or admin; reason: 1 to 500 trimmed characters)",
     "  catalyst repo status [--json]   (visible workspace repositories and their paused state; needs login)",
+    "  catalyst flow [--repo <owner/name>] [--period 2w] [--granularity hour|day] [--json]   (a repository's open pull requests over time; needs login)",
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
     "  catalyst lease <take <ticket> --agent <seat> [--ttl <minutes>]|renew <ticket> --commit|--artifact|--finding|--pr <ref> [--note <text>]|release <ticket>|show <ticket>> [--json]   (a seat's ticket lease; needs login)",
     "  catalyst work available [--team K] [--json]   (tickets nobody holds and open pull requests no lease covers)",
@@ -297,6 +299,7 @@ export interface MainDeps {
   runner?: RunnerCommandDeps;
   update?: UpdateCommandDeps;
   identity?: IdentityDeps;
+  flow?: FlowDeps;
   messages?: MessagesDeps;
   team?: TeamDeps;
   legacy?: LegacyDeps;
@@ -799,6 +802,8 @@ export async function main(
         return await cmdUpdate(args, ctx, deps.update);
       case "connections":
         return await cmdConnections(args, ctx, deps.connections ?? {});
+      case "flow":
+        return await cmdFlow(args, ctx, deps.flow ?? {});
       default:
         ctx.stderr(`unknown command: ${args.command}`);
         ctx.stderr(usageText());
@@ -874,6 +879,7 @@ const VERB_HELP_KNOWN: Record<string, true> = Object.fromEntries(
     "capabilities",
     "project",
     "repo",
+    "flow",
     "lease",
     "work",
     "legacy",
