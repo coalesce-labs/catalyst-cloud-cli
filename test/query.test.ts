@@ -3,6 +3,7 @@
 // hits /api/v1/changes?since=.
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -679,5 +680,165 @@ describe("issue filters narrow on the server", () => {
       await main(["query", "issues", "--source", "api", "--json"], ctx),
     ).toBe(0);
     expect(JSON.parse(ctx.out.join("\n"))).not.toHaveLength(0);
+  });
+});
+
+// CTC-7158 — `query pulls` sends its facets to the cloud, so asking for open pull requests reads
+// the open ones instead of paging every pull request the workspace has had.
+describe("pulls facets", () => {
+  const pr = (n: number, extra: Record<string, unknown>) => ({
+    repo_id: "repo-api",
+    number: n,
+    node_id: `PR_${n}`,
+    title: `pull ${n}`,
+    state: "closed",
+    draft: 0,
+    merged: 1,
+    merged_at: 1_756_000_000_000,
+    linear_issue_identifier: `ENG-${n}`,
+    ...extra,
+  });
+  const workspace = () => [
+    ...Array.from({ length: 1300 }, (_, i) => pr(i + 100, {})),
+    pr(1, { state: "open", merged: 0, merged_at: null }),
+    pr(2, { state: "open", merged: 0, merged_at: null, draft: 1 }),
+    pr(3, { state: "open", merged: 0, merged_at: null, repo_id: "repo-web" }),
+    pr(4, { state: "closed", merged: 0, merged_at: null }),
+  ];
+  const pullListCalls = () =>
+    server.requests.filter((r) => r.path.startsWith("/api/v1/pulls?"));
+  afterEach(() => {
+    server.pulls = undefined;
+    server.pageCap = undefined;
+    server.legacyPullFacets = undefined;
+    server.linkedPulls = undefined;
+  });
+
+  test("--state open --all reads only open pull requests, in one page", async () => {
+    await seedJoined(home, server);
+    server.pageCap = 500;
+    server.pulls = workspace();
+    expect(
+      await main(["query", "pulls", "--state", "open", "--all", "--json"], ctx),
+    ).toBe(0);
+    const rows = JSON.parse(ctx.out.join("\n")) as { number: number }[];
+    expect(rows.map((r) => r.number).sort()).toEqual([1, 2, 3]);
+    const calls = pullListCalls();
+    expect(calls).toHaveLength(1);
+    expect(new URL(`http://x${calls[0]!.path}`).searchParams.get("state")).toBe("open");
+  });
+
+  test("every --all page carries the facets", async () => {
+    await seedJoined(home, server);
+    server.pageCap = 2;
+    server.pulls = workspace();
+    expect(
+      await main(["query", "pulls", "--state", "OPEN", "--repo", "repo-api", "--all", "--json"], ctx),
+    ).toBe(0);
+    expect(
+      (JSON.parse(ctx.out.join("\n")) as { number: number }[]).map((r) => r.number).sort(),
+    ).toEqual([1, 2]);
+    const calls = pullListCalls();
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      const q = new URL(`http://x${call.path}`).searchParams;
+      expect([q.get("state"), q.get("repo")]).toEqual(["open", "repo-api"]);
+    }
+  });
+
+  test("merged, closed and draft follow the cloud's meanings", async () => {
+    await seedJoined(home, server);
+    server.pulls = workspace();
+    const numbers = async (argv: string[]) => {
+      const c = makeCtx(home);
+      expect(await main(["query", "pulls", ...argv, "--limit", "5000", "--json"], c)).toBe(0);
+      return (JSON.parse(c.out.join("\n")) as { number: number }[]).map((r) => r.number).sort((a, b) => a - b);
+    };
+    expect(await numbers(["--state", "closed"])).toEqual([4]);
+    expect((await numbers(["--state", "merged"])).length).toBe(500);
+    expect(await numbers(["--state", "open", "--draft", "draft"])).toEqual([2]);
+    expect(await numbers(["--state", "open", "--draft", "ready"])).toEqual([1, 3]);
+  });
+
+  test("a state the cloud does not know is refused, not sent", async () => {
+    await seedJoined(home, server);
+    expect(await main(["query", "pulls", "--state", "opne", "--all"], ctx)).toBe(1);
+    expect(ctx.err.join("\n")).toContain("--state for pulls is one of open, closed, merged");
+    const c2 = makeCtx(home);
+    expect(await main(["query", "pulls", "--draft", "yes"], c2)).toBe(1);
+    expect(c2.err.join("\n")).toContain("--draft is one of draft, ready");
+    expect(pullListCalls()).toHaveLength(0);
+  });
+
+  test("--ticket returns that ticket's linked pull requests and no others", async () => {
+    await seedJoined(home, server);
+    server.pulls = workspace();
+    server.linkedPulls = {
+      "ENG-2": [
+        { repo_id: "repo-api", number: 1, node_id: "PR_1" },
+        { repo_id: "repo-api", number: 4, node_id: "PR_4" },
+      ],
+    };
+    expect(await main(["query", "pulls", "--ticket", "ENG-2", "--json"], ctx)).toBe(0);
+    expect(
+      (JSON.parse(ctx.out.join("\n")) as { number: number }[]).map((r) => r.number),
+    ).toEqual([1, 4]);
+    // The list route has no ticket facet; asking it would return the newest page for any ticket.
+    expect(pullListCalls()).toHaveLength(0);
+    const c2 = makeCtx(home);
+    expect(
+      await main(["query", "pulls", "--ticket", "ENG-2", "--state", "open", "--json"], c2),
+    ).toBe(0);
+    expect((JSON.parse(c2.out.join("\n")) as { number: number }[]).map((r) => r.number)).toEqual([1]);
+    const c3 = makeCtx(home);
+    expect(await main(["query", "pulls", "--ticket", "ENG-404"], c3)).toBe(1);
+    expect(c3.err.join("\n")).toContain("--ticket ENG-404: no such ticket");
+  });
+
+  test("a linked pull request missing from the mirror is named, not fatal", async () => {
+    await seedJoined(home, server);
+    server.pulls = workspace();
+    server.linkedPulls = {
+      "ENG-2": [
+        { repo_id: "repo-api", number: 1, node_id: "PR_1" },
+        { repo_id: "repo-api", number: 9999, node_id: "PR_gone" },
+      ],
+    };
+    expect(await main(["query", "pulls", "--ticket", "ENG-2", "--json"], ctx)).toBe(0);
+    expect((JSON.parse(ctx.out.join("\n")) as { number: number }[]).map((r) => r.number)).toEqual([1]);
+    expect(ctx.err.join("\n")).toContain("linked pull request PR_gone is not in the mirror");
+  });
+
+  test("a cloud that ignores the facets still prints only the asked scope, and says so", async () => {
+    await seedJoined(home, server);
+    server.legacyPullFacets = true;
+    server.pulls = workspace();
+    expect(
+      await main(["query", "pulls", "--state", "open", "--all", "--json"], ctx),
+    ).toBe(0);
+    expect((JSON.parse(ctx.out.join("\n")) as { number: number }[]).map((r) => r.number).sort()).toEqual([1, 2, 3]);
+    expect(ctx.err.join("\n")).toMatch(/returned \d+ pull requests outside the asked scope/);
+  });
+
+  test("a replica read applies the same facets", async () => {
+    await seedJoined(home, server);
+    await seedReplica(home, {
+      cursor: 41,
+      heartbeatAgeMs: 0,
+      issues: REPLICA_ISSUES,
+      pulls: [
+        { repo_id: "repo-api", number: 7, node_id: "PR_7", title: "seven", state: "open", linear_issue_identifier: "ENG-1" },
+        { repo_id: "repo-api", number: 8, node_id: "PR_8", title: "eight", state: "closed", merged: 1, linear_issue_identifier: "ENG-2" },
+      ],
+    });
+    expect(
+      await main(["query", "pulls", "--source", "replica", "--state", "merged", "--json"], ctx),
+    ).toBe(0);
+    expect((JSON.parse(ctx.out.join("\n")) as { number: number }[]).map((r) => r.number)).toEqual([8]);
+    const c2 = makeCtx(home);
+    expect(
+      await main(["query", "pulls", "--source", "replica", "--ticket", "ENG-1", "--json"], c2),
+    ).toBe(0);
+    expect((JSON.parse(c2.out.join("\n")) as { number: number }[]).map((r) => r.number)).toEqual([7]);
   });
 });
