@@ -835,6 +835,27 @@ describe("pulls facets", () => {
     expect(await numbers(["--state", "open", "--draft", "ready"])).toEqual([1, 3]);
   });
 
+  test("--repo and a row's state match without case, and open leaves out a merged row, as the cloud does", async () => {
+    await seedJoined(home, server);
+    server.pulls = [
+      ...workspace(),
+      pr(5, { state: "OPEN", merged: 0, merged_at: null }),
+      pr(6, { state: "open", merged: 1 }),
+    ];
+    expect(
+      await main(["query", "pulls", "--state", "open", "--repo", "REPO-API", "--all", "--json"], ctx),
+    ).toBe(0);
+    expect((JSON.parse(ctx.out.join("\n")) as { number: number }[]).map((r) => r.number).sort((a, b) => a - b)).toEqual([1, 2, 5]);
+    expect(ctx.err.join("\n")).not.toContain("outside the asked scope");
+    // A cloud that ignores the facets gets the same answer from the client's own rules.
+    server.legacyPullFacets = true;
+    const c2 = makeCtx(home);
+    expect(
+      await main(["query", "pulls", "--state", "open", "--repo", "REPO-API", "--all", "--json"], c2),
+    ).toBe(0);
+    expect((JSON.parse(c2.out.join("\n")) as { number: number }[]).map((r) => r.number).sort((a, b) => a - b)).toEqual([1, 2, 5]);
+  });
+
   test("a blank --state narrows nothing and sends no state", async () => {
     await seedJoined(home, server);
     server.pulls = workspace();
@@ -893,5 +914,31 @@ describe("pulls facets", () => {
       await main(["query", "pulls", "--source", "replica", "--ticket", "ENG-1", "--json"], c2),
     ).toBe(0);
     expect((JSON.parse(c2.out.join("\n")) as { number: number }[]).map((r) => r.number)).toEqual([7]);
+  });
+
+  test("a narrowed replica read finds a pull request older than the newest rows", async () => {
+    await seedJoined(home, server);
+    await seedReplica(home, {
+      cursor: 41,
+      heartbeatAgeMs: 0,
+      issues: REPLICA_ISSUES,
+      pulls: Array.from({ length: 1100 }, (_, i) => ({
+        repo_id: "repo-api",
+        number: i + 1,
+        node_id: `PR_${i + 1}`,
+        title: `pull ${i + 1}`,
+        state: i % 2 === 0 ? "open" : "closed",
+        merged: i % 2 === 0 ? 0 : 1,
+        linear_issue_identifier: i === 0 ? "ENG-1" : "ENG-2",
+      })),
+    });
+    const read = async (argv: string[]) => {
+      const c = makeCtx(home);
+      expect(await main(["query", "pulls", "--source", "replica", ...argv, "--json"], c)).toBe(0);
+      return (JSON.parse(c.out.join("\n")) as { number: number }[]).map((r) => r.number);
+    };
+    expect(await read(["--ticket", "ENG-1"])).toEqual([1]);
+    expect(await read(["--state", "merged", "--limit", "5000"])).toHaveLength(550);
+    expect(await read(["--state", "open", "--limit", "3"])).toHaveLength(3);
   });
 });

@@ -1175,13 +1175,15 @@ export async function startMeFixture(
       // `draft` draft|ready; an unknown value narrows nothing, and there is NO ticket facet.
       let rows = state.pulls ?? PULLS;
       if (!state.legacyPullFacets) {
+        // The read model lowercases state and repo, and `open`/`closed` leave out merged rows.
         const facet = url.searchParams.get("state");
         const merged = (p: Record<string, unknown>) => p.merged === 1 || p.merged === true;
-        if (facet === "open") rows = rows.filter((p) => p.state === "open");
+        const state = (p: Record<string, unknown>) => String(p.state ?? "").toLowerCase();
+        if (facet === "open") rows = rows.filter((p) => state(p) === "open" && !merged(p));
         if (facet === "merged") rows = rows.filter(merged);
-        if (facet === "closed") rows = rows.filter((p) => p.state === "closed" && !merged(p));
-        const repo = url.searchParams.get("repo");
-        if (repo) rows = rows.filter((p) => p.repo_id === repo);
+        if (facet === "closed") rows = rows.filter((p) => state(p) === "closed" && !merged(p));
+        const repo = url.searchParams.get("repo")?.toLowerCase();
+        if (repo) rows = rows.filter((p) => String(p.repo_id ?? "").toLowerCase() === repo);
         const draft = url.searchParams.get("draft");
         if (draft === "draft") rows = rows.filter((p) => p.draft === 1 || p.draft === true);
         if (draft === "ready") rows = rows.filter((p) => !(p.draft === 1 || p.draft === true));

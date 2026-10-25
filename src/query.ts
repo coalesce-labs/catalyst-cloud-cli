@@ -162,11 +162,20 @@ async function fromReplica(
         return replica.issue(needArg(rest, "issue <identifier>"));
       case "pulls": {
         const scope = pullScope(args);
-        const narrowed = scope.state || scope.repo || scope.draft || scope.ticket;
-        const rows = replica.pulls({
-          limit: narrowed ? Math.max(f.limit, 200) : f.limit,
-        }) as unknown as Record<string, unknown>[];
-        return rows.filter((row) => pullMatches(row, scope)).slice(0, f.limit);
+        if (!(scope.state || scope.repo || scope.draft || scope.ticket))
+          return replica.pulls({ limit: f.limit });
+        // CTC-7158 — the replica is local, so a narrowed read scans every row rather than only the
+        // newest window: an older pull request linked to the ticket is still found.
+        const kept: Record<string, unknown>[] = [];
+        for (let offset = 0; ; offset += REPLICA_PULL_PAGE) {
+          const page = replica.pulls({
+            limit: REPLICA_PULL_PAGE,
+            offset,
+          }) as unknown as Record<string, unknown>[];
+          kept.push(...page.filter((row) => pullMatches(row, scope)));
+          if (page.length < REPLICA_PULL_PAGE || kept.length >= f.limit) break;
+        }
+        return kept.slice(0, f.limit);
       }
       case "projects":
         return applyFilters(
@@ -377,6 +386,7 @@ function requireIssueScope(scope: string[] | null, f: Filters): void {
   }
 }
 
+const REPLICA_PULL_PAGE = 500;
 const PULL_STATES = ["open", "closed", "merged"] as const;
 const PULL_DRAFTS = ["draft", "ready"] as const;
 
@@ -410,15 +420,18 @@ function pullScope(args: ParsedArgs): PullScope {
 
 const truthy = (v: unknown) => v === true || v === 1 || v === "1" || v === "true";
 
-/** The cloud's facet rules: `closed` is closed and not merged; `ready` is not a draft. */
+/** The cloud's facet rules (the read model's pull scope): `open` and `closed` leave out merged pull
+ *  requests, `merged` is the merged flag alone, `ready` is not a draft, and state and repo match
+ *  without case. */
 function pullMatches(row: Record<string, unknown>, s: PullScope): boolean {
-  const merged = truthy(row.merged) || (row.merged_at !== null && row.merged_at !== undefined);
-  if (s.state === "open" && row.state !== "open") return false;
+  const merged = truthy(row.merged);
+  const state = String(row.state ?? "").toLowerCase();
+  if (s.state === "open" && (state !== "open" || merged)) return false;
   if (s.state === "merged" && !merged) return false;
-  if (s.state === "closed" && (row.state !== "closed" || merged)) return false;
+  if (s.state === "closed" && (state !== "closed" || merged)) return false;
   if (s.draft === "draft" && !truthy(row.draft)) return false;
   if (s.draft === "ready" && truthy(row.draft)) return false;
-  if (s.repo && row.repo_id !== s.repo) return false;
+  if (s.repo && !sameName(row.repo_id, s.repo)) return false;
   if (s.ticket && "linear_issue_identifier" in row && !sameName(row.linear_issue_identifier, s.ticket))
     return false;
   return true;
