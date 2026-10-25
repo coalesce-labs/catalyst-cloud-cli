@@ -5,6 +5,7 @@ Cloud reads are the default on every machine. They need no local writer and no l
 | question | command |
 | -- | -- |
 | Which pull requests name this ticket? | `catalyst query pulls --ticket <KEY-123>` |
+| Which pull requests are open, in one repository or across them all? | `catalyst query pulls --state open --all` (add `--repo <owner/name>` or `--draft ready`). The cloud filters, so this reads only open ones. Never page every pull request with `--all` and filter it yourself. |
 | What state is the PR in: draft, merged, conflict, auto-merge? | `node scripts/read-pr.mjs <KEY-123>` |
 | Which checks are red or still running at the head? | `node scripts/read-pr.mjs <KEY-123>` |
 | Is it mergeable under this repository's policy? | `node scripts/is-it-mergeable.mjs <KEY-123>`, which also reads `catalyst contract --path merge` |

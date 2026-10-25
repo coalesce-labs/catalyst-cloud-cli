@@ -168,7 +168,12 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
   query: {
     team: { value: true, help: "team key filter" },
     project: { value: true, help: "project id filter" },
-    state: { value: true, help: "state name filter" },
+    state: {
+      value: true,
+      help: "issues: state name filter; pulls: open, closed or merged",
+    },
+    repo: { value: true, help: "pulls: only this repository (owner/name)" },
+    draft: { value: true, help: "pulls: draft or ready" },
     limit: {
       value: true,
       help: "max rows (default 50); one page only unless --all",
@@ -657,7 +662,7 @@ export const VERB_USAGE: Record<string, string> = {
   me: "me [--json]",
   contract: "contract [--refresh] [--path <a.b.c>] [--json]",
   query:
-    "query <issues|issue <id>|pulls|pull <id>|projects|cycles|search <terms>|changes --since <cursor|head>> [--team K] [--project P] [--state S] [--limit N] [--all] [--source replica|api] [--json]",
+    "query <issues|issue <id>|pulls|pull <id>|projects|cycles|search <terms>|changes --since <cursor|head>> [--team K] [--project P] [--state S] [--repo O/N] [--draft draft|ready] [--ticket T] [--limit N] [--all] [--source replica|api] [--json]",
   replica:
     'replica <start [--detach]|stop|status [--probe] [--json]|sql "<select>"|schema [table]> [--db <path>]',
   runtime: "runtime <status [--json]|install|path|uninstall>",

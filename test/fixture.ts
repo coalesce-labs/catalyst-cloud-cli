@@ -92,6 +92,12 @@ export interface FixtureServer {
   /** CTC-4556 — serve `/issues` as a mirror before `state_name` and `x-mirror-scope`: team and
    *  state params narrow nothing and no scope header is sent. */
   legacyIssueScope?: boolean;
+  /** CTC-7158 — serve `/pulls` as a mirror before the state, repo and draft facets: they narrow
+   *  nothing. */
+  legacyPullFacets?: boolean;
+  /** CTC-7158 — the ticket read's `linked_pulls`, per identifier, instead of the ENG-2 default;
+   *  `null` serves a ticket read with no `linked_pulls` field at all. */
+  linkedPulls?: Record<string, { repo_id: string; number: number; node_id: string | null }[] | null>;
   /** A whole `/api/v1/work-eligibility` body served for one team key instead of the ENG fixture. */
   eligibilityByTeam: Record<string, Record<string, unknown>>;
   /** The contract's `ticket-release` route answers this (status + body) when set; `{outcome: "released"}` otherwise. */
@@ -305,7 +311,11 @@ function fixtureBlockers(row: Record<string, unknown>, issues: Record<string, un
   });
 }
 
-function issueDetail(row: Record<string, unknown>, issues: Record<string, unknown>[]): Record<string, unknown> {
+function issueDetail(
+  row: Record<string, unknown>,
+  issues: Record<string, unknown>[],
+  linkedPulls?: FixtureServer["linkedPulls"],
+): Record<string, unknown> {
   return {
     ...row,
     description: `Description of ${row.identifier}`,
@@ -349,9 +359,12 @@ function issueDetail(row: Record<string, unknown>, issues: Record<string, unknow
     ],
     activity: [],
     linked_pulls:
-      row.identifier === "ENG-2"
-        ? [{ repo_id: "repo-api", number: 41, node_id: "PR_kwDOfixture41" }]
-        : [],
+      linkedPulls?.[String(row.identifier)] === null
+        ? undefined
+        : (linkedPulls?.[String(row.identifier)] ??
+          (row.identifier === "ENG-2"
+            ? [{ repo_id: "repo-api", number: 41, node_id: "PR_kwDOfixture41" }]
+            : [])),
     agent_sessions: [],
     blocked_by: fixtureBlockers(row, issues),
   };
@@ -1154,14 +1167,27 @@ export async function startMeFixture(
         (r) => r.identifier === ref || r.id === ref,
       );
       return row
-        ? send(200, issueDetail(row, state.issues))
+        ? send(200, issueDetail(row, state.issues, state.linkedPulls))
         : send(404, { error: "not found" });
     }
     if (path === "/api/v1/pulls") {
-      const ticket = url.searchParams.get("ticket");
+      // CTC-7158 — the mirror's facets (`MirrorDO.handlePulls`): `state` open|closed|merged, `repo`,
+      // `draft` draft|ready; an unknown value narrows nothing, and there is NO ticket facet.
       let rows = state.pulls ?? PULLS;
-      if (ticket)
-        rows = rows.filter((p) => p.linear_issue_identifier === ticket);
+      if (!state.legacyPullFacets) {
+        // The read model lowercases state and repo, and `open`/`closed` leave out merged rows.
+        const facet = url.searchParams.get("state");
+        const merged = (p: Record<string, unknown>) => p.merged === 1 || p.merged === true;
+        const state = (p: Record<string, unknown>) => String(p.state ?? "").toLowerCase();
+        if (facet === "open") rows = rows.filter((p) => state(p) === "open" && !merged(p));
+        if (facet === "merged") rows = rows.filter(merged);
+        if (facet === "closed") rows = rows.filter((p) => state(p) === "closed" && !merged(p));
+        const repo = url.searchParams.get("repo")?.toLowerCase();
+        if (repo) rows = rows.filter((p) => String(p.repo_id ?? "").toLowerCase() === repo);
+        const draft = url.searchParams.get("draft");
+        if (draft === "draft") rows = rows.filter((p) => p.draft === 1 || p.draft === true);
+        if (draft === "ready") rows = rows.filter((p) => !(p.draft === 1 || p.draft === true));
+      }
       const p = keysetPage(rows, url, state, "/api/v1/pulls");
       return p.bad
         ? send(400, { error: p.bad })
@@ -1169,7 +1195,7 @@ export async function startMeFixture(
     }
     const pullMatch = /^\/api\/v1\/pulls\/([^/]+)$/.exec(path);
     if (pullMatch) {
-      const pr = PULLS.find(
+      const pr = (state.pulls ?? PULLS).find(
         (p) => p.node_id === decodeURIComponent(pullMatch[1]!),
       );
       return pr
