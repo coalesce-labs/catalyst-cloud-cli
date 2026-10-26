@@ -21,6 +21,8 @@ import {
   launchAgentPath,
   scheduledPath,
   systemdUnitPaths,
+  unitWords,
+  unxml,
   writeFileAtomic,
   type AutoUpdateStatus,
   type SchedulerRun,
@@ -73,9 +75,6 @@ interface AgentProgram {
   claude: string | null;
 }
 
-const unxml = (value: string) =>
-  value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
-
 /** The agent's command, from a plist this CLI wrote (launchAgentPlist). Anything else is unrecognized. */
 function plistProgram(text: string): AgentProgram | null {
   const array = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1];
@@ -86,11 +85,6 @@ function plistProgram(text: string): AgentProgram | null {
     return m ? unxml(m[1] ?? "") : null;
   };
   return programOf(args, env("PATH"), env(CLAUDE_PATH_ENV));
-}
-
-/** systemd's quoted words, as systemdUnits writes them. */
-function unitWords(line: string): string[] {
-  return [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => (m[1] ?? "").replace(/\\(.)/g, "$1").replace(/%%/g, "%"));
 }
 
 function unitProgram(text: string): AgentProgram | null {

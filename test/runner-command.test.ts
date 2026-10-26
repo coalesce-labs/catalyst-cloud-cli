@@ -1,4 +1,4 @@
-import { mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -120,6 +120,8 @@ describe("catalyst runner update", () => {
     [["runner", "status", "--dir", "/tmp/runner"]],
     [["runner", "update", "--yes"]],
     [["runner", "auto-update", "off", "--delete-checkouts"]],
+    [["runner", "stop", "--fleet"]],
+    [["runner", "status", "--fleet", "--dir", "/srv/catalyst/supervisor-fleet-config"]],
   ])("NEGATIVE: %j is a usage error", async (argv) => {
     const ctx = makeCtx(tempHome());
     expect(await main(argv, ctx, { runner: { engine: engine(503) } })).not.toBe(0);
@@ -220,6 +222,52 @@ describe("catalyst runner auto-update", () => {
     expect(effectivePolicy(held, "cli")).toEqual({ enabled: true, source: "default" });
     expect(await main(["runner", "auto-update", "on", "--dir", install()], makeCtx(home), { runner: { scheduler: scheduler("linux", run) } })).toBe(0);
     for (const id of ["runner", "supervisor", "watchdog"] as const) expect(effectivePolicy(readUpdatePolicy(home), id).enabled).toBe(true);
+  });
+
+  // CTC-6384: a supervisor fleet host schedules `runner update --auto --fleet --dir <the directory that holds compose.json>`.
+  const fleetDir = "/srv/catalyst/supervisor-fleet-config";
+  const lingers: SchedulerRun = (cmd) => ({ status: 0, stdout: cmd === "loginctl" ? "Linger=yes\n" : "", stderr: "" });
+  const service = (home: string) => join(home, ".config", "systemd", "user", "catalyst-runner-update.service");
+  const onLine = "Automatic runner updates are on: this machine checks for an approved release every 15 minutes, and keeps checking after you log out.";
+
+  it("on --fleet --dir schedules the fleet update, and status names the fleet and its directory, as text and JSON (CTC-6384)", async () => {
+    const home = tempHome();
+    const on = makeCtx(home);
+    expect(await main(["runner", "auto-update", "on", "--fleet", "--dir", fleetDir], on, { runner: { scheduler: scheduler("linux", lingers) } })).toBe(0);
+    expect(readFileSync(service(home), "utf8")).toContain(`ExecStart="/usr/local/bin/catalyst" "runner" "update" "--auto" "--fleet" "--dir" "${fleetDir}"`);
+    expect(on.out).toEqual([onLine, `This is a supervisor fleet's schedule: it updates the compose.json in ${fleetDir}.`]);
+    const text = makeCtx(home);
+    expect(await main(["runner", "auto-update", "status"], text, { runner: { scheduler: scheduler("linux", lingers) } })).toBe(0);
+    expect(text.out).toEqual([onLine, `This is a supervisor fleet's schedule: it updates the compose.json in ${fleetDir}.`]);
+    const json = makeCtx(home);
+    expect(await main(["runner", "auto-update", "status", "--json"], json, { runner: { scheduler: scheduler("linux", lingers) } })).toBe(0);
+    expect(JSON.parse(json.out[0]!)).toMatchObject({ state: "on", detail: "timer_enabled", linger: true, fleet: true, dir: fleetDir });
+  });
+
+  it("POSITIVE CONTROL: on without --fleet keeps the single runner's schedule, and status prints only its one line (CTC-6384)", async () => {
+    const home = tempHome();
+    const dir = install();
+    expect(await main(["runner", "auto-update", "on", "--dir", dir], makeCtx(home), { runner: { scheduler: scheduler("linux", lingers) } })).toBe(0);
+    const unit = readFileSync(service(home), "utf8");
+    expect(unit).toContain(`ExecStart="/usr/local/bin/catalyst" "runner" "update" "--auto" "--dir" "${dir}"`);
+    expect(unit).not.toContain("--fleet");
+    const text = makeCtx(home);
+    expect(await main(["runner", "auto-update", "status"], text, { runner: { scheduler: scheduler("linux", lingers) } })).toBe(0);
+    expect(text.out).toEqual([onLine]);
+    const json = makeCtx(home);
+    expect(await main(["runner", "auto-update", "status", "--json"], json, { runner: { scheduler: scheduler("linux", lingers) } })).toBe(0);
+    expect(JSON.parse(json.out[0]!)).toMatchObject({ state: "on", detail: "timer_enabled", fleet: false, dir });
+  });
+
+  it("NEGATIVE: on --fleet without --dir is a usage error that names --dir, and touches no scheduler (CTC-6384)", async () => {
+    const home = tempHome();
+    const ctx = makeCtx(home);
+    const calls: string[] = [];
+    const run: SchedulerRun = (cmd, args) => { calls.push([cmd, ...args].join(" ")); return { status: 0, stdout: "", stderr: "" }; };
+    expect(await main(["runner", "auto-update", "on", "--fleet"], ctx, { runner: { scheduler: scheduler("linux", run) } })).not.toBe(0);
+    expect(ctx.err.join("\n")).toContain("--fleet needs --dir, the directory that holds compose.json");
+    expect(calls).toEqual([]);
+    expect(existsSync(service(home))).toBe(false);
   });
 });
 

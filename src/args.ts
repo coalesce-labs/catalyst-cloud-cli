@@ -56,7 +56,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     check: { value: false, help: "read the approved release and say what would change, without changing it" },
     auto: { value: false, help: "one-line output for the scheduled run" },
     dir: { value: true, help: "the runner directory (default: the one setup created)" },
-    fleet: { value: false, help: "update a multi-team supervisor fleet's compose.json in --dir" },
+    fleet: { value: false, help: "update a multi-team supervisor fleet's compose.json in --dir (with auto-update on: schedule that update)" },
     yes: { value: false, help: "uninstall: confirm without a terminal" },
     "delete-checkouts": { value: false, help: "uninstall: also delete the repository and thoughts checkouts" },
   },
@@ -652,7 +652,7 @@ export const VERB_USAGE: Record<string, string> = {
   hosts:
     "hosts [list] | hosts remove <name-or-id> [--yes] | hosts rename <name-or-id> <new-name> [--json]",
   runner:
-    "runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts] | runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off] [--json]",
+    "runner [status] | runner stop | runner start | runner uninstall [--yes] [--delete-checkouts] | runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off] [--fleet --dir <fleet directory>] [--json]",
   update:
     "update [--check] [--project <absolute path>] [--dir <runner directory>] | update sdk --project <absolute path> | update policy [<component> on|off] | update policy sdk on|off --project <absolute path> | update policy windows <HH:MM,...>|default [--time-zone <zone>] [--json]   (components: runner, supervisor, watchdog, cli, skills-cloud, skills-dev, replica)",
   setup:
