@@ -153,10 +153,10 @@ test("mcp status is an available member read with no agent route dependencies", 
   expect(reportCapabilities(null).find((row) => row.verb === "mcp status")?.availability).toBe("available");
 });
 
-test("flow is an available member read with no agent routes, first shipped in 0.16.39", () => {
+test("flow is an available member read with no agent routes, first shipped in 0.16.40", () => {
   expect(CAPABILITIES.find((row) => row.verb === "flow")).toEqual({
     verb: "flow", does: "print a repository's open pull request counts over time, one row per hour or per day",
-    needs: "member", routes: [], since: "0.16.39",
+    needs: "member", routes: [], since: "0.16.40",
   });
   expect(reportCapabilities(null).find((row) => row.verb === "flow")?.availability).toBe("available");
 });

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.40
+
+`catalyst flow --repo <owner/name> --period 2w --granularity day` prints a repository's open pull request counts by the day, or by the hour with `--granularity hour`. `--json` prints the same buckets the SDK's `flow.series()` returns.
+
+A supervisor fleet can now update itself on a schedule: `catalyst runner auto-update on --fleet --dir <fleet directory>` installs a timer that runs `catalyst runner update --fleet` for that directory, and `catalyst runner auto-update status` shows that it is a fleet schedule and which directory it updates.
+
+After `catalyst runner update --fleet` applies a release, it checks the fleet again 10 minutes later. If the supervisor is not running, or the release was granted no work while three requests for work got no response, it restores the previous release and does not apply that release again until a newer one is approved. An idle fleet with nothing to do keeps the new release. `catalyst runner update --check --fleet` names the last check's result.
+
 ## 0.16.39
 
 `catalyst query pulls` now sends `--state`, `--repo` and `--draft` to Catalyst, so `--state open --all` reads only the workspace's open pull requests instead of paging through every pull request it has ever had. `--state` takes `open`, `closed` or `merged`, and `--draft` takes `draft` or `ready`. Any other value is refused before a request is made. `open` and `closed` leave out merged pull requests, and the repository and state match in any letter case. Against an older Catalyst that ignores these filters, the CLI applies them to the rows it gets back, so the result is the same. A filtered read of the local replica now checks every pull request it holds, so an older pull request linked to a ticket is still found.
