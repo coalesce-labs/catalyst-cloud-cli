@@ -740,6 +740,91 @@ describe("the update schedule", () => {
     expect(enableAutoUpdate({ platform: "linux", home, cli: "c", path: "/bin", run }, "/d")).toMatchObject({ state: "unsupported" });
     expect(existsSync(systemdUnitPaths(home).timer)).toBe(false);
   });
+
+  // CTC-6384: a supervisor fleet host's schedule runs the fleet update on the directory that holds compose.json.
+  const FLEET_DIR = "/srv/catalyst/supervisor-fleet-config";
+
+  it("a supervisor fleet's schedule runs the fleet update, in the plist and in the systemd service (CTC-6384)", () => {
+    const plist = launchAgentPlist({ cli: "/opt/homebrew/bin/catalyst", path: "/usr/bin:/bin", home: "/Users/x" }, FLEET_DIR, true);
+    expect(plist).toContain(`<array><string>/opt/homebrew/bin/catalyst</string><string>runner</string><string>update</string><string>--auto</string><string>--fleet</string><string>--dir</string><string>${FLEET_DIR}</string></array>`);
+    const deps = { cli: "/usr/local/bin/catalyst", path: "/usr/bin:/bin" };
+    const units = systemdUnits(deps, FLEET_DIR, true);
+    expect(units.service).toContain(`\nExecStart="/usr/local/bin/catalyst" "runner" "update" "--auto" "--fleet" "--dir" "${FLEET_DIR}"\n`);
+    // Only the command changes: the timer is the single runner's.
+    expect(units.timer).toBe(systemdUnits(deps, FLEET_DIR).timer);
+  });
+
+  it("a single runner's schedule is byte for byte what it was before the fleet flag (CTC-6384)", () => {
+    const deps = { cli: "/usr/local/bin/catalyst", path: "/usr/local/bin:/usr/bin:/bin" };
+    const dir = "/home/x/.local/state/catalyst/runner";
+    const units = systemdUnits(deps, dir);
+    expect(units.service).toBe([
+      "[Unit]",
+      "Description=Catalyst runner update",
+      "",
+      "[Service]",
+      "Type=oneshot",
+      'Environment="PATH=/usr/local/bin:/usr/bin:/bin"',
+      'ExecStart="/usr/local/bin/catalyst" "runner" "update" "--auto" "--dir" "/home/x/.local/state/catalyst/runner"',
+      "",
+    ].join("\n"));
+    expect(units.timer).toBe([
+      "[Unit]",
+      "Description=Check for an approved Catalyst runner release every 15 minutes",
+      "",
+      "[Timer]",
+      "OnCalendar=*:0/15",
+      "RandomizedDelaySec=60",
+      "Persistent=true",
+      "",
+      "[Install]",
+      "WantedBy=timers.target",
+      "",
+    ].join("\n"));
+    expect(systemdUnits(deps, dir, false)).toEqual(units);
+    const mac = { cli: "/opt/homebrew/bin/catalyst", path: "/opt/homebrew/bin:/usr/bin:/bin", home: "/Users/x" };
+    const macDir = "/Users/x/.local/state/catalyst/runner";
+    expect(launchAgentPlist(mac, macDir)).toBe([
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+      '<plist version="1.0"><dict>',
+      "<key>Label</key><string>dev.catalystcloud.runner-update</string>",
+      "<key>ProgramArguments</key><array><string>/opt/homebrew/bin/catalyst</string><string>runner</string><string>update</string><string>--auto</string><string>--dir</string><string>/Users/x/.local/state/catalyst/runner</string></array>",
+      "<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string><key>HOME</key><string>/Users/x</string></dict>",
+      "<key>StartCalendarInterval</key><array><dict><key>Minute</key><integer>0</integer></dict><dict><key>Minute</key><integer>15</integer></dict><dict><key>Minute</key><integer>30</integer></dict><dict><key>Minute</key><integer>45</integer></dict></array>",
+      "<key>ProcessType</key><string>Standard</string>",
+      "<key>StandardOutPath</key><string>/Users/x/.local/state/catalyst/runner/update.log</string>",
+      "<key>StandardErrorPath</key><string>/Users/x/.local/state/catalyst/runner/update.log</string>",
+      "</dict></plist>",
+      "",
+    ].join("\n"));
+    expect(launchAgentPlist(mac, macDir, false)).toBe(launchAgentPlist(mac, macDir));
+  });
+
+  it("Linux: on with fleet writes the fleet service, and status reads the fleet and its directory back (CTC-6384)", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const { run } = recorder();
+    const deps = { platform: "linux" as const, home, uid: 1000, cli: "/usr/local/bin/catalyst", path: "/usr/bin:/bin", run };
+    expect(enableAutoUpdate(deps, FLEET_DIR, { fleet: true })).toMatchObject({ state: "on", fleet: true, dir: FLEET_DIR });
+    expect(readFileSync(systemdUnitPaths(home).service, "utf8")).toBe(systemdUnits(deps, FLEET_DIR, true).service);
+    expect(autoUpdateStatus(deps)).toMatchObject({ state: "on", detail: "timer_enabled_without_linger", fleet: true, dir: FLEET_DIR });
+    // POSITIVE CONTROL: the same home turned back to a single runner's schedule reads back as no fleet.
+    expect(enableAutoUpdate(deps, "/d")).toMatchObject({ state: "on", fleet: false, dir: "/d" });
+    expect(autoUpdateStatus(deps)).toMatchObject({ state: "on", fleet: false, dir: "/d" });
+  });
+
+  it("macOS: on with fleet loads the fleet plist, and status reads the fleet and its directory back (CTC-6384)", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    let loaded = false;
+    const run: SchedulerRun = (cmd, args) => {
+      if (cmd === "launchctl" && args[0] === "bootstrap") loaded = true;
+      return { status: cmd === "launchctl" && args[0] === "print" && !loaded ? 113 : 0, stdout: "", stderr: "" };
+    };
+    const deps = { platform: "darwin" as const, home, uid: 501, cli: "/opt/homebrew/bin/catalyst", node: null, path: "/usr/bin:/bin", run };
+    expect(enableAutoUpdate(deps, FLEET_DIR, { fleet: true })).toMatchObject({ state: "on", fleet: true, dir: FLEET_DIR });
+    expect(readFileSync(launchAgentPath(home), "utf8")).toBe(launchAgentPlist(deps, FLEET_DIR, true));
+    expect(autoUpdateStatus(deps)).toMatchObject({ state: "on", detail: "launch_agent_loaded", fleet: true, dir: FLEET_DIR });
+  });
 });
 
 describe("lastProblemLines (CTC-6709)", () => {

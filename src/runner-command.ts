@@ -34,7 +34,8 @@ import { cmdRunnerLifecycle, RUNNER_LIFECYCLE_ACTIONS, type RunnerLifecycleDeps 
 
 // `catalyst runner update [--check] [--auto] [--dir <dir>] [--fleet]` and
 // `catalyst runner auto-update [status|on|off]` (CTC-4646). `--fleet` updates a multi-team
-// supervisor fleet's `compose.json` in `--dir` instead of a single runner's `.env` (CTC-6530).
+// supervisor fleet's `compose.json` in `--dir` instead of a single runner's `.env` (CTC-6530), and
+// `auto-update on --fleet` schedules that fleet update (CTC-6384).
 // `catalyst runner [status] | stop | start | uninstall` go to runner.ts (CTC-5930).
 
 export interface RunnerCommandDeps extends RunnerLifecycleDeps {
@@ -85,7 +86,7 @@ function custodyRerun(ctx: Ctx, deps: CustodyRerunDeps, dir: string): number | n
 }
 
 const USAGE =
-  "catalyst runner [status] | stop | start | uninstall [--yes] [--delete-checkouts] | runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off]";
+  "catalyst runner [status] | stop | start | uninstall [--yes] [--delete-checkouts] | runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off] [--fleet --dir <fleet directory>]";
 const UPDATE_FLAGS = ["check", "auto", "dir", "fleet"] as const;
 
 function schedulerDeps(ctx: Ctx, deps: RunnerCommandDeps): AutoUpdateDeps {
@@ -224,9 +225,11 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
 
   if (action === "auto-update" && parts.length <= 2) {
     const mode = parts[1] ?? "status";
+    const fleet = flagBool(args, "fleet");
+    if (mode === "on" && fleet && dirFlag === undefined) throw new UsageError("--fleet needs --dir, the directory that holds compose.json");
     const scheduler = schedulerDeps(ctx, deps);
     let status: AutoUpdateStatus;
-    if (mode === "on") status = enableAutoUpdate(scheduler, dir());
+    if (mode === "on") status = enableAutoUpdate(scheduler, dir(), { fleet });
     else if (mode === "off") status = disableAutoUpdate(scheduler);
     else if (mode === "status") status = autoUpdateStatus(scheduler);
     else throw new UsageError(USAGE);
@@ -237,7 +240,11 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     if (args.json) {
       const state = mode === "status" && dirFlag !== undefined ? readReleaseState(dirFlag) : undefined;
       ctx.stdout(JSON.stringify({ ...status, ...(state ? { release: state } : {}) }));
-    } else ctx.stdout(statusLine(status));
+    } else {
+      ctx.stdout(statusLine(status));
+      // A single runner's schedule prints what it always has; a fleet's says so, and for which directory.
+      if (status.state === "on" && status.fleet) ctx.stdout(`This is a supervisor fleet's schedule: it updates the compose.json in ${status.dir}.`);
+    }
     return status.state === "on" || mode !== "on" ? 0 : 1;
   }
 
