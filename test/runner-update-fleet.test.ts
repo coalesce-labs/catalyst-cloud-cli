@@ -336,6 +336,7 @@ describe("catalyst runner update --fleet", () => {
 const ROLL_START = "2026-10-22T20:00:00.000Z";
 const grantedLine = '2026-10-22T20:06:00Z {"version":1,"event":"work_granted","tenant":"tenant-0","team":"CTC"}';
 const refusedLine = '2026-10-22T20:06:00Z {"version":1,"event":"acquire_refused","tenant":"tenant-0","team":"CTC"}';
+const noneLine = '2026-10-22T20:06:00Z {"version":1,"event":"acquire_none","tenant":"tenant-0","team":"CTC"}';
 const noResponseLine = '2026-10-22T20:06:00Z {"version":1,"event":"acquire_retry","detail":"fetch failed (no response)"}';
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const lines = (line: string, count: number) => Array.from({ length: count }, () => line).join("\n");
@@ -349,6 +350,15 @@ async function rolled(options: FakeOptions = {}, fromGeneration: number | null =
   const result = await runFleetUpdate(fleet.engine, { dir, ...clock() });
   return { dir, text, result, ...fleet };
 }
+/** The engine as the check first sees it with the supervisor stopped or missing; later reads (after the
+ *  rollback's recreate) are the real fake's. */
+const supervisorDownAtCheck = (engine: FleetUpdateEngine, first: FleetSupervisor | null): FleetUpdateEngine => {
+  let reads = 0;
+  return {
+    ...engine,
+    supervisor: async (...args) => (reads++ === 0 ? first : engine.supervisor(...args)),
+  };
+};
 const runCheck = (engine: FleetUpdateEngine, dir: string) => runFleetPostRollCheck(engine, { dir, now: clock().now });
 
 describe("fleet update: the post-roll check is armed by a successful apply", () => {
@@ -395,11 +405,23 @@ describe("fleet update: the post-roll verdict", () => {
     expect(existsSync(join(dir, POST_ROLL_ARMED_FILE))).toBe(false);
   });
 
-  it("STANDS_IDLE: no grant, but the acquires are answered and none got no response, is not a failure", async () => {
-    const { dir, engine, calls, setLogs } = await rolled();
-    setLogs(lines(refusedLine, 3));
+  it("STANDS_IDLE: no grant, nothing logged and the supervisor running is an idle host, not a failure", async () => {
+    const { dir, text, engine, calls, setLogs } = await rolled();
+    setLogs("");
+    calls.prepared.length = 0;
     expect(await runCheck(engine, dir)).toMatchObject({ detail: "STANDS_IDLE", exitCode: 0 });
-    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ verdict: "STANDS_IDLE", granted: 0, noResponse: 0, answered: 3 });
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ verdict: "STANDS_IDLE", granted: 0, noResponse: 0, answered: 0 });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).not.toBe(text);
+    expect(calls.recreate).toBe(1);
+    expect(calls.prepared).toEqual([]);
+    expect(existsSync(join(dir, POST_ROLL_ARMED_FILE))).toBe(false);
+  });
+
+  it("STANDS_IDLE: refused acquires and fewer than three no-response retries are not a failure either", async () => {
+    const { dir, engine, calls, setLogs } = await rolled();
+    setLogs([lines(refusedLine, 2), lines(noResponseLine, 2)].join("\n"));
+    expect(await runCheck(engine, dir)).toMatchObject({ detail: "STANDS_IDLE", exitCode: 0 });
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ verdict: "STANDS_IDLE", granted: 0, noResponse: 2, answered: 2 });
     expect(calls.recreate).toBe(1);
   });
 
@@ -421,12 +443,44 @@ describe("fleet update: the post-roll verdict", () => {
     expect(existsSync(join(dir, "update.lock"))).toBe(false);
   });
 
-  it("ROLLED_BACK: no grant and fewer than three answered acquires is also a failure", async () => {
-    const { dir, text, engine, setLogs } = await rolled();
-    setLogs(lines(refusedLine, 2));
-    expect(await runCheck(engine, dir)).toMatchObject({ detail: "ROLLED_BACK" });
+  it.each([
+    ["stopped", true],
+    ["not found", false],
+  ])("ROLLED_BACK: a supervisor that is %s at check time goes back through the guarded path, and its log is not read", async (_label, found) => {
+    const { dir, text, engine, calls } = await rolled({}, 1);
+    const live = (await engine.supervisor(dir, "catalyst-fleet"))!;
+    const check = supervisorDownAtCheck(engine, found ? { ...live, running: false } : null);
+    calls.prepared.length = 0;
+    calls.logSince.length = 0;
+    expect(await runCheck(check, dir)).toMatchObject({ detail: "ROLLED_BACK", exitCode: 1 });
+    expect(calls.logSince).toEqual([]);
     expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(text);
-    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ rolledBackFrom: 2, rolledBackTo: null });
+    expect(calls.prepared).toEqual([[OLD.runner, OLD.supervisor]]);
+    expect(calls.recreate).toBe(2);
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({
+      verdict: "ROLLED_BACK", granted: 0, noResponse: 0, answered: 0, reason: "supervisor_not_running", rolledBackFrom: 2, rolledBackTo: 1,
+    });
+    expect(existsSync(join(dir, POST_ROLL_ARMED_FILE))).toBe(false);
+  });
+
+  it("NEGATIVE: a stopped supervisor is still refused when compose.json changed since the roll", async () => {
+    const { dir, engine, calls } = await rolled();
+    const moved = `${JSON.stringify(composeFile(NEW), null, 4)}\n`;
+    writeFileSync(join(dir, FLEET_COMPOSE_FILE), moved);
+    const stopped = { ...(await engine.supervisor(dir, "catalyst-fleet"))!, running: false };
+    expect(await runCheck(supervisorDownAtCheck(engine, stopped), dir)).toMatchObject({ detail: "ROLLBACK_REFUSED", exitCode: 1 });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(moved);
+    expect(calls.recreate).toBe(1);
+  });
+
+  it("NEGATIVE: Docker unreadable (no supervisor read, or no log) judges nothing and keeps the check armed", async () => {
+    const { dir, engine, calls } = await rolled();
+    const noDocker: FleetUpdateEngine = { ...engine, supervisor: async () => undefined };
+    expect(await runCheck(noDocker, dir)).toMatchObject({ detail: "docker_unavailable", result: null, exitCode: 1 });
+    const noLogs: FleetUpdateEngine = { ...engine, logs: async () => null };
+    expect(await runCheck(noLogs, dir)).toMatchObject({ detail: "docker_unavailable", result: null, exitCode: 1 });
+    expect(existsSync(join(dir, POST_ROLL_ARMED_FILE))).toBe(true);
+    expect(calls.recreate).toBe(1);
   });
 
   it("NEGATIVE: compose.json changed since the roll is refused, not overwritten", async () => {
@@ -443,7 +497,11 @@ describe("fleet update: the post-roll verdict", () => {
   it("a rollback whose supervisor is not running afterwards is recorded as failed", async () => {
     const { dir, engine, setLogs } = await rolled();
     setLogs(lines(noResponseLine, 3));
-    const down: FleetUpdateEngine = { ...engine, supervisor: async () => ({ ...(await engine.supervisor(dir, "catalyst-fleet"))!, running: false }) };
+    let reads = 0;
+    const down: FleetUpdateEngine = {
+      ...engine,
+      supervisor: async (...args) => (reads++ === 0 ? engine.supervisor(...args) : { ...(await engine.supervisor(...args))!, running: false }),
+    };
     expect(await runCheck(down, dir)).toMatchObject({ detail: "ROLLBACK_FAILED", exitCode: 1 });
     expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ verdict: "ROLLBACK_FAILED", reason: "supervisor_not_running" });
   });
@@ -455,19 +513,24 @@ describe("fleet update: the post-roll verdict", () => {
     expect(calls.recreate).toBe(0);
   });
 
-  it("counts: only the three events, and a retry counts only when it says no response", () => {
+  it("counts: only the four events, and a retry counts only when it says no response", () => {
     const retryOther = '{"event":"acquire_retry","detail":"HTTP 503"}';
     expect(postRollCounts([grantedLine, grantedLine, refusedLine, noResponseLine, retryOther, "plain text"].join("\n")))
       .toEqual({ granted: 2, noResponse: 1, answered: 3 });
     expect(postRollCounts("")).toEqual({ granted: 0, noResponse: 0, answered: 0 });
   });
 
+  it("counts: acquire_none lines are answered acquires", () => {
+    expect(postRollCounts([noneLine, noneLine, refusedLine, grantedLine].join("\n")))
+      .toEqual({ granted: 1, noResponse: 0, answered: 4 });
+  });
+
   it.each([
-    [{ granted: 1, noResponse: 9, answered: 1 }, false],
-    [{ granted: 0, noResponse: 3, answered: 9 }, true],
-    [{ granted: 0, noResponse: 2, answered: 3 }, false],
-    [{ granted: 0, noResponse: 0, answered: 2 }, true],
-    [{ granted: 0, noResponse: 0, answered: 3 }, false],
+    [{ granted: 1, noResponse: 9 }, false],
+    [{ granted: 0, noResponse: 3 }, true],
+    [{ granted: 0, noResponse: 9 }, true],
+    [{ granted: 0, noResponse: 2 }, false],
+    [{ granted: 0, noResponse: 0 }, false],
   ])("the rule: %j is failing=%s", (counts, failing) => {
     expect(postRollFailing(counts)).toBe(failing);
   });

@@ -63,8 +63,7 @@ export const POST_ROLL_ARMED_FILE = "post-roll-armed.json";
 export const POST_ROLL_RESULT_FILE = "post-roll-result.json";
 export const POST_ROLL_DELAY_MS = 10 * 60_000;
 const POST_ROLL_UNIT = "catalyst-fleet-post-roll";
-/** Acquires that went unanswered, or too few answered, for a release with no grants to count as failing. */
-const POST_ROLL_MIN_ANSWERED = 3;
+/** No-response acquire retries, with no grants, that count a release as failing. */
 const POST_ROLL_MAX_NO_RESPONSE = 3;
 
 type FleetImages = { runner: string; supervisor: string };
@@ -272,8 +271,8 @@ export function readPostRollResult(dir: string): PostRollResult | null {
 
 const VERDICT_TEXT: Record<PostRollVerdict, string> = {
   PASS: "passed: the release was granted work",
-  STANDS_IDLE: "left the release in place: no work was granted, but the fleet's acquires were answered",
-  ROLLED_BACK: "rolled the release back: it was granted no work",
+  STANDS_IDLE: "left the release in place: no work was granted and nothing showed a failure",
+  ROLLED_BACK: "rolled the release back: it was granted no work or its supervisor was not running",
   ROLLBACK_REFUSED: "found no work granted and did not roll back",
   ROLLBACK_FAILED: "tried to roll back and could not confirm the supervisor",
 };
@@ -292,17 +291,21 @@ export function postRollLines(result: PostRollResult | null): string[] {
 const eventLines = (text: string, event: string): string[] =>
   text.split("\n").filter((line) => new RegExp(`"event"\\s*:\\s*"${event}"`).test(line));
 
-/** The three counts the post-roll rule reads from the supervisor's log since the roll began. */
+/** The counts the post-roll rule reads from the supervisor's log since the roll began. `answered` is
+ *  informational: an idle supervisor whose acquire gets an empty queue may log nothing at all. */
 export function postRollCounts(text: string): { granted: number; noResponse: number; answered: number } {
   const granted = eventLines(text, "work_granted").length;
   const refused = eventLines(text, "acquire_refused").length;
+  const none = eventLines(text, "acquire_none").length;
   const noResponse = text.split("\n").filter((line) => line.includes("acquire_retry") && line.includes("(no response)")).length;
-  return { granted, noResponse, answered: granted + refused };
+  return { granted, noResponse, answered: granted + refused + none };
 }
 
-/** Whether a release with these counts stopped receiving work. An idle fleet that answers acquires has not. */
-export const postRollFailing = (counts: { granted: number; noResponse: number; answered: number }): boolean =>
-  counts.granted === 0 && (counts.noResponse >= POST_ROLL_MAX_NO_RESPONSE || counts.answered < POST_ROLL_MIN_ANSWERED);
+/** Whether a release with these counts stopped receiving work: nothing granted since the roll began and
+ *  at least three acquire retries that got no response. Silence alone is not a failure, because a healthy
+ *  idle host logs nothing; a supervisor that is not running is judged separately, from the container. */
+export const postRollFailing = (counts: { granted: number; noResponse: number }): boolean =>
+  counts.granted === 0 && counts.noResponse >= POST_ROLL_MAX_NO_RESPONSE;
 
 /** Record what the apply wrote and ask the engine for the check. The note joins the result's detail
  *  when the check could not be armed; the apply itself still succeeded. */
@@ -494,9 +497,10 @@ export interface PostRollCheckOutcome {
   exitCode: number;
 }
 
-/** The check a successful apply armed, run on the host 10 minutes later (CTC-6564). A release that
- *  was granted no work, while the fleet's acquires went unanswered or too few were answered, goes back
- *  to the saved previous `compose.json`, but only if `compose.json` still holds the bytes the apply wrote. */
+/** The check a successful apply armed, run on the host 10 minutes later (CTC-6564). A release whose
+ *  supervisor is not running, or that was granted no work while three acquire retries got no response,
+ *  goes back to the saved previous `compose.json`, but only if `compose.json` still holds the bytes the
+ *  apply wrote. A running supervisor with no grants and fewer no-response retries stands. */
 export async function runFleetPostRollCheck(engine: FleetUpdateEngine, options: PostRollCheckOptions): Promise<PostRollCheckOutcome> {
   const { dir, signal } = options;
   const now = options.now ?? Date.now;
@@ -517,11 +521,16 @@ export async function runFleetPostRollCheck(engine: FleetUpdateEngine, options: 
     const project = isRecord(compose) && typeof compose.name === "string" ? compose.name : "";
     if (!/^[a-z0-9][a-z0-9_-]*$/.test(project)) return stay("fleet_compose_unrecognized", 1);
     const live = await engine.supervisor(dir, project, signal);
-    if (!live) return stay(live === undefined ? "docker_unavailable" : "supervisor_not_found", 1);
+    if (live === undefined) return stay("docker_unavailable", 1);
     const since = new Date(armed.sinceMs).toISOString();
-    const text = await engine.logs(live.id, since, signal);
-    if (text === null) return stay("docker_unavailable", 1);
-    const counts = postRollCounts(text);
+    // A missing or stopped supervisor is a failure on its own; its log is not read.
+    const notRunning = live === null || !live.running;
+    let counts = { granted: 0, noResponse: 0, answered: 0 };
+    if (!notRunning) {
+      const text = await engine.logs(live.id, since, signal);
+      if (text === null) return stay("docker_unavailable", 1);
+      counts = postRollCounts(text);
+    }
 
     const finish = (verdict: PostRollVerdict, extra: Partial<Pick<PostRollResult, "reason" | "rolledBackFrom" | "rolledBackTo">> = {}, exitCode = 0): PostRollCheckOutcome => {
       const result: PostRollResult = {
@@ -532,8 +541,10 @@ export async function runFleetPostRollCheck(engine: FleetUpdateEngine, options: 
       removeFile(join(dir, POST_ROLL_ARMED_FILE));
       return { detail: verdict, result, exitCode };
     };
-    if (counts.granted > 0) return finish("PASS");
-    if (!postRollFailing(counts)) return finish("STANDS_IDLE");
+    if (!notRunning) {
+      if (counts.granted > 0) return finish("PASS");
+      if (!postRollFailing(counts)) return finish("STANDS_IDLE");
+    }
 
     const refuse = (reason: string) => finish("ROLLBACK_REFUSED", { reason }, 1);
     if (sha256(composeText) !== armed.composeSha256) return refuse("compose_changed_since_roll");
@@ -554,7 +565,7 @@ export async function runFleetPostRollCheck(engine: FleetUpdateEngine, options: 
     const running = !!after && after.running && after.image === previous.supervisor && after.runnerImage === previous.runner;
     const moved = { rolledBackFrom: armed.generation, rolledBackTo: armed.fromGeneration };
     return running
-      ? finish("ROLLED_BACK", { ...moved, reason: "no_work_granted" }, 1)
+      ? finish("ROLLED_BACK", { ...moved, reason: notRunning ? "supervisor_not_running" : "no_work_granted" }, 1)
       : finish("ROLLBACK_FAILED", { ...moved, reason: restored ? "supervisor_not_running" : "recreate_failed" }, 1);
   } finally {
     releaseLock(dir, lock);
