@@ -1,16 +1,23 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { main } from "../src/cli";
-import { readReleaseState, type ReleaseComponent } from "../src/runner-update";
+import { readReleaseState, writeReleaseState, type ReleaseComponent } from "../src/runner-update";
 import {
   credentialMount,
+  dockerFleetUpdateEngine,
   FLEET_COMPOSE_FILE,
   IN_FLIGHT_FILE,
   notReadyScope,
+  POST_ROLL_ARMED_FILE,
+  POST_ROLL_RESULT_FILE,
+  postRollCounts,
+  postRollFailing,
   PREVIOUS_COMPOSE_FILE,
   qualifiedScopes,
+  runFleetPostRollCheck,
   runFleetUpdate,
   type FleetSupervisor,
   type FleetUpdateEngine,
@@ -96,10 +103,16 @@ interface FakeOptions {
   restartAfterRecreate?: boolean;
   configValid?: boolean;
   childChanges?: boolean;
+  /** Whether the host could schedule the post-roll check; true by default. */
+  arm?: boolean;
 }
 
 function fake(dir: string, options: FakeOptions = {}) {
-  const calls = { recreate: 0, removed: [] as string[], prepared: [] as string[][] };
+  const calls = {
+    recreate: 0, removed: [] as string[], prepared: [] as string[][],
+    armed: [] as { dir: string; delayMs: number }[], logSince: [] as string[],
+  };
+  let desired: unknown = options.read ?? release();
   const runningFrom = (): { runner: string; supervisor: string } => {
     const compose = JSON.parse(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8"));
     return { supervisor: compose.services.supervisor.image, runner: compose.services.supervisor.environment.CATALYST_RUNNER_IMAGE };
@@ -111,9 +124,12 @@ function fake(dir: string, options: FakeOptions = {}) {
   let logText = options.before ?? SERVING;
   let childEpoch = 0;
   const engine: FleetUpdateEngine = {
-    desiredRelease: async () => ({ kind: "answered", status: 200, body: { ok: true, release: options.read ?? release() }, hostId: "host_root" }),
+    desiredRelease: async () => ({ kind: "answered", status: 200, body: { ok: true, release: desired }, hostId: "host_root" }),
     supervisor: async () => live,
-    logs: async () => logText,
+    logs: async (_id, since) => {
+      calls.logSince.push(since);
+      return logText;
+    },
     children: async () => ({ ["c".repeat(64)]: { running: true, fingerprint: `child-${childEpoch}` } }),
     prepare: async (images) => {
       calls.prepared.push(images);
@@ -138,8 +154,18 @@ function fake(dir: string, options: FakeOptions = {}) {
     removeImages: async (images) => {
       calls.removed.push(...images);
     },
+    armPostRollCheck: async (armedDir, delayMs) => {
+      calls.armed.push({ dir: armedDir, delayMs });
+      return options.arm ?? true;
+    },
   };
-  return { engine, calls };
+  return {
+    engine,
+    calls,
+    /** What the supervisor's log shows from now on. */
+    setLogs: (text: string) => void (logText = text),
+    approve: (next: unknown) => void (desired = next),
+  };
 }
 
 /** A clock that moves 10 s per sleep, so the 90 s hold and the 240 s deadline pass in a test. */
@@ -302,5 +328,281 @@ describe("catalyst runner update --fleet", () => {
   it("--fleet without --dir is a usage error", async () => {
     const ctx = makeCtx(tempHome());
     expect(await main(["runner", "update", "--fleet"], ctx, {})).not.toBe(0);
+  });
+});
+
+// A release can qualify and then stop receiving work minutes later (CTC-6564). A successful apply
+// arms a check 10 minutes out; the check reads the supervisor's log since the roll began.
+const ROLL_START = "2026-10-22T20:00:00.000Z";
+const grantedLine = '2026-10-22T20:06:00Z {"version":1,"event":"work_granted","tenant":"tenant-0","team":"CTC"}';
+const refusedLine = '2026-10-22T20:06:00Z {"version":1,"event":"acquire_refused","tenant":"tenant-0","team":"CTC"}';
+const noResponseLine = '2026-10-22T20:06:00Z {"version":1,"event":"acquire_retry","detail":"fetch failed (no response)"}';
+const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+const lines = (line: string, count: number) => Array.from({ length: count }, () => line).join("\n");
+const readJson = (dir: string, file: string) => JSON.parse(readFileSync(join(dir, file), "utf8"));
+
+/** An install updated from OLD to NEW (generation 2); the fleet was on `fromGeneration` before it. */
+async function rolled(options: FakeOptions = {}, fromGeneration: number | null = null) {
+  const { dir, text } = install();
+  if (fromGeneration !== null) writeReleaseState(dir, { ...readReleaseState(dir), generation: fromGeneration });
+  const fleet = fake(dir, options);
+  const result = await runFleetUpdate(fleet.engine, { dir, ...clock() });
+  return { dir, text, result, ...fleet };
+}
+const runCheck = (engine: FleetUpdateEngine, dir: string) => runFleetPostRollCheck(engine, { dir, now: clock().now });
+
+describe("fleet update: the post-roll check is armed by a successful apply", () => {
+  it("POSITIVE CONTROL: the apply arms the check 10 minutes out and records the bytes it wrote and when the roll began", async () => {
+    const { dir, result, calls } = await rolled({}, 1);
+    expect(result).toMatchObject({ outcome: "updated", detail: "updated:runner,supervisor", exitCode: 0 });
+    expect(calls.armed).toEqual([{ dir, delayMs: 600_000 }]);
+    expect(readJson(dir, POST_ROLL_ARMED_FILE)).toMatchObject({
+      version: 1,
+      sinceMs: Date.parse(ROLL_START),
+      composeSha256: sha256(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")),
+      generation: 2,
+      fromGeneration: 1,
+    });
+  });
+
+  it("NEGATIVE: a host that cannot arm the check still applies, and the output says it is not armed", async () => {
+    const { dir, result } = await rolled({ arm: false });
+    expect(result).toMatchObject({ outcome: "updated", detail: "updated:runner,supervisor;post_roll_check_not_armed", exitCode: 0 });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(`${JSON.stringify(composeFile(NEW), null, 2)}\n`);
+  });
+
+  it.each([
+    ["a rolled-back apply", { restartAfterRecreate: true }, false],
+    ["--check", {}, true],
+  ])("NEGATIVE: %s arms nothing", async (_label, options, check) => {
+    const { dir } = install();
+    const { engine, calls } = fake(dir, options);
+    await runFleetUpdate(engine, { dir, check, ...clock() });
+    expect(calls.armed).toEqual([]);
+    expect(existsSync(join(dir, POST_ROLL_ARMED_FILE))).toBe(false);
+  });
+});
+
+describe("fleet update: the post-roll verdict", () => {
+  it("PASS: a grant since the roll leaves the release in place and records the counts", async () => {
+    const { dir, engine, calls, setLogs } = await rolled();
+    setLogs([grantedLine, refusedLine, noResponseLine].join("\n"));
+    const outcome = await runCheck(engine, dir);
+    expect(outcome).toMatchObject({ detail: "PASS", exitCode: 0 });
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ verdict: "PASS", since: ROLL_START, granted: 1, noResponse: 1, answered: 2, generation: 2 });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(`${JSON.stringify(composeFile(NEW), null, 2)}\n`);
+    expect(calls.recreate).toBe(1);
+    expect(existsSync(join(dir, POST_ROLL_ARMED_FILE))).toBe(false);
+  });
+
+  it("STANDS_IDLE: no grant, but the acquires are answered and none got no response, is not a failure", async () => {
+    const { dir, engine, calls, setLogs } = await rolled();
+    setLogs(lines(refusedLine, 3));
+    expect(await runCheck(engine, dir)).toMatchObject({ detail: "STANDS_IDLE", exitCode: 0 });
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ verdict: "STANDS_IDLE", granted: 0, noResponse: 0, answered: 3 });
+    expect(calls.recreate).toBe(1);
+  });
+
+  it("ROLLED_BACK: no grant and three no-response retries restores the saved previous file and recreates the supervisor alone", async () => {
+    const { dir, text, engine, calls, setLogs } = await rolled({}, 1);
+    setLogs([lines(noResponseLine, 3), lines(refusedLine, 3)].join("\n"));
+    calls.prepared.length = 0;
+    calls.logSince.length = 0;
+    const outcome = await runCheck(engine, dir);
+    expect(outcome).toMatchObject({ detail: "ROLLED_BACK", exitCode: 1 });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(text);
+    expect(calls.recreate).toBe(2);
+    expect(calls.prepared).toEqual([[OLD.runner, OLD.supervisor]]);
+    expect(calls.logSince).toEqual([ROLL_START]);
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({
+      verdict: "ROLLED_BACK", granted: 0, noResponse: 3, answered: 3, generation: 2, rolledBackFrom: 2, rolledBackTo: 1,
+    });
+    expect(existsSync(join(dir, POST_ROLL_ARMED_FILE))).toBe(false);
+    expect(existsSync(join(dir, "update.lock"))).toBe(false);
+  });
+
+  it("ROLLED_BACK: no grant and fewer than three answered acquires is also a failure", async () => {
+    const { dir, text, engine, setLogs } = await rolled();
+    setLogs(lines(refusedLine, 2));
+    expect(await runCheck(engine, dir)).toMatchObject({ detail: "ROLLED_BACK" });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(text);
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ rolledBackFrom: 2, rolledBackTo: null });
+  });
+
+  it("NEGATIVE: compose.json changed since the roll is refused, not overwritten", async () => {
+    const { dir, engine, calls, setLogs } = await rolled();
+    const moved = `${JSON.stringify(composeFile(NEW), null, 4)}\n`;
+    writeFileSync(join(dir, FLEET_COMPOSE_FILE), moved);
+    setLogs(lines(noResponseLine, 5));
+    expect(await runCheck(engine, dir)).toMatchObject({ detail: "ROLLBACK_REFUSED", exitCode: 1 });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(moved);
+    expect(calls.recreate).toBe(1);
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ verdict: "ROLLBACK_REFUSED", reason: "compose_changed_since_roll" });
+  });
+
+  it("a rollback whose supervisor is not running afterwards is recorded as failed", async () => {
+    const { dir, engine, setLogs } = await rolled();
+    setLogs(lines(noResponseLine, 3));
+    const down: FleetUpdateEngine = { ...engine, supervisor: async () => ({ ...(await engine.supervisor(dir, "catalyst-fleet"))!, running: false }) };
+    expect(await runCheck(down, dir)).toMatchObject({ detail: "ROLLBACK_FAILED", exitCode: 1 });
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ verdict: "ROLLBACK_FAILED", reason: "supervisor_not_running" });
+  });
+
+  it("with no check armed there is nothing to judge and nothing changes", async () => {
+    const { dir } = install();
+    const { engine, calls } = fake(dir);
+    expect(await runCheck(engine, dir)).toMatchObject({ detail: "no_post_roll_check_armed", result: null, exitCode: 0 });
+    expect(calls.recreate).toBe(0);
+  });
+
+  it("counts: only the three events, and a retry counts only when it says no response", () => {
+    const retryOther = '{"event":"acquire_retry","detail":"HTTP 503"}';
+    expect(postRollCounts([grantedLine, grantedLine, refusedLine, noResponseLine, retryOther, "plain text"].join("\n")))
+      .toEqual({ granted: 2, noResponse: 1, answered: 3 });
+    expect(postRollCounts("")).toEqual({ granted: 0, noResponse: 0, answered: 0 });
+  });
+
+  it.each([
+    [{ granted: 1, noResponse: 9, answered: 1 }, false],
+    [{ granted: 0, noResponse: 3, answered: 9 }, true],
+    [{ granted: 0, noResponse: 2, answered: 3 }, false],
+    [{ granted: 0, noResponse: 0, answered: 2 }, true],
+    [{ granted: 0, noResponse: 0, answered: 3 }, false],
+  ])("the rule: %j is failing=%s", (counts, failing) => {
+    expect(postRollFailing(counts)).toBe(failing);
+  });
+});
+
+describe("fleet update: a release the post-roll check rolled back", () => {
+  const NEWER = [release(3, ["4", "5", "6"]), { runner: ref("runner", "4"), supervisor: ref("supervisor", "5") }] as const;
+
+  async function rolledBack() {
+    const state = await rolled({}, 1);
+    state.setLogs(lines(noResponseLine, 3));
+    await runCheck(state.engine, state.dir);
+    return state;
+  }
+
+  it("is not applied again by the next scheduled run, which reports it as rolled back with the reason", async () => {
+    const { dir, text, engine, calls } = await rolledBack();
+    const recreates = calls.recreate;
+    const again = await runFleetUpdate(engine, { dir, ...clock() });
+    expect(again).toMatchObject({ outcome: "rolled_back", generation: 2, exitCode: 1 });
+    expect(again.detail).toBe("post_roll_rolled_back:granted=0,no_response=3,answered=0");
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(text);
+    expect(calls.recreate).toBe(recreates);
+    expect(calls.prepared).toHaveLength(2);
+    expect(readReleaseState(dir).last).toMatchObject({ outcome: "rolled_back" });
+  });
+
+  it("is reported as rolled back by --check too, and nothing moves", async () => {
+    const { dir, engine, calls } = await rolledBack();
+    expect(await runFleetUpdate(engine, { dir, check: true, ...clock() })).toMatchObject({ outcome: "rolled_back", exitCode: 1 });
+    expect(calls.recreate).toBe(2);
+  });
+
+  it("a newer approved release is applied normally, and its own check is armed", async () => {
+    const { dir, engine, calls, approve } = await rolledBack();
+    approve(NEWER[0]);
+    expect(await runFleetUpdate(engine, { dir, ...clock() })).toMatchObject({ outcome: "updated", detail: "updated:runner,supervisor", generation: 3 });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(`${JSON.stringify(composeFile(NEWER[1]), null, 2)}\n`);
+    expect(calls.armed).toHaveLength(2);
+    expect(existsSync(join(dir, POST_ROLL_RESULT_FILE))).toBe(false);
+  });
+
+  it("the same images approved again as a newer generation are applied", async () => {
+    const { dir, engine, approve } = await rolledBack();
+    approve(release(3));
+    expect(await runFleetUpdate(engine, { dir, ...clock() })).toMatchObject({ outcome: "updated", generation: 3 });
+  });
+});
+
+describe("catalyst runner update --fleet: the post-roll check on the command line", () => {
+  it("--check names the last post-roll verdict, in the text and in the JSON", async () => {
+    const { dir, engine, setLogs } = await rolled();
+    setLogs(grantedLine);
+    await runCheck(engine, dir);
+    const json = makeCtx(tempHome());
+    expect(await main(["runner", "update", "--fleet", "--check", "--json", "--dir", dir], json, { runner: { fleetEngine: engine } })).toBe(0);
+    expect(JSON.parse(json.out[0]!)).toMatchObject({ outcome: "current", lastPostRoll: { verdict: "PASS", granted: 1, generation: 2 } });
+    const text = makeCtx(tempHome());
+    await main(["runner", "update", "--fleet", "--check", "--dir", dir], text, { runner: { fleetEngine: engine } });
+    expect(text.out.join("\n")).toContain("The last post-roll check, at ");
+    expect(text.out.join("\n")).toContain("passed: the release was granted work");
+  });
+
+  it("--check names a rollback and the generation it went back to", async () => {
+    const { dir, engine, setLogs } = await rolled({}, 1);
+    setLogs(lines(noResponseLine, 3));
+    await runCheck(engine, dir);
+    const ctx = makeCtx(tempHome());
+    expect(await main(["runner", "update", "--fleet", "--check", "--dir", dir], ctx, { runner: { fleetEngine: engine } })).toBe(1);
+    expect(ctx.out.join("\n")).toMatch(/rolled the release back.*back to generation 1/);
+  });
+
+  it("--check says nothing about a verdict when there is none", async () => {
+    const { dir } = install();
+    const { engine } = fake(dir);
+    const ctx = makeCtx(tempHome());
+    await main(["runner", "update", "--fleet", "--check", "--json", "--dir", dir], ctx, { runner: { fleetEngine: engine } });
+    expect(JSON.parse(ctx.out[0]!)).toMatchObject({ lastPostRoll: null });
+  });
+
+  it("--post-roll-check runs the armed check and exits with its verdict", async () => {
+    const { dir, engine, setLogs } = await rolled();
+    setLogs(lines(noResponseLine, 3));
+    const ctx = makeCtx(tempHome());
+    expect(await main(["runner", "update", "--fleet", "--post-roll-check", "--dir", dir], ctx, { runner: { fleetEngine: engine } })).toBe(1);
+    expect(ctx.out.join("\n")).toContain("rolled the release back");
+  });
+
+  it.each([
+    ["without --fleet", (dir: string) => ["--post-roll-check", "--dir", dir]],
+    ["without --dir", () => ["--fleet", "--post-roll-check"]],
+    ["with --check", (dir: string) => ["--fleet", "--check", "--post-roll-check", "--dir", dir]],
+  ])("%s is a usage error and runs nothing", async (_label, flags) => {
+    const { dir } = await rolled();
+    const { engine, calls } = fake(dir);
+    const ctx = makeCtx(tempHome());
+    expect(await main(["runner", "update", ...flags(dir)], ctx, { runner: { fleetEngine: engine } })).not.toBe(0);
+    expect(ctx.err.join("\n")).toContain("--");
+    expect(calls.recreate + calls.logSince.length).toBe(0);
+    expect(existsSync(join(dir, POST_ROLL_RESULT_FILE))).toBe(false);
+  });
+});
+
+describe("fleet update: arming the check on the host", () => {
+  const run = (status = 0) => {
+    const calls: [string, string[]][] = [];
+    return { calls, run: (cmd: string, args: string[]) => (calls.push([cmd, args]), { status, stdout: "", stderr: "" }) };
+  };
+  type Timer = NonNullable<NonNullable<Parameters<typeof dockerFleetUpdateEngine>[0]>["timer"]>;
+  const engineFor = (timer: Timer) =>
+    dockerFleetUpdateEngine({ env: { PATH: "/usr/bin:/bin", HOME: "/root", CATALYST_KEY: "x" }, timer });
+
+  it("POSITIVE CONTROL: a transient systemd timer runs this command in 10 minutes, replacing an earlier one", async () => {
+    const sched = run();
+    const armed = await engineFor({ platform: "linux", uid: 0, command: ["/usr/bin/node", "/opt/catalyst/cli.js"], run: sched.run }).armPostRollCheck("/srv/fleet", 600_000);
+    expect(armed).toBe(true);
+    expect(sched.calls[0]).toEqual(["systemctl", ["stop", "catalyst-fleet-post-roll.timer", "catalyst-fleet-post-roll.service"]]);
+    expect(sched.calls[1]).toEqual(["systemd-run", [
+      "--quiet", "--collect", "--unit=catalyst-fleet-post-roll", "--on-active=600s", "--description=Catalyst fleet post-roll check",
+      "--setenv=PATH=/usr/bin:/bin", "--setenv=HOME=/root",
+      "--", "/usr/bin/node", "/opt/catalyst/cli.js", "runner", "update", "--fleet", "--dir", "/srv/fleet", "--post-roll-check",
+    ]]);
+  });
+
+  it("a person who is not root gets a user timer", async () => {
+    const sched = run();
+    await engineFor({ platform: "linux", uid: 1000, command: ["/usr/bin/node", "/opt/catalyst/cli.js"], run: sched.run }).armPostRollCheck("/srv/fleet", 600_000);
+    expect(sched.calls.map(([, args]) => args[0])).toEqual(["--user", "--user"]);
+  });
+
+  it("NEGATIVE: not Linux, or a systemd-run that fails, is not armed", async () => {
+    const mac = run();
+    expect(await engineFor({ platform: "darwin", command: ["/usr/bin/node", "/x"], run: mac.run }).armPostRollCheck("/srv/fleet", 600_000)).toBe(false);
+    expect(mac.calls).toEqual([]);
+    const failing = run(1);
+    expect(await engineFor({ platform: "linux", uid: 0, command: ["/usr/bin/node", "/x"], run: failing.run }).armPostRollCheck("/srv/fleet", 600_000)).toBe(false);
   });
 });

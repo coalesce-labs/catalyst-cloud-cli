@@ -25,7 +25,7 @@ import {
   type RunnerUpdateEngine,
   type UpdateResult,
 } from "./runner-update.js";
-import { dockerFleetUpdateEngine, runFleetUpdate, type FleetUpdateEngine } from "./runner-update-fleet.js";
+import { dockerFleetUpdateEngine, postRollLines, readPostRollResult, runFleetPostRollCheck, runFleetUpdate, type FleetUpdateEngine } from "./runner-update-fleet.js";
 import { runUpdate, sharedReleaseRead, updateReportJson, updateReportLines, type UpdateOptions } from "./update.js";
 import { effectivePolicy, readUpdatePolicy, setComponentPolicy } from "./update-policy.js";
 import { resolveClaude } from "./update-plugin.js";
@@ -87,7 +87,7 @@ function custodyRerun(ctx: Ctx, deps: CustodyRerunDeps, dir: string): number | n
 
 const USAGE =
   "catalyst runner [status] | stop | start | uninstall [--yes] [--delete-checkouts] | runner update [--check] [--dir <runner directory>] [--fleet] | runner auto-update [status|on|off] [--fleet --dir <fleet directory>]";
-const UPDATE_FLAGS = ["check", "auto", "dir", "fleet"] as const;
+const UPDATE_FLAGS = ["check", "auto", "dir", "fleet", "post-roll-check"] as const;
 
 function schedulerDeps(ctx: Ctx, deps: RunnerCommandDeps): AutoUpdateDeps {
   const cli = deps.scheduler?.cli ?? resolve(process.argv[1] ?? "catalyst");
@@ -142,7 +142,7 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
   const action = parts[0];
   if (action === undefined || RUNNER_LIFECYCLE_ACTIONS.includes(action)) {
     if (UPDATE_FLAGS.some(flag => args.flags[flag] !== undefined))
-      throw new UsageError("--check, --auto, --dir and --fleet are only valid with runner update or auto-update");
+      throw new UsageError("--check, --auto, --dir, --fleet and --post-roll-check are only valid with runner update or auto-update");
     return cmdRunnerLifecycle(args, ctx, deps);
   }
   if (args.flags.yes !== undefined || args.flags["delete-checkouts"] !== undefined)
@@ -156,6 +156,14 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     const auto = flagBool(args, "auto");
     const fleet = flagBool(args, "fleet");
     if (fleet && dirFlag === undefined) throw new UsageError("--fleet needs --dir, the directory that holds compose.json");
+    // The check a fleet update arms on the host 10 minutes after it applies (CTC-6564); only that timer passes it.
+    if (flagBool(args, "post-roll-check")) {
+      if (!fleet || dirFlag === undefined || check || auto) throw new UsageError("--post-roll-check is run by the timer a fleet update arms: runner update --fleet --dir <dir> --post-roll-check");
+      const outcome = await runFleetPostRollCheck(deps.fleetEngine ?? dockerFleetUpdateEngine({ env: ctx.env }), { dir: dirFlag });
+      if (args.json) ctx.stdout(JSON.stringify(outcome));
+      else for (const line of outcome.result ? postRollLines(outcome.result) : [`Post-roll check: ${outcome.detail}.`]) ctx.stdout(line);
+      return outcome.exitCode;
+    }
     if (!fleet && !check) {
       const rerun = custodyRerun(ctx, deps.custody ?? {}, dir());
       if (rerun !== null) return rerun;
@@ -218,6 +226,13 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
         const { schemaVersion, release, components, projects } = updateReportJson(report);
         ctx.stdout(JSON.stringify({ ...result, schemaVersion, release, components, projects, lastProblem: lastProblem(state) }));
       } else for (const line of [...updateResultLines(result), ...lastProblemLines(state), ...updateReportLines(report)]) ctx.stdout(line);
+      return result.exitCode;
+    }
+    // A fleet check also names the last post-roll verdict (CTC-6564).
+    if (check && fleet && !auto) {
+      const verdict = readPostRollResult(dir());
+      if (args.json) ctx.stdout(JSON.stringify({ ...result, lastPostRoll: verdict }));
+      else for (const line of [...updateResultLines(result), ...postRollLines(verdict)]) ctx.stdout(line);
       return result.exitCode;
     }
     return print(result, await components(result));

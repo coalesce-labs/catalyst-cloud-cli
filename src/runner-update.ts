@@ -712,7 +712,7 @@ const OUTCOME_TEXT: Record<UpdateOutcome, string> = {
   deferred_busy: "A phase is running here, so the update waits for the next check.",
   waiting_window: "An approved release waits for this machine's next update window.",
   retained: "Kept the current images.",
-  rolled_back: "The new supervisor did not become ready, so the previous images were restored.",
+  rolled_back: "The new release was rolled back, so the previous images were restored.",
   failed: "The update could not finish. Look at the runner with docker compose ps.",
 };
 

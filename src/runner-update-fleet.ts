@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { dockerRunnerEngine, prepareRunnerImages, spawnDocker, type RunnerEngine, type RunnerExec } from "./onboard-runner.js";
+import { defaultRun, type SchedulerRun } from "./runner-auto-update.js";
 import {
   decideRelease,
   DESIRED_RELEASE_SCRIPT,
@@ -34,6 +36,12 @@ import {
 // no restart and log no `host_not_ready` for those scopes. Otherwise the previous `compose.json` comes
 // back and the supervisor is recreated on it. That scope set is saved before the recreate and removed
 // once it qualifies or rolls back, so a run killed in between is finished by the next one.
+//
+// A release can qualify and then stop receiving work minutes later (CTC-6564). A successful apply
+// arms a check on the host, outside the calling process, for 10 minutes later: it reads the supervisor's
+// log since the roll began and, when the release was granted no work and the fleet's acquires got no
+// answer, restores the saved previous `compose.json`. `runner update --fleet --post-roll-check` is
+// that check; only the armed timer runs it.
 
 export const FLEET_COMPOSE_FILE = "compose.json";
 export const PREVIOUS_COMPOSE_FILE = "compose.release-previous.json";
@@ -49,6 +57,15 @@ const QUALIFY_MIN_MS = 90_000;
 const QUALIFY_DEADLINE_MS = 240_000;
 const QUALIFY_POLL_MS = 10_000;
 const CHILD_NAME_PREFIX = "catalyst-pa_";
+/** What a successful apply leaves for the check: the bytes it wrote and when the roll began. */
+export const POST_ROLL_ARMED_FILE = "post-roll-armed.json";
+/** The check's last verdict, beside `release-state.json`. */
+export const POST_ROLL_RESULT_FILE = "post-roll-result.json";
+export const POST_ROLL_DELAY_MS = 10 * 60_000;
+const POST_ROLL_UNIT = "catalyst-fleet-post-roll";
+/** Acquires that went unanswered, or too few answered, for a release with no grants to count as failing. */
+const POST_ROLL_MIN_ANSWERED = 3;
+const POST_ROLL_MAX_NO_RESPONSE = 3;
 
 type FleetImages = { runner: string; supervisor: string };
 
@@ -77,6 +94,9 @@ export interface FleetUpdateEngine {
   /** Recreate only the supervisor service from `compose.json`; dependencies and children stay. */
   recreate(dir: string, project: string, signal?: AbortSignal): Promise<boolean>;
   removeImages(images: string[], signal?: AbortSignal): Promise<void>;
+  /** Schedule `runner update --fleet --dir <dir> --post-roll-check` on this host after `delayMs`, outside
+   *  this process. False when it could not be scheduled. */
+  armPostRollCheck(dir: string, delayMs: number, signal?: AbortSignal): Promise<boolean>;
 }
 
 export interface FleetUpdateOptions {
@@ -159,6 +179,144 @@ function clearInFlight(dir: string): void {
   }
 }
 
+const removeFile = (path: string): void => {
+  try {
+    unlinkSync(path);
+  } catch {
+    // Already gone.
+  }
+};
+const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
+
+/** What the apply recorded for the check. */
+export interface PostRollArmed {
+  version: 1;
+  /** When the roll began; the check reads the supervisor's log from here. */
+  sinceMs: number;
+  /** sha256 of the `compose.json` bytes the apply wrote. */
+  composeSha256: string;
+  generation: number | null;
+  releaseId: string | null;
+  /** The generation the fleet was on before this release. */
+  fromGeneration: number | null;
+  armedAtMs: number;
+}
+
+export type PostRollVerdict = "PASS" | "STANDS_IDLE" | "ROLLED_BACK" | "ROLLBACK_REFUSED" | "ROLLBACK_FAILED";
+const POST_ROLL_VERDICTS: readonly string[] = ["PASS", "STANDS_IDLE", "ROLLED_BACK", "ROLLBACK_REFUSED", "ROLLBACK_FAILED"];
+
+export interface PostRollResult {
+  version: 1;
+  at: string;
+  since: string;
+  granted: number;
+  noResponse: number;
+  answered: number;
+  verdict: PostRollVerdict;
+  /** The release the check judged. */
+  generation: number | null;
+  releaseId: string | null;
+  /** A rollback: the generation it left and the one it went back to (null before any was recorded). */
+  rolledBackFrom?: number | null;
+  rolledBackTo?: number | null;
+  reason?: string;
+}
+
+const numberOrNull = (value: unknown): number | null => (typeof value === "number" && Number.isSafeInteger(value) ? value : null);
+const stringOrNull = (value: unknown): string | null => (typeof value === "string" ? value : null);
+
+function readPostRollArmed(dir: string): PostRollArmed | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(dir, POST_ROLL_ARMED_FILE), "utf8"));
+    if (!isRecord(parsed) || parsed.version !== 1) return null;
+    const sinceMs = numberOrNull(parsed.sinceMs);
+    if (sinceMs === null || typeof parsed.composeSha256 !== "string") return null;
+    return {
+      version: 1,
+      sinceMs,
+      composeSha256: parsed.composeSha256,
+      generation: numberOrNull(parsed.generation),
+      releaseId: stringOrNull(parsed.releaseId),
+      fromGeneration: numberOrNull(parsed.fromGeneration),
+      armedAtMs: numberOrNull(parsed.armedAtMs) ?? sinceMs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** The last post-roll check's record, or null when there is none. */
+export function readPostRollResult(dir: string): PostRollResult | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(dir, POST_ROLL_RESULT_FILE), "utf8"));
+    if (!isRecord(parsed) || parsed.version !== 1 || typeof parsed.verdict !== "string" || !POST_ROLL_VERDICTS.includes(parsed.verdict)) return null;
+    if (typeof parsed.at !== "string" || typeof parsed.since !== "string") return null;
+    return {
+      version: 1,
+      at: parsed.at,
+      since: parsed.since,
+      granted: numberOrNull(parsed.granted) ?? 0,
+      noResponse: numberOrNull(parsed.noResponse) ?? 0,
+      answered: numberOrNull(parsed.answered) ?? 0,
+      verdict: parsed.verdict as PostRollVerdict,
+      generation: numberOrNull(parsed.generation),
+      releaseId: stringOrNull(parsed.releaseId),
+      ...(parsed.rolledBackFrom !== undefined ? { rolledBackFrom: numberOrNull(parsed.rolledBackFrom) } : {}),
+      ...(parsed.rolledBackTo !== undefined ? { rolledBackTo: numberOrNull(parsed.rolledBackTo) } : {}),
+      ...(typeof parsed.reason === "string" ? { reason: parsed.reason } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+const VERDICT_TEXT: Record<PostRollVerdict, string> = {
+  PASS: "passed: the release was granted work",
+  STANDS_IDLE: "left the release in place: no work was granted, but the fleet's acquires were answered",
+  ROLLED_BACK: "rolled the release back: it was granted no work",
+  ROLLBACK_REFUSED: "found no work granted and did not roll back",
+  ROLLBACK_FAILED: "tried to roll back and could not confirm the supervisor",
+};
+
+/** One line naming the last post-roll verdict, for `runner update --check --fleet`. */
+export function postRollLines(result: PostRollResult | null): string[] {
+  if (result === null) return [];
+  const detail = [
+    ...(result.verdict === "ROLLED_BACK" ? [`back to generation ${result.rolledBackTo ?? "none"}`] : result.reason ? [result.reason] : []),
+    `generation ${result.generation ?? "none"}`,
+    `since ${result.since}: ${result.granted} granted, ${result.noResponse} no response, ${result.answered} answered`,
+  ];
+  return [`The last post-roll check, at ${result.at}, ${VERDICT_TEXT[result.verdict]} (${detail.join("; ")}).`];
+}
+
+const eventLines = (text: string, event: string): string[] =>
+  text.split("\n").filter((line) => new RegExp(`"event"\\s*:\\s*"${event}"`).test(line));
+
+/** The three counts the post-roll rule reads from the supervisor's log since the roll began. */
+export function postRollCounts(text: string): { granted: number; noResponse: number; answered: number } {
+  const granted = eventLines(text, "work_granted").length;
+  const refused = eventLines(text, "acquire_refused").length;
+  const noResponse = text.split("\n").filter((line) => line.includes("acquire_retry") && line.includes("(no response)")).length;
+  return { granted, noResponse, answered: granted + refused };
+}
+
+/** Whether a release with these counts stopped receiving work. An idle fleet that answers acquires has not. */
+export const postRollFailing = (counts: { granted: number; noResponse: number; answered: number }): boolean =>
+  counts.granted === 0 && (counts.noResponse >= POST_ROLL_MAX_NO_RESPONSE || counts.answered < POST_ROLL_MIN_ANSWERED);
+
+/** Record what the apply wrote and ask the engine for the check. The note joins the result's detail
+ *  when the check could not be armed; the apply itself still succeeded. */
+async function armPostRollCheck(engine: FleetUpdateEngine, dir: string, armed: PostRollArmed, signal?: AbortSignal): Promise<string> {
+  try {
+    writePrivateAtomic(join(dir, POST_ROLL_ARMED_FILE), `${JSON.stringify(armed, null, 2)}\n`);
+    // The verdict on an earlier release says nothing about this one.
+    removeFile(join(dir, POST_ROLL_RESULT_FILE));
+    return (await engine.armPostRollCheck(dir, POST_ROLL_DELAY_MS, signal)) ? "" : ";post_roll_check_not_armed";
+  } catch {
+    return ";post_roll_check_not_armed";
+  }
+}
+
 export async function runFleetUpdate(engine: FleetUpdateEngine, options: FleetUpdateOptions): Promise<UpdateResult> {
   const { dir } = options;
   const now = options.now ?? Date.now;
@@ -208,6 +366,12 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
   const target: FleetImages = { runner: release.images.runner.reference, supervisor: release.images.supervisor.reference };
   const changed = (["runner", "supervisor"] as const).filter((c) => current[c] !== target[c]);
   const tagged = { releaseId: release.releaseId };
+  // A release the post-roll check rolled back stays rolled back while it is the approved one; a newer
+  // generation is applied normally (CTC-6564).
+  const rolled = readPostRollResult(dir);
+  if (changed.length > 0 && rolled?.verdict === "ROLLED_BACK" && rolled.releaseId === release.releaseId && rolled.generation === release.generation)
+    return done("rolled_back", `post_roll_rolled_back:granted=${rolled.granted},no_response=${rolled.noResponse},answered=${rolled.answered}`,
+      { ...tagged, generation: release.generation, exitCode: 1 });
   const live = await engine.supervisor(dir, project, signal);
   if (live === undefined) return done("retained", "docker_unavailable", tagged);
   const runs = (images: FleetImages) =>
@@ -274,6 +438,7 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
   if (childrenBefore === null) return done("retained", "docker_unavailable", tagged);
 
   // From here the machine changes. The previous file is the rollback.
+  const rollStartMs = now();
   if (changed.length > 0) writePrivateAtomic(join(dir, PREVIOUS_COMPOSE_FILE), composeText);
   writePrivateAtomic(join(dir, IN_FLIGHT_FILE), `${JSON.stringify({ version: 1, scopes: [...scopes].sort(), atMs: now() })}\n`);
   writePrivateAtomic(composePath, candidateText);
@@ -288,7 +453,11 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
           const after = childrenAfter[id];
           return before.running && after?.running === true && after.fingerprint !== before.fingerprint;
         }).length;
-    const detail = changed.length > 0 ? `updated:${changed.join(",")}` : "reconciled";
+    const armed: PostRollArmed = {
+      version: 1, sinceMs: rollStartMs, composeSha256: sha256(candidateText), generation: release.generation,
+      releaseId: release.releaseId, fromGeneration: state.generation, armedAtMs: now(),
+    };
+    const detail = (changed.length > 0 ? `updated:${changed.join(",")}` : "reconciled") + await armPostRollCheck(engine, dir, armed, signal);
     const previous = changed.length > 0 ? current : null;
     return disturbed === 0
       ? record("updated", detail, previous)
@@ -297,13 +466,99 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
 
   if (rollbackText === null || rollbackImages === null)
     return done("failed", "new_supervisor_not_qualified_no_previous", { ...tagged, exitCode: 1 });
-  writePrivateAtomic(composePath, rollbackText);
-  const restored = (await engine.recreate(dir, project, signal)) &&
+  const restored = (await restoreCompose(engine, dir, project, rollbackText, signal)) &&
     (await qualify(engine, dir, project, rollbackImages, scopes, options, now));
   // A rollback that did not qualify keeps the baseline for the next run.
   if (restored) clearInFlight(dir);
   return done(restored ? "rolled_back" : "failed", restored ? "new_supervisor_not_qualified" : "rollback_not_qualified",
     { ...tagged, exitCode: 1 });
+}
+
+/** Put `text` back as `compose.json` and recreate the supervisor alone on it. */
+async function restoreCompose(engine: FleetUpdateEngine, dir: string, project: string, text: string, signal?: AbortSignal): Promise<boolean> {
+  writePrivateAtomic(join(dir, FLEET_COMPOSE_FILE), text);
+  return engine.recreate(dir, project, signal);
+}
+
+export interface PostRollCheckOptions {
+  dir: string;
+  now?: () => number;
+  signal?: AbortSignal;
+}
+
+export interface PostRollCheckOutcome {
+  /** `PASS`, `ROLLED_BACK` and the other verdicts, or why the check could not judge. */
+  detail: string;
+  /** The recorded verdict; null when the check judged nothing and stays armed. */
+  result: PostRollResult | null;
+  exitCode: number;
+}
+
+/** The check a successful apply armed, run on the host 10 minutes later (CTC-6564). A release that
+ *  was granted no work, while the fleet's acquires went unanswered or too few were answered, goes back
+ *  to the saved previous `compose.json`, but only if `compose.json` still holds the bytes the apply wrote. */
+export async function runFleetPostRollCheck(engine: FleetUpdateEngine, options: PostRollCheckOptions): Promise<PostRollCheckOutcome> {
+  const { dir, signal } = options;
+  const now = options.now ?? Date.now;
+  const stay = (detail: string, exitCode = 0): PostRollCheckOutcome => ({ detail, result: null, exitCode });
+  if (!existsSync(join(dir, FLEET_COMPOSE_FILE))) return stay("fleet_not_installed", 1);
+  const armed = readPostRollArmed(dir);
+  if (armed === null) return stay("no_post_roll_check_armed");
+  const lock = takeLock(dir, now());
+  if (lock === null) return stay("update_running");
+  try {
+    const composeText = readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8");
+    let compose: unknown;
+    try {
+      compose = JSON.parse(composeText);
+    } catch {
+      compose = null;
+    }
+    const project = isRecord(compose) && typeof compose.name === "string" ? compose.name : "";
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(project)) return stay("fleet_compose_unrecognized", 1);
+    const live = await engine.supervisor(dir, project, signal);
+    if (!live) return stay(live === undefined ? "docker_unavailable" : "supervisor_not_found", 1);
+    const since = new Date(armed.sinceMs).toISOString();
+    const text = await engine.logs(live.id, since, signal);
+    if (text === null) return stay("docker_unavailable", 1);
+    const counts = postRollCounts(text);
+
+    const finish = (verdict: PostRollVerdict, extra: Partial<Pick<PostRollResult, "reason" | "rolledBackFrom" | "rolledBackTo">> = {}, exitCode = 0): PostRollCheckOutcome => {
+      const result: PostRollResult = {
+        version: 1, at: new Date(now()).toISOString(), since, ...counts, verdict,
+        generation: armed.generation, releaseId: armed.releaseId, ...extra,
+      };
+      writePrivateAtomic(join(dir, POST_ROLL_RESULT_FILE), `${JSON.stringify(result, null, 2)}\n`);
+      removeFile(join(dir, POST_ROLL_ARMED_FILE));
+      return { detail: verdict, result, exitCode };
+    };
+    if (counts.granted > 0) return finish("PASS");
+    if (!postRollFailing(counts)) return finish("STANDS_IDLE");
+
+    const refuse = (reason: string) => finish("ROLLBACK_REFUSED", { reason }, 1);
+    if (sha256(composeText) !== armed.composeSha256) return refuse("compose_changed_since_roll");
+    let previousText: string;
+    let previous: FleetImages | null;
+    try {
+      previousText = readFileSync(join(dir, PREVIOUS_COMPOSE_FILE), "utf8");
+      previous = fleetImages(JSON.parse(previousText));
+    } catch {
+      return refuse("no_previous_compose");
+    }
+    if (previous === null) return refuse("no_previous_compose");
+    // The apply removed the images it replaced, so the previous ones may need pulling again.
+    const unprepared = await engine.prepare([previous.runner, previous.supervisor], signal);
+    if (unprepared !== null) return finish("ROLLBACK_FAILED", { reason: unprepared }, 1);
+    const restored = await restoreCompose(engine, dir, project, previousText, signal);
+    const after = restored ? await engine.supervisor(dir, project, signal) : null;
+    const running = !!after && after.running && after.image === previous.supervisor && after.runnerImage === previous.runner;
+    const moved = { rolledBackFrom: armed.generation, rolledBackTo: armed.fromGeneration };
+    return running
+      ? finish("ROLLED_BACK", { ...moved, reason: "no_work_granted" }, 1)
+      : finish("ROLLBACK_FAILED", { ...moved, reason: restored ? "supervisor_not_running" : "recreate_failed" }, 1);
+  } finally {
+    releaseLock(dir, lock);
+  }
 }
 
 /** The recreated supervisor runs `images`, stays up with no restart, logs no `host_not_ready` for a
@@ -374,7 +629,13 @@ export function credentialMount(compose: Record<string, unknown>, service: Recor
 
 /** The real engine: the docker CLI, and the setup engine's own pull. */
 export function dockerFleetUpdateEngine(
-  deps: { exec?: RunnerExec; env?: NodeJS.ProcessEnv; setup?: RunnerEngine } = {},
+  deps: {
+    exec?: RunnerExec;
+    env?: NodeJS.ProcessEnv;
+    setup?: RunnerEngine;
+    /** How the post-roll check is scheduled: a transient systemd timer on Linux. Tests pass fakes. */
+    timer?: { platform?: NodeJS.Platform; uid?: number; command?: readonly string[]; run?: SchedulerRun };
+  } = {},
 ): FleetUpdateEngine {
   const exec = deps.exec ?? spawnDocker;
   const env = Object.fromEntries(Object.entries(deps.env ?? process.env)
@@ -478,6 +739,26 @@ export function dockerFleetUpdateEngine(
     },
     async removeImages(images, signal) {
       for (const ref of images) await docker(["image", "rm", ref], { signal, timeoutMs: 120_000 });
+    },
+    // A transient systemd timer outlives this process and the operator's session. Root's runs under the
+    // system manager; anyone else's runs under their user manager, which needs lingering to outlive a logout.
+    async armPostRollCheck(dir, delayMs) {
+      const timer = deps.timer ?? {};
+      if ((timer.platform ?? process.platform) !== "linux") return false;
+      const command = timer.command ?? (process.argv[1] ? [process.execPath, resolve(process.argv[1])] : null);
+      if (command === null) return false;
+      const run = timer.run ?? defaultRun;
+      const manager = (timer.uid ?? process.getuid?.()) === 0 ? [] : ["--user"];
+      const source = deps.env ?? process.env;
+      const carried = (["PATH", "HOME"] as const).flatMap((key) => (source[key] ? [`--setenv=${key}=${source[key]}`] : []));
+      try {
+        // A timer armed by an earlier apply is replaced, not duplicated.
+        run("systemctl", [...manager, "stop", `${POST_ROLL_UNIT}.timer`, `${POST_ROLL_UNIT}.service`]);
+        return run("systemd-run", [...manager, "--quiet", "--collect", `--unit=${POST_ROLL_UNIT}`, `--on-active=${Math.ceil(delayMs / 1000)}s`,
+          "--description=Catalyst fleet post-roll check", ...carried, "--", ...command, "runner", "update", "--fleet", "--dir", dir, "--post-roll-check"]).status === 0;
+      } catch {
+        return false;
+      }
     },
   };
 }
