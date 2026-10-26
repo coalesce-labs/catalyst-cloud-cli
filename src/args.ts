@@ -57,6 +57,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     auto: { value: false, help: "one-line output for the scheduled run" },
     dir: { value: true, help: "the runner directory (default: the one setup created)" },
     fleet: { value: false, help: "update a multi-team supervisor fleet's compose.json in --dir (with auto-update on: schedule that update)" },
+    "post-roll-check": { value: false, help: "with --fleet and --dir: the check a fleet update arms for 10 minutes after it applies (run by that timer)" },
     yes: { value: false, help: "uninstall: confirm without a terminal" },
     "delete-checkouts": { value: false, help: "uninstall: also delete the repository and thoughts checkouts" },
   },
