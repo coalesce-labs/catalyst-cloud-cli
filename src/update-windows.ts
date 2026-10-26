@@ -1,12 +1,10 @@
-// update-windows.ts — the set times of day a self-hosted machine takes a new release (CTC-6709).
-// The 15-minute schedule checks often so an owner sees the approved release quickly, but a busy
-// machine restarting its supervisor every time a release lands would interrupt its owner's day as
-// often as releases ship. So the schedule applies a newer release only once a window has opened
-// since the last window a run settled, and an owner's own `catalyst runner update` applies at once.
-// Windows are wall-clock times in the machine's time zone, or the zone its owner saved.
-
-/** Four windows a day, spread so a release approved at any time waits at most about eight hours. */
-export const DEFAULT_WINDOW_TIMES = ["03:00", "11:00", "16:00", "22:00"] as const;
+// update-windows.ts — the set times of day an owner may choose for a self-hosted machine to take a
+// new release (CTC-6709). By default there are none (CTC-7465): the 15-minute schedule applies a
+// newer release at its next check, because an update restarts only the supervisor, in place, and
+// every running job finishes on the image it started with. An owner who wants set times saves them
+// with `catalyst update policy windows`. The schedule then applies a newer release only once a window
+// has opened since the last window a run settled, and an owner's own `catalyst runner update` still
+// applies at once. Windows are wall-clock times in the machine's time zone, or the zone its owner saved.
 
 const TIME = /^([01][0-9]|2[0-3]):([0-5][0-9])$/;
 
@@ -23,10 +21,6 @@ export interface WindowBounds {
   /** The first window after now. */
   nextOpensMs: number;
   timeZone: string;
-}
-
-export function defaultWindows(): UpdateWindows {
-  return { times: [...DEFAULT_WINDOW_TIMES], timeZone: null };
 }
 
 export function isWindowTime(value: string): boolean {
@@ -84,7 +78,8 @@ function instantOf(year: number, month: number, day: number, hour: number, minut
 /** The window before and after `nowMs`. */
 export function windowBounds(nowMs: number, windows: UpdateWindows): WindowBounds {
   const timeZone = windows.timeZone ?? machineTimeZone();
-  const times = normalizeWindowTimes(windows.times) ?? [...DEFAULT_WINDOW_TIMES];
+  const times = normalizeWindowTimes(windows.times);
+  if (times === null) throw new Error(`update windows ${JSON.stringify(windows.times)} are not 24-hour times`);
   const today = wallClock(nowMs, timeZone);
   const candidates: number[] = [];
   // Two calendar days either side of today's date in the zone. Stepping by date, not by 24 hours,

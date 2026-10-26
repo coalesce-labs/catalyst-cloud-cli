@@ -88,8 +88,14 @@ describe("catalyst update policy windows (CTC-6709)", () => {
 
     const reset = makeCtx(home);
     expect(await main(["update", "policy", "windows", "default"], reset)).toBe(0);
-    expect(reset.out).toEqual(["Runner releases now apply at 03:00, 11:00, 16:00, 22:00 (this machine's time zone). catalyst runner update still applies one at once."]);
+    expect(reset.out).toEqual(["Runner releases now apply at the next check after one is approved, with no set times. catalyst runner update still applies one at once."]);
     expect(readUpdatePolicy(home).windows).toBeUndefined();
+    const relisted = makeCtx(home);
+    expect(await main(["update", "policy"], relisted)).toBe(0);
+    expect(relisted.out).toContain("Runner releases apply at the next check, with no set times (default)");
+    const rejson = makeCtx(home);
+    expect(await main(["update", "policy", "--json"], rejson)).toBe(0);
+    expect(JSON.parse(rejson.out[0]!).windows).toEqual({ times: [], timeZone: null, source: "default" });
   });
 
   it("NEGATIVE: a settings file with a bad window time is never read as the defaults", async () => {
@@ -118,6 +124,21 @@ describe("catalyst update policy windows (CTC-6709)", () => {
     // The image engine read the release and moved nothing.
     expect(engine.calls).toEqual({ desiredRelease: 1 });
     expect(cli).toEqual([NEXT]);
+  });
+
+  it("with no set times (the default), the scheduled run takes a newer release at once, at any hour (CTC-7465)", async () => {
+    const home = tempHome();
+    const dir = runnerInstall();
+    // The same machine as above, at the same hour, with the same settled window, but no owner times.
+    const state = JSON.parse(readFileSync(join(dir, "release-state.json"), "utf8"));
+    writeFileSync(join(dir, "release-state.json"), JSON.stringify({ ...state, windowSettledMs: Date.parse("2026-10-23T11:00:00.000Z") }));
+    const engine = countingEngine(answered(hostRelease({ components: approved() })));
+    const ctx = makeCtx(home, { now: () => new Date("2026-10-23T15:00:00.000Z") });
+    const components = { cliApply: fakeCliApply([]), replicaRestart: fakeReplicaRestart([]), packApply: fakePackApply([]) };
+    await main(["runner", "update", "--auto", "--dir", dir], ctx, { runner: { engine, components } });
+    expect(ctx.out[0]).not.toContain("waiting_window");
+    // The image engine went past reading the release: it started the update.
+    expect(Object.keys(engine.calls).filter((call) => call !== "desiredRelease")).not.toEqual([]);
   });
 });
 

@@ -11,7 +11,7 @@ import { UsageError } from "./errors.js";
 import { dockerRunnerUpdateEngine, runnerDir, type RunnerUpdateEngine } from "./runner-update.js";
 import { policyLines, readEffectivePolicy, runUpdate, updateReportJson, updateReportLines, type UpdateOptions } from "./update.js";
 import { applySdkUpdate, type SdkExec } from "./update-sdk.js";
-import { DEFAULT_WINDOW_TIMES, isTimeZone, normalizeWindowTimes } from "./update-windows.js";
+import { isTimeZone, normalizeWindowTimes } from "./update-windows.js";
 import {
   canonicalProject,
   effectivePolicy,
@@ -63,7 +63,7 @@ function cmdPolicy(parts: string[], args: ParsedArgs, ctx: Ctx): number {
         JSON.stringify({
           components: UPDATE_COMPONENTS.map((id) => ({ id, ...effectivePolicy(policy, id) })),
           projects: policy.projects.map((p) => ({ path: p.path, sdk: p.sdk, source: p.source })),
-          windows: { times: policy.windows?.times ?? [...DEFAULT_WINDOW_TIMES], timeZone: policy.windows?.timeZone ?? null, source: policy.windows ? "owner" : "default" },
+          windows: { times: policy.windows?.times ?? [], timeZone: policy.windows?.timeZone ?? null, source: policy.windows ? "owner" : "default" },
         }),
       );
     else for (const line of policyLines(policy)) ctx.stdout(line);
@@ -93,7 +93,7 @@ function cmdPolicy(parts: string[], args: ParsedArgs, ctx: Ctx): number {
 }
 
 /** `update policy windows 03:00,11:00|default [--time-zone <zone>]`: when the schedule may take a
- *  newer runner release. `default` goes back to the four default times in the machine's zone. */
+ *  newer runner release. `default` goes back to no set times: the next check applies it. */
 function cmdWindows(parts: string[], args: ParsedArgs, ctx: Ctx): number {
   const value = parts[2];
   if (parts.length !== 3 || value === undefined) throw new UsageError(USAGE);
@@ -108,10 +108,11 @@ function cmdWindows(parts: string[], args: ParsedArgs, ctx: Ctx): number {
     setWindowPolicy(ctx.home, { times, timeZone: zone ?? null });
   }
   const saved = readUpdatePolicy(ctx.home).windows;
-  const times = saved?.times ?? [...DEFAULT_WINDOW_TIMES];
+  const times = saved?.times ?? [];
   const timeZone = saved?.timeZone ?? null;
   if (args.json) ctx.stdout(JSON.stringify({ windows: { times, timeZone, source: saved ? "owner" : "default" } }));
-  else ctx.stdout(`Runner releases now apply at ${times.join(", ")} (${timeZone ?? "this machine's time zone"}). catalyst runner update still applies one at once.`);
+  else if (saved) ctx.stdout(`Runner releases now apply at ${times.join(", ")} (${timeZone ?? "this machine's time zone"}). catalyst runner update still applies one at once.`);
+  else ctx.stdout("Runner releases now apply at the next check after one is approved, with no set times. catalyst runner update still applies one at once.");
   return 0;
 }
 
