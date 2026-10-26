@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.41
+
+A runner's automatic update schedule now applies a newly approved runner release at its next check, instead of waiting for one of four set times of day. An owner who wants set times can still choose them with `catalyst update policy windows <HH:MM,...>`, and `catalyst update policy windows default` goes back to applying at the next check. `catalyst runner update` still applies a release at once, and `catalyst update policy` shows which setting is in effect.
+
 ## 0.16.40
 
 `catalyst flow --repo <owner/name> --period 2w --granularity day` prints a repository's open pull request counts by the day, or by the hour with `--granularity hour`. `--json` prints the same buckets the SDK's `flow.series()` returns.
