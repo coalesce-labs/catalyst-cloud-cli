@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -89,6 +89,8 @@ function install(images = OLD): { dir: string; text: string } {
   return { dir, text };
 }
 
+const readJson = (dir: string, file: string) => JSON.parse(readFileSync(join(dir, file), "utf8"));
+
 const qualifiedLine = (tenant: string, team: string) =>
   `2026-10-22T19:00:00Z {"version":1,"event":"supervisor_scope_qualified","tenant":"${tenant}","team":"${team}","hostId":"host_x"}`;
 const notReadyLine = (tenant: string, team: string) =>
@@ -111,6 +113,8 @@ function fake(dir: string, options: FakeOptions = {}) {
   const calls = {
     recreate: 0, removed: [] as string[], prepared: [] as string[][],
     armed: [] as { dir: string; delayMs: number }[], logSince: [] as string[],
+    /** Per recreate: the supervisor image it ran, and the scopes the in-flight file required then. */
+    recreatedOn: [] as string[], inFlight: [] as (string[] | null)[],
   };
   let desired: unknown = options.read ?? release();
   const runningFrom = (): { runner: string; supervisor: string } => {
@@ -139,6 +143,8 @@ function fake(dir: string, options: FakeOptions = {}) {
     recreate: async () => {
       calls.recreate++;
       const images = runningFrom();
+      calls.recreatedOn.push(images.supervisor);
+      calls.inFlight.push(existsSync(join(dir, IN_FLIGHT_FILE)) ? readJson(dir, IN_FLIGHT_FILE).scopes : null);
       live = {
         id: String(calls.recreate).repeat(64).slice(0, 64),
         image: images.supervisor,
@@ -291,6 +297,162 @@ describe("fleet update: one release for the whole fleet, the supervisor recreate
   });
 });
 
+// A team's admission turned off during a fleet update (CTC-7569): the supervisor stops starting its
+// scope, so that scope never logs `supervisor_scope_qualified` again, from the new release or the old.
+const FIFTEEN = [...Array.from({ length: 14 }, (_, i) => `tenant-${i % 4}/T${String(i).padStart(2, "0")}`), "tenant-0/ZCTC163"];
+const DROPPED = "tenant-0/ZCTC163";
+const STILL_DELEGATED = FIFTEEN.filter((scope) => scope !== DROPPED);
+const servingScopes = (scopes: readonly string[]) =>
+  scopes.map((scope) => {
+    const [tenant = "", team = ""] = scope.split("/");
+    return qualifiedLine(tenant, team);
+  }).join("\n");
+const NEW_COMPOSE = `${JSON.stringify(composeFile(NEW), null, 2)}\n`;
+
+describe("fleet update: a scope whose delegation ends during the update (CTC-7569)", () => {
+  it("the new supervisor qualifying the 14 still delegated is enough: the update succeeds, names the dropped scope and runs the new generation", async () => {
+    const { dir, text } = install();
+    const { engine, calls } = fake(dir, { before: servingScopes(FIFTEEN), logsFor: () => servingScopes(STILL_DELEGATED) });
+    const result = await runFleetUpdate(engine, { dir, ...clock() });
+    const detail = `updated:runner,supervisor;dropped_scope:${DROPPED}`;
+    expect(result).toMatchObject({ outcome: "updated", detail, generation: 2, exitCode: 0 });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(NEW_COMPOSE);
+    expect(readFileSync(join(dir, PREVIOUS_COMPOSE_FILE), "utf8")).toBe(text);
+    // The candidate, then the previous release as the control, then the candidate against the 14.
+    expect(calls.recreatedOn).toEqual([NEW.supervisor, OLD.supervisor, NEW.supervisor]);
+    expect(calls.inFlight.map((scopes) => scopes?.length)).toEqual([15, 15, 14]);
+    expect(calls.inFlight[2]).toEqual([...STILL_DELEGATED].sort());
+    expect(existsSync(join(dir, IN_FLIGHT_FILE))).toBe(false);
+    expect(calls.removed).toEqual([OLD.runner, OLD.supervisor]);
+    expect(calls.armed).toHaveLength(1);
+    expect(readReleaseState(dir)).toMatchObject({ generation: 2, last: { outcome: "updated", detail } });
+  });
+
+  it("NEGATIVE: the previous supervisor still qualifies the scope the candidate missed, so the update rolls back", async () => {
+    const { dir, text } = install();
+    const { engine, calls } = fake(dir, {
+      before: servingScopes(FIFTEEN),
+      logsFor: (i) => servingScopes(i.supervisor === NEW.supervisor ? STILL_DELEGATED : FIFTEEN),
+    });
+    expect(await runFleetUpdate(engine, { dir, ...clock() }))
+      .toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_qualified", exitCode: 1 });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(text);
+    expect(calls.recreatedOn).toEqual([NEW.supervisor, OLD.supervisor]);
+    expect(existsSync(join(dir, IN_FLIGHT_FILE))).toBe(false);
+    expect(readReleaseState(dir).generation).toBeNull();
+  });
+
+  /** The first recreate's container, the candidate's, in the fake. */
+  const CANDIDATE_ID = "1".repeat(64);
+  const still = { logsFor: () => servingScopes(STILL_DELEGATED) };
+  it.each<[string, FakeOptions, ((engine: FleetUpdateEngine) => FleetUpdateEngine)?]>([
+    ["the candidate also misses a scope the previous supervisor still qualifies",
+      { logsFor: (i) => servingScopes(i.supervisor === NEW.supervisor ? STILL_DELEGATED.slice(1) : STILL_DELEGATED) }],
+    ["the candidate restarts", { ...still, restartAfterRecreate: true }],
+    ["the candidate logs host_not_ready for the scope it misses",
+      { logsFor: (i) => `${servingScopes(STILL_DELEGATED)}${i.supervisor === NEW.supervisor ? `\n${notReadyLine("tenant-0", "ZCTC163")}` : ""}` }],
+    ["the candidate's log cannot be read", still,
+      (engine) => ({ ...engine, logs: async (id, ...rest) => (id === CANDIDATE_ID ? null : engine.logs(id, ...rest)) })],
+    ["the candidate runs another image", still, (engine) => ({
+      ...engine,
+      supervisor: async (...args) => {
+        const live = await engine.supervisor(...args);
+        return live?.id === CANDIDATE_ID ? { ...live, image: OLD.supervisor } : live;
+      },
+    })],
+    ["neither supervisor qualifies any scope", { logsFor: () => "" }],
+  ])("NEGATIVE: %s, so no scope is dropped and no generation is recorded", async (_label, options, alter = (engine) => engine) => {
+    const { dir, text } = install();
+    const fleet = fake(dir, { before: servingScopes(FIFTEEN), ...options });
+    const { calls } = fleet;
+    const engine = alter(fleet.engine);
+    expect(await runFleetUpdate(engine, { dir, ...clock() }))
+      .toMatchObject({ outcome: "failed", detail: "rollback_not_qualified", generation: null, exitCode: 1 });
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(text);
+    expect(calls.recreatedOn).toEqual([NEW.supervisor, OLD.supervisor]);
+    expect(readJson(dir, IN_FLIGHT_FILE).scopes).toHaveLength(15);
+    expect(readReleaseState(dir).generation).toBeNull();
+  });
+
+  it("NEGATIVE: a candidate that fails again against the 14 goes back to the previous release and records no generation", async () => {
+    const { dir, text } = install();
+    let recreates = 0;
+    const { engine, calls } = fake(dir, {
+      before: servingScopes(FIFTEEN),
+      logsFor: () => `${servingScopes(STILL_DELEGATED)}${++recreates === 3 ? `\n${notReadyLine("tenant-0", "T00")}` : ""}`,
+    });
+    expect(await runFleetUpdate(engine, { dir, ...clock() }))
+      .toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_qualified", generation: null, exitCode: 1 });
+    expect(calls.recreatedOn).toEqual([NEW.supervisor, OLD.supervisor, NEW.supervisor, OLD.supervisor]);
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(text);
+    expect(existsSync(join(dir, IN_FLIGHT_FILE))).toBe(false);
+    expect(calls.removed).toEqual([]);
+    expect(calls.armed).toEqual([]);
+    expect(readReleaseState(dir).generation).toBeNull();
+  });
+
+  describe("the run after a rollback that did not qualify", () => {
+    /** Where the failed run left the host: compose.json and the running supervisor back on the
+     *  previous release, which qualifies the 14 still delegated, and the 15 saved scopes on disk. */
+    function afterFailedRollback(options: FakeOptions = {}) {
+      const { dir, text } = install();
+      writeFileSync(join(dir, PREVIOUS_COMPOSE_FILE), text, { mode: 0o600 });
+      writeFileSync(join(dir, IN_FLIGHT_FILE), JSON.stringify({ version: 1, scopes: FIFTEEN, atMs: 1 }));
+      const still = servingScopes(STILL_DELEGATED);
+      return { dir, text, ...fake(dir, { before: still, logsFor: () => still, ...options }) };
+    }
+
+    it("requires only the scopes the previous supervisor qualifies now, names the one it dropped, and applies the release", async () => {
+      const { dir, engine, calls } = afterFailedRollback();
+      const result = await runFleetUpdate(engine, { dir, ...clock() });
+      expect(result).toMatchObject({ outcome: "updated", detail: `updated:runner,supervisor;dropped_scope:${DROPPED}`, generation: 2, exitCode: 0 });
+      expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(NEW_COMPOSE);
+      expect(calls.recreatedOn).toEqual([NEW.supervisor]);
+      expect(calls.inFlight).toEqual([[...STILL_DELEGATED].sort()]);
+      expect(existsSync(join(dir, IN_FLIGHT_FILE))).toBe(false);
+    });
+
+    it("a candidate that then fails rolls back against the scopes still delegated and names the one dropped", async () => {
+      const { dir, text, engine, calls } = afterFailedRollback({ restartAfterRecreate: true });
+      expect(await runFleetUpdate(engine, { dir, ...clock() }))
+        .toMatchObject({ outcome: "rolled_back", detail: `new_supervisor_not_qualified;dropped_scope:${DROPPED}`, generation: null, exitCode: 1 });
+      expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(text);
+      expect(calls.recreatedOn).toEqual([NEW.supervisor, OLD.supervisor]);
+      expect(existsSync(join(dir, IN_FLIGHT_FILE))).toBe(false);
+    });
+
+    /** The first supervisor read, the one the run starts from, with `change` applied. */
+    const firstRead = (engine: FleetUpdateEngine, change: Partial<FleetSupervisor>): FleetUpdateEngine => {
+      let reads = 0;
+      return {
+        ...engine,
+        supervisor: async (...args) => {
+          const live = await engine.supervisor(...args);
+          return reads++ === 0 && live ? { ...live, ...change } : live;
+        },
+      };
+    };
+    it.each<[string, (fleet: ReturnType<typeof afterFailedRollback>) => FleetUpdateEngine]>([
+      ["no previous compose.json was saved", (f) => (unlinkSync(join(f.dir, PREVIOUS_COMPOSE_FILE)), f.engine)],
+      ["the running supervisor is not on the previous release", (f) => firstRead(f.engine, { image: NEW.supervisor, runnerImage: NEW.runner })],
+      ["the previous supervisor started less than the qualify deadline ago", (f) => firstRead(f.engine, { startedAt: "2026-10-22T19:59:00Z" })],
+      ["its log cannot be read", (f) => {
+        let reads = 0;
+        return { ...f.engine, logs: async (...args) => (reads++ === 0 ? null : f.engine.logs(...args)) };
+      }],
+      ["it qualifies none of the saved scopes", (f) => (f.setLogs(""), f.engine)],
+      ["it logs host_not_ready for the saved scope it does not qualify",
+        (f) => (f.setLogs(`${servingScopes(STILL_DELEGATED)}\n${notReadyLine("tenant-0", "ZCTC163")}`), f.engine)],
+    ])("NEGATIVE: %s, so the saved scopes stay the requirement", async (_label, alter) => {
+      const fleet = afterFailedRollback();
+      await runFleetUpdate(alter(fleet), { dir: fleet.dir, ...clock() });
+      // The candidate qualified against all 15; only the previous release as the control then dropped one.
+      expect(fleet.calls.inFlight.map((scopes) => scopes?.length)).toEqual([15, 15, 14]);
+      expect(fleet.calls.recreatedOn).toEqual([NEW.supervisor, OLD.supervisor, NEW.supervisor]);
+    });
+  });
+});
+
 describe("fleet update: reading the logs and the credential mount", () => {
   it("qualified scopes are keyed by tenant and team; unrelated lines are ignored", () => {
     const text = [SERVING, "plain text", '{"event":"host_ready"}', qualifiedLine("tenant-0", "CTC")].join("\n");
@@ -340,7 +502,6 @@ const noneLine = '2026-10-22T20:06:00Z {"version":1,"event":"acquire_none","tena
 const noResponseLine = '2026-10-22T20:06:00Z {"version":1,"event":"acquire_retry","detail":"fetch failed (no response)"}';
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const lines = (line: string, count: number) => Array.from({ length: count }, () => line).join("\n");
-const readJson = (dir: string, file: string) => JSON.parse(readFileSync(join(dir, file), "utf8"));
 
 /** An install updated from OLD to NEW (generation 2); the fleet was on `fromGeneration` before it. */
 async function rolled(options: FakeOptions = {}, fromGeneration: number | null = null) {

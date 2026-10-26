@@ -37,6 +37,13 @@ import {
 // back and the supervisor is recreated on it. That scope set is saved before the recreate and removed
 // once it qualifies or rolls back, so a run killed in between is finished by the next one.
 //
+// A team can stop being delegated while an update is in flight (CTC-7569): no supervisor, new or old,
+// starts its scope again. The previous release, restored, is the control. When it misses exactly the
+// scopes the new supervisor missed and qualifies the rest, those scopes are dropped from the saved set
+// and the new release is applied again against what is left. A later run that finds a saved set beside
+// the previous release's running supervisor drops the saved scopes that supervisor no longer qualifies.
+// Either way the result names each dropped scope; the new release's own log never drops one.
+//
 // A release can qualify and then stop receiving work minutes later (CTC-6564). A successful apply
 // arms a check on the host, outside the calling process, for 10 minutes later: it reads the supervisor's
 // log since the roll began and, when the release was granted no work and the fleet's acquires got no
@@ -48,7 +55,8 @@ export const PREVIOUS_COMPOSE_FILE = "compose.release-previous.json";
 const CANDIDATE_COMPOSE_FILE = "compose.release-candidate.json";
 /** The scopes the supervisor served before a recreate, kept until that recreate is qualified or rolled
  *  back. A run that was killed in between finds it and qualifies against it, never against the new
- *  container's own log, which would read an unqualified supervisor as serving. */
+ *  container's own log, which would read an unqualified supervisor as serving. Only the previous
+ *  release's supervisor can take a scope out of it (CTC-7569). */
 export const IN_FLIGHT_FILE = "fleet-update-in-flight.json";
 /** How far back a qualification counts as current before the update. The supervisor repeats it
  *  on every loop while a scope is ready, so a ready scope logs it many times in this window. */
@@ -170,6 +178,11 @@ function readInFlight(dir: string): Set<string> | null {
   }
 }
 
+/** Save the scopes the next recreate has to qualify, replacing any saved before. */
+function saveInFlight(dir: string, scopes: ReadonlySet<string>, atMs: number): void {
+  writePrivateAtomic(join(dir, IN_FLIGHT_FILE), `${JSON.stringify({ version: 1, scopes: [...scopes].sort(), atMs })}\n`);
+}
+
 function clearInFlight(dir: string): void {
   try {
     unlinkSync(join(dir, IN_FLIGHT_FILE));
@@ -177,6 +190,19 @@ function clearInFlight(dir: string): void {
     // Already gone.
   }
 }
+
+/** The images a saved `compose.json` names, or null when there is none or it is not a fleet layout. */
+function savedImages(path: string): FleetImages | null {
+  try {
+    return fleetImages(JSON.parse(readFileSync(path, "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+/** The detail token naming scopes dropped from the requirement, sorted; empty when there are none. */
+const droppedDetail = (scopes: readonly string[]): string =>
+  scopes.length > 0 ? `;dropped_scope:${[...scopes].sort().join(",")}` : "";
 
 const removeFile = (path: string): void => {
   try {
@@ -387,12 +413,31 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
   // The scopes the running supervisor qualifies are what the new one has to qualify again, unless an
   // earlier run stopped mid-recreate: then the scopes it saved are the baseline.
   let scopes = inFlight;
+  /** Saved scopes the previous release's supervisor no longer qualifies, named in the result (CTC-7569). */
+  let dropped: string[] = [];
   if (scopes === null) {
     if (!live?.running) return done("retained", "supervisor_not_running", { ...tagged, exitCode: 1 });
     const recent = await engine.logs(live.id, new Date(now() - QUALIFIED_LOOKBACK_MS).toISOString(), signal);
     if (recent === null) return done("retained", "docker_unavailable", tagged);
     scopes = qualifiedScopes(recent);
     if (scopes.size === 0) return done("retained", "no_qualified_scope", { ...tagged, exitCode: 1 });
+  } else {
+    // An earlier run that ended back on the previous release, its rollback unqualified, left its scopes
+    // saved. Only when compose.json and the running supervisor are that previous release, up long enough
+    // to have qualified every scope it serves, does its log trim the saved set: a saved scope it no
+    // longer qualifies stopped being delegated. A `host_not_ready` for a saved scope is a scope still
+    // started, not one dropped. Anything less keeps the saved set whole.
+    const previous = savedImages(join(dir, PREVIOUS_COMPOSE_FILE));
+    const onPrevious = previous !== null && current.runner === previous.runner && current.supervisor === previous.supervisor && runs(previous);
+    if (live && onPrevious && now() - Date.parse(live.startedAt) >= (options.qualifyDeadlineMs ?? QUALIFY_DEADLINE_MS)) {
+      const recent = await engine.logs(live.id, new Date(now() - QUALIFIED_LOOKBACK_MS).toISOString(), signal);
+      const serving = recent === null || notReadyScope(recent, scopes) !== null ? new Set<string>() : qualifiedScopes(recent);
+      const kept = [...scopes].filter((scope) => serving.has(scope));
+      if (kept.length > 0 && kept.length < scopes.size) {
+        dropped = [...scopes].filter((scope) => !serving.has(scope));
+        scopes = new Set(kept);
+      }
+    }
   }
 
   const record = (outcome: UpdateOutcome, detail: string, previous: FleetImages | null, exitCode = 0): UpdateResult => {
@@ -443,9 +488,14 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
   // From here the machine changes. The previous file is the rollback.
   const rollStartMs = now();
   if (changed.length > 0) writePrivateAtomic(join(dir, PREVIOUS_COMPOSE_FILE), composeText);
-  writePrivateAtomic(join(dir, IN_FLIGHT_FILE), `${JSON.stringify({ version: 1, scopes: [...scopes].sort(), atMs: now() })}\n`);
-  writePrivateAtomic(composePath, candidateText);
-  if ((await engine.recreate(dir, project, signal)) && (await qualify(engine, dir, project, target, scopes, options, now))) {
+  saveInFlight(dir, scopes, now());
+  /** Write `text` as compose.json, recreate the supervisor alone on it and qualify it against `required`. */
+  const roll = async (text: string, images: FleetImages, required: ReadonlySet<string>): Promise<Qualification> => {
+    writePrivateAtomic(composePath, text);
+    if (!(await engine.recreate(dir, project, signal))) return { ok: false, reason: "recreate_failed" };
+    return qualify(engine, dir, project, images, required, options, now);
+  };
+  const succeed = async (droppedScopes: readonly string[]): Promise<UpdateResult> => {
     clearInFlight(dir);
     if (changed.length > 0) await engine.removeImages(changed.map((c) => current[c]), signal);
     // The recreate must leave every running phase container as it was: it is re-adopted, not restarted.
@@ -460,21 +510,33 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
       version: 1, sinceMs: rollStartMs, composeSha256: sha256(candidateText), generation: release.generation,
       releaseId: release.releaseId, fromGeneration: state.generation, armedAtMs: now(),
     };
-    const detail = (changed.length > 0 ? `updated:${changed.join(",")}` : "reconciled") + await armPostRollCheck(engine, dir, armed, signal);
+    const detail = (changed.length > 0 ? `updated:${changed.join(",")}` : "reconciled") + droppedDetail(droppedScopes) +
+      await armPostRollCheck(engine, dir, armed, signal);
     const previous = changed.length > 0 ? current : null;
     return disturbed === 0
       ? record("updated", detail, previous)
       : record("updated", `${detail};${disturbed < 0 ? "children_unreadable" : `children_changed:${disturbed}`}`, previous, 1);
-  }
+  };
 
+  const candidate = await roll(candidateText, target, scopes);
+  if (candidate.ok) return succeed(dropped);
   if (rollbackText === null || rollbackImages === null)
-    return done("failed", "new_supervisor_not_qualified_no_previous", { ...tagged, exitCode: 1 });
-  const restored = (await restoreCompose(engine, dir, project, rollbackText, signal)) &&
-    (await qualify(engine, dir, project, rollbackImages, scopes, options, now));
+    return done("failed", `new_supervisor_not_qualified_no_previous${droppedDetail(dropped)}`, { ...tagged, exitCode: 1 });
+  let restored = await roll(rollbackText, rollbackImages, scopes);
+  // The previous release is the control (CTC-7569). Missing exactly the scopes the candidate missed while
+  // qualifying the rest, it shows those scopes stopped being delegated, not that the candidate broke them:
+  // the candidate is applied again without them, and recorded only once it qualifies what is left.
+  const gone = lostDelegation(candidate, restored, scopes);
+  if (gone !== null) {
+    const kept = new Set([...scopes].filter((scope) => !gone.has(scope)));
+    saveInFlight(dir, kept, now());
+    if ((await roll(candidateText, target, kept)).ok) return succeed([...dropped, ...gone]);
+    restored = await roll(rollbackText, rollbackImages, kept);
+  }
   // A rollback that did not qualify keeps the baseline for the next run.
-  if (restored) clearInFlight(dir);
-  return done(restored ? "rolled_back" : "failed", restored ? "new_supervisor_not_qualified" : "rollback_not_qualified",
-    { ...tagged, exitCode: 1 });
+  if (restored.ok) clearInFlight(dir);
+  return done(restored.ok ? "rolled_back" : "failed",
+    `${restored.ok ? "new_supervisor_not_qualified" : "rollback_not_qualified"}${droppedDetail(dropped)}`, { ...tagged, exitCode: 1 });
 }
 
 /** Put `text` back as `compose.json` and recreate the supervisor alone on it. */
@@ -572,6 +634,14 @@ export async function runFleetPostRollCheck(engine: FleetUpdateEngine, options: 
   }
 }
 
+/** How a recreated supervisor fared. Only `missing` names scopes: the supervisor stayed up on the right
+ *  images, logged no `host_not_ready` for a required scope, and its log, read at the deadline, never
+ *  qualified these. That is the one failure a scope's lost delegation can explain (CTC-7569). */
+type Qualification =
+  | { ok: true }
+  | { ok: false; reason: "aborted" | "recreate_failed" | "restarted" | "wrong_image" | "host_not_ready" | "deadline" }
+  | { ok: false; reason: "missing"; missing: ReadonlySet<string> };
+
 /** The recreated supervisor runs `images`, stays up with no restart, logs no `host_not_ready` for a
  *  scope it must serve, and qualifies every one of `scopes`, held for the minimum window. */
 async function qualify(
@@ -582,29 +652,41 @@ async function qualify(
   scopes: ReadonlySet<string>,
   options: FleetUpdateOptions,
   now: () => number,
-): Promise<boolean> {
+): Promise<Qualification> {
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const start = now();
   const deadline = start + (options.qualifyDeadlineMs ?? QUALIFY_DEADLINE_MS);
   const minimum = start + (options.qualifyMinMs ?? QUALIFY_MIN_MS);
   let id: string | null = null;
   for (;;) {
-    if (options.signal?.aborted) return false;
+    if (options.signal?.aborted) return { ok: false, reason: "aborted" };
     const live = await engine.supervisor(dir, project, options.signal);
+    // What this poll's log has not qualified yet; null when the supervisor or its log could not be read.
+    let missing: Set<string> | null = null;
     if (live) {
       id ??= live.id;
-      if (live.id !== id || !live.running || live.restartCount !== 0) return false;
-      if (live.image !== images.supervisor || live.runnerImage !== images.runner) return false;
+      if (live.id !== id || !live.running || live.restartCount !== 0) return { ok: false, reason: "restarted" };
+      if (live.image !== images.supervisor || live.runnerImage !== images.runner) return { ok: false, reason: "wrong_image" };
       const text = await engine.logs(live.id, live.startedAt, options.signal);
       if (text !== null) {
-        if (notReadyScope(text, scopes) !== null) return false;
+        if (notReadyScope(text, scopes) !== null) return { ok: false, reason: "host_not_ready" };
         const seen = qualifiedScopes(text);
-        if (now() >= minimum && [...scopes].every((scope) => seen.has(scope))) return true;
+        missing = new Set([...scopes].filter((scope) => !seen.has(scope)));
+        if (now() >= minimum && missing.size === 0) return { ok: true };
       }
     }
-    if (now() >= deadline) return false;
+    if (now() >= deadline) return missing !== null && missing.size > 0 ? { ok: false, reason: "missing", missing } : { ok: false, reason: "deadline" };
     await sleep(QUALIFY_POLL_MS);
   }
+}
+
+/** The scopes to drop when the candidate and the previous release, its control, both failed only by
+ *  missing scopes, the same ones, and the control qualified at least one other `required` scope. Null
+ *  otherwise: then the candidate is what failed, or nothing shows which. */
+function lostDelegation(candidate: Qualification, control: Qualification, required: ReadonlySet<string>): ReadonlySet<string> | null {
+  if (candidate.ok || control.ok || candidate.reason !== "missing" || control.reason !== "missing") return null;
+  const same = candidate.missing.size === control.missing.size && [...candidate.missing].every((scope) => control.missing.has(scope));
+  return same && control.missing.size < required.size ? control.missing : null;
 }
 
 const CONTAINER_ID = /^[0-9a-f]{12,64}$/;
