@@ -669,3 +669,135 @@ describe("fleet update: arming the check on the host", () => {
     expect(await engineFor({ platform: "linux", uid: 0, command: ["/usr/bin/node", "/x"], run: failing.run }).armPostRollCheck("/srv/fleet", 600_000)).toBe(false);
   });
 });
+
+// CTC-7570: the armed check is a one-shot timer. When its time came while an update run held the lock it
+// judged nothing, and nothing armed it again. The run that held the lock now arms it again as it lets go.
+describe("fleet update: a post-roll check an update run kept from judging is armed again (CTC-7570)", () => {
+  const NEWER = [release(3, ["4", "5", "6"]), { runner: ref("runner", "4"), supervisor: ref("supervisor", "5") }] as const;
+  /** The newer release never qualifies WID, so the scheduled run rolls itself back, as on hetzner-3072373. */
+  const newerFails = (i: { runner: string }) => (i.runner === NEWER[1].runner ? qualifiedLine("tenant-0", "CTC") : SERVING);
+  const RETRY_MS = 5 * 60_000;
+  const holdLock = (dir: string) => writeFileSync(join(dir, "update.lock"), `${process.pid} ${Date.now()}\n`);
+
+  /** One clock for the host: the scheduled run, the check and qualify's sleeps all read it. */
+  function hostClock(startMs: number) {
+    let t = startMs;
+    return { now: () => t, sleep: async (ms: number) => void (t += ms), at: (ms: number) => void (t = ms) };
+  }
+
+  /** Generation 2 rolled and armed its check; a scheduled run for generation 3 then starts 2.5 minutes
+   *  later and is held inside its recreate, with the update lock, until `letGo()`. */
+  async function scheduledRunHoldingTheLock(options: FakeOptions = {}) {
+    const state = await rolled(options, 1);
+    const armedAtMs = (readJson(state.dir, POST_ROLL_ARMED_FILE) as { armedAtMs: number }).armedAtMs;
+    state.approve(NEWER[0]);
+    let letGo!: () => void;
+    const held = new Promise<void>((resolve) => (letGo = resolve));
+    const lockHeldAtArm: boolean[] = [];
+    const engine: FleetUpdateEngine = {
+      ...state.engine,
+      recreate: async (...args) => (await held, state.engine.recreate(...args)),
+      armPostRollCheck: async (...args) => {
+        lockHeldAtArm.push(existsSync(join(state.dir, "update.lock")));
+        return state.engine.armPostRollCheck(...args);
+      },
+    };
+    const host = hostClock(armedAtMs + 150_000);
+    const run = runFleetUpdate(engine, { dir: state.dir, now: host.now, sleep: host.sleep });
+    expect(existsSync(join(state.dir, "update.lock"))).toBe(true);
+    return { ...state, engine, armedAtMs, host, run, letGo, lockHeldAtArm };
+  }
+
+  it("RED: a check that finds an update running is armed again a few minutes after that run ends, and then judges the roll", async () => {
+    const { dir, engine, calls, armedAtMs, host, run, letGo, lockHeldAtArm, setLogs } = await scheduledRunHoldingTheLock({ logsFor: newerFails });
+    host.at(armedAtMs + 600_000);
+    expect(await runFleetPostRollCheck(engine, { dir, now: host.now })).toMatchObject({ detail: "update_running", result: null, exitCode: 0 });
+    letGo();
+    expect(await run).toMatchObject({ outcome: "rolled_back", generation: 2 });
+    expect(calls.armed).toEqual([{ dir, delayMs: 600_000 }, { dir, delayMs: RETRY_MS }]);
+    expect(lockHeldAtArm).toEqual([true]);
+    expect(existsSync(join(dir, "update.lock"))).toBe(false);
+    // The re-armed timer fires with no update running and judges generation 2.
+    host.at(host.now() + RETRY_MS);
+    setLogs(grantedLine);
+    expect(await runFleetPostRollCheck(engine, { dir, now: host.now })).toMatchObject({ detail: "PASS", exitCode: 0 });
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ verdict: "PASS", generation: 2, since: ROLL_START });
+    expect(existsSync(join(dir, POST_ROLL_ARMED_FILE))).toBe(false);
+  });
+
+  it("a run that applies a newer generation hands the judgment to that roll's own check and arms nothing more", async () => {
+    const { dir, engine, calls, armedAtMs, host, run, letGo, lockHeldAtArm, setLogs } = await scheduledRunHoldingTheLock();
+    host.at(armedAtMs + 600_000);
+    expect(await runFleetPostRollCheck(engine, { dir, now: host.now })).toMatchObject({ detail: "update_running" });
+    letGo();
+    expect(await run).toMatchObject({ outcome: "updated", generation: 3 });
+    expect(calls.armed).toEqual([{ dir, delayMs: 600_000 }, { dir, delayMs: 600_000 }]);
+    expect(lockHeldAtArm).toEqual([true]);
+    expect(readJson(dir, POST_ROLL_ARMED_FILE)).toMatchObject({ generation: 3, fromGeneration: 2 });
+    host.at(host.now() + 600_000);
+    setLogs(grantedLine);
+    expect(await runFleetPostRollCheck(engine, { dir, now: host.now })).toMatchObject({ detail: "PASS" });
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ verdict: "PASS", generation: 3 });
+  });
+
+  it("RED: an armed file whose time has passed with no verdict is armed again by the next scheduled run", async () => {
+    const { dir, engine, calls } = await rolled({}, 1);
+    const { armedAtMs } = readJson(dir, POST_ROLL_ARMED_FILE) as { armedAtMs: number };
+    const host = hostClock(armedAtMs + 11 * 60_000);
+    expect(await runFleetUpdate(engine, { dir, now: host.now, sleep: host.sleep })).toMatchObject({ outcome: "current", detail: "not_newer" });
+    expect(calls.armed).toEqual([{ dir, delayMs: 600_000 }, { dir, delayMs: RETRY_MS }]);
+  });
+
+  it("RED: a check Docker kept from judging is armed again by the next scheduled run", async () => {
+    const { dir, engine, calls } = await rolled({}, 1);
+    const { armedAtMs } = readJson(dir, POST_ROLL_ARMED_FILE) as { armedAtMs: number };
+    const host = hostClock(armedAtMs + 600_000);
+    expect(await runFleetPostRollCheck({ ...engine, supervisor: async () => undefined }, { dir, now: host.now })).toMatchObject({ detail: "docker_unavailable" });
+    host.at(armedAtMs + 15 * 60_000);
+    await runFleetUpdate(engine, { dir, now: host.now, sleep: host.sleep });
+    expect(calls.armed).toEqual([{ dir, delayMs: 600_000 }, { dir, delayMs: RETRY_MS }]);
+  });
+
+  it("RED: a host that cannot arm it, or an arm that throws, leaves the run's result and the lock as they were", async () => {
+    const { dir, engine } = await rolled({}, 1);
+    const { armedAtMs } = readJson(dir, POST_ROLL_ARMED_FILE) as { armedAtMs: number };
+    let attempts = 0;
+    for (const arm of [async () => (attempts++, false), async () => { attempts++; throw new Error("systemd-run"); }]) {
+      const host = hostClock(armedAtMs + 11 * 60_000);
+      expect(await runFleetUpdate({ ...engine, armPostRollCheck: arm }, { dir, now: host.now, sleep: host.sleep }))
+        .toMatchObject({ outcome: "current", detail: "not_newer", exitCode: 0 });
+      expect(existsSync(join(dir, "update.lock"))).toBe(false);
+    }
+    expect(attempts).toBe(2);
+    expect(existsSync(join(dir, POST_ROLL_ARMED_FILE))).toBe(true);
+  });
+
+  it("NEGATIVE: a run inside the 10 minutes, a --check, and a run that finds the lock held arm nothing", async () => {
+    const { dir, engine, calls } = await rolled({}, 1);
+    const { armedAtMs } = readJson(dir, POST_ROLL_ARMED_FILE) as { armedAtMs: number };
+    await runFleetUpdate(engine, { dir, ...hostClock(armedAtMs + 5 * 60_000) });
+    await runFleetUpdate(engine, { dir, check: true, ...hostClock(armedAtMs + 11 * 60_000) });
+    holdLock(dir);
+    expect(await runFleetUpdate(engine, { dir, ...hostClock(armedAtMs + 11 * 60_000) })).toMatchObject({ outcome: "retained", detail: "update_running" });
+    expect(calls.armed).toEqual([{ dir, delayMs: 600_000 }]);
+  });
+
+  it("the check's own line is unchanged: it still says update_running and exits 0", async () => {
+    const { dir, engine } = await rolled();
+    holdLock(dir);
+    const ctx = makeCtx(tempHome());
+    expect(await main(["runner", "update", "--fleet", "--post-roll-check", "--dir", dir], ctx, { runner: { fleetEngine: engine } })).toBe(0);
+    expect(ctx.out).toEqual(["Post-roll check: update_running."]);
+  });
+
+  // Phase 2's RED test goes here (see Phase 2).
+
+  it("the re-arm is the same transient timer, 5 minutes out, replacing whatever was armed", async () => {
+    const calls: [string, string[]][] = [];
+    const run = (cmd: string, args: string[]) => (calls.push([cmd, args]), { status: 0, stdout: "", stderr: "" });
+    const engine = dockerFleetUpdateEngine({ env: { PATH: "/usr/bin:/bin", HOME: "/root" }, timer: { platform: "linux", uid: 0, command: ["/usr/bin/node", "/opt/catalyst/cli.js"], run } });
+    expect(await engine.armPostRollCheck("/srv/fleet", RETRY_MS)).toBe(true);
+    expect(calls[0]).toEqual(["systemctl", ["stop", "catalyst-fleet-post-roll.timer", "catalyst-fleet-post-roll.service"]]);
+    expect(calls[1]![1]).toContain("--on-active=300s");
+  });
+});
