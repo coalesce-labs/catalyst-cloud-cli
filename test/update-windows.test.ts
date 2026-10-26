@@ -2,12 +2,17 @@
 // the window before and after an instant in the machine's zone, across a day boundary and a clock
 // change, and the times and zones an owner may save.
 import { describe, expect, it } from "vitest";
-import { DEFAULT_WINDOW_TIMES, isTimeZone, normalizeWindowTimes, windowBounds } from "../src/update-windows";
+import { isTimeZone, normalizeWindowTimes, windowBounds } from "../src/update-windows";
 
 const at = (iso: string) => Date.parse(iso);
-const chicago = { times: [...DEFAULT_WINDOW_TIMES], timeZone: "America/Chicago" };
+const chicago = { times: ["03:00", "11:00", "16:00", "22:00"], timeZone: "America/Chicago" };
 
 describe("the window before and after now, in the machine's zone", () => {
+  it("NEGATIVE: times that are not 24-hour times are refused, never replaced by other times", () => {
+    expect(() => windowBounds(at("2026-10-23T14:00:00Z"), { times: ["25:00"], timeZone: "UTC" })).toThrow(/not 24-hour times/);
+    expect(() => windowBounds(at("2026-10-23T14:00:00Z"), { times: [], timeZone: "UTC" })).toThrow(/not 24-hour times/);
+  });
+
   it("POSITIVE CONTROL: a release seen at 09:00 in Chicago waits for 11:00; the last window was 03:00", () => {
     // 2026-10-23 is daylight time in Chicago, UTC-5.
     expect(windowBounds(at("2026-10-23T14:00:00Z"), chicago)).toEqual({

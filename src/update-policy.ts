@@ -47,7 +47,7 @@ export interface UpdatePolicy {
   version: 1;
   components: Partial<Record<UpdateComponent, ComponentPolicy>>;
   projects: ProjectPolicy[];
-  /** The owner's update windows; absent means the defaults (update-windows.ts). */
+  /** The owner's update windows; absent means none, so the next check applies (update-windows.ts). */
   windows?: UpdateWindows;
 }
 
@@ -220,7 +220,7 @@ export function setProjectSdkPolicy(home: string, path: string, sdk: ProjectPoli
   return saved ?? { ...project, sdk, source: "owner" };
 }
 
-/** Save the owner's update windows, or go back to the defaults with null. */
+/** Save the owner's update windows, or go back to none with null. */
 export function setWindowPolicy(home: string, windows: UpdateWindows | null): UpdatePolicy {
   return updateUpdatePolicy(home, (policy) => {
     if (windows === null) delete policy.windows;

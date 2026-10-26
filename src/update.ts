@@ -40,7 +40,6 @@ import {
   type UpdatePolicy,
 } from "./update-policy.js";
 import { applySdkUpdate, inspectSdkProject, type SdkApplyResult, type SdkExec, type SdkProject } from "./update-sdk.js";
-import { DEFAULT_WINDOW_TIMES } from "./update-windows.js";
 import {
   decideRelease,
   isRecord,
@@ -693,7 +692,7 @@ export function policyLines(policy: UpdatePolicy): string[] {
   for (const project of policy.projects)
     lines.push(`${cell(`SDK ${project.path}`, 19)}${cell(project.sdk === "auto" ? "on" : "off", 5)}(${project.source}${project.sdk === "notify" ? ", notify only" : ""})`);
   const windows = policy.windows;
-  lines.push(`Runner releases apply at ${(windows?.times ?? DEFAULT_WINDOW_TIMES).join(", ")} (${windows?.timeZone ?? "this machine's time zone"}; ${windows ? "owner" : "default"})`);
+  lines.push(windows ? `Runner releases apply at ${windows.times.join(", ")} (${windows.timeZone ?? "this machine's time zone"}; owner)` : "Runner releases apply at the next check, with no set times (default)");
   return lines;
 }
 

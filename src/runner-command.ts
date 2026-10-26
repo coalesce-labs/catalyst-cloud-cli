@@ -29,7 +29,7 @@ import { dockerFleetUpdateEngine, postRollLines, readPostRollResult, runFleetPos
 import { runUpdate, sharedReleaseRead, updateReportJson, updateReportLines, type UpdateOptions } from "./update.js";
 import { effectivePolicy, readUpdatePolicy, setComponentPolicy } from "./update-policy.js";
 import { resolveClaude } from "./update-plugin.js";
-import { defaultWindows, windowBounds } from "./update-windows.js";
+import { windowBounds } from "./update-windows.js";
 import { cmdRunnerLifecycle, RUNNER_LIFECYCLE_ACTIONS, type RunnerLifecycleDeps } from "./runner.js";
 
 // `catalyst runner update [--check] [--auto] [--dir <dir>] [--fleet]` and
@@ -196,16 +196,17 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     };
     // An owner's image hold stops this command's image work too, including the schedule's (CTC-6708).
     const hold = check ? null : imageHold(ctx);
-    // The schedule's run takes a newer release only in an update window; an owner's run applies at
-    // once (CTC-6709, update-windows.ts).
+    // The schedule's run takes a newer release at its next check, unless the owner saved update
+    // windows; then only in a window. An owner's own run applies at once (CTC-7465, update-windows.ts).
     if (hold !== null) {
       const retained = { outcome: "retained" as const, detail: hold, generation: readReleaseState(dir()).generation, exitCode: hold === "owner_setting" ? 0 : 1 };
       // Unreadable settings move nothing; a hold leaves the other components to the release check.
       return print(retained, hold === "owner_setting" ? await components(undefined) : null);
     }
+    const ownerWindows = auto && !check && !fleet ? readUpdatePolicy(ctx.home).windows : undefined;
     const result = fleet
       ? await runFleetUpdate(deps.fleetEngine ?? dockerFleetUpdateEngine({ env: ctx.env }), { dir: dir(), check })
-      : await runRunnerUpdate(engine, { dir: dir(), check, ...(auto && !check ? { window: windowBounds(ctx.now().getTime(), readUpdatePolicy(ctx.home).windows ?? defaultWindows()) } : {}) });
+      : await runRunnerUpdate(engine, { dir: dir(), check, ...(ownerWindows ? { window: windowBounds(ctx.now().getTime(), ownerWindows) } : {}) });
     // `runner update --check` also lists every installed component against the approved release, as
     // `catalyst update --check` does. The image fields stay where scripts already read them.
     if (check && !fleet && !auto) {
