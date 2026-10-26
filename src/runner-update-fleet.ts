@@ -49,6 +49,8 @@ import {
 // log since the roll began and, when the release was granted no work and the fleet's acquires got no
 // answer, restores the saved previous `compose.json`. `runner update --fleet --post-roll-check` is
 // that check; only the armed timer runs it.
+// A check that is due while an update holds the lock judges nothing; that update arms it again
+// for 5 minutes after it ends (CTC-7570).
 
 export const FLEET_COMPOSE_FILE = "compose.json";
 export const PREVIOUS_COMPOSE_FILE = "compose.release-previous.json";
@@ -70,6 +72,8 @@ export const POST_ROLL_ARMED_FILE = "post-roll-armed.json";
 /** The check's last verdict, beside `release-state.json`. */
 export const POST_ROLL_RESULT_FILE = "post-roll-result.json";
 export const POST_ROLL_DELAY_MS = 10 * 60_000;
+/** How long after an update run lets go of the lock a check it kept from judging runs again (CTC-7570). */
+export const POST_ROLL_RETRY_DELAY_MS = 5 * 60_000;
 const POST_ROLL_UNIT = "catalyst-fleet-post-roll";
 /** No-response acquire retries, with no grants, that count a release as failing. */
 const POST_ROLL_MAX_NO_RESPONSE = 3;
@@ -346,6 +350,22 @@ async function armPostRollCheck(engine: FleetUpdateEngine, dir: string, armed: P
   }
 }
 
+/** The armed check runs once, from a one-shot timer. When it was due while an update held the lock, or
+ *  Docker could not be read, it judged nothing and left the armed file; a reboot loses the timer the same
+ *  way (CTC-7570). The update holding the lock arms it again for a few minutes later, before it lets go:
+ *  while the lock is held no check is part-way through a judgment, so the arm's stop of the check's unit
+ *  interrupts nothing. The check cannot arm itself: that stop would end its own unit. A check this run
+ *  armed is not due yet and is left alone. */
+async function rearmOverdueCheck(engine: FleetUpdateEngine, dir: string, now: () => number, signal?: AbortSignal): Promise<void> {
+  const armed = readPostRollArmed(dir);
+  if (armed === null || now() < armed.armedAtMs + POST_ROLL_DELAY_MS) return;
+  try {
+    await engine.armPostRollCheck(dir, POST_ROLL_RETRY_DELAY_MS, signal);
+  } catch {
+    // The next run tries again.
+  }
+}
+
 export async function runFleetUpdate(engine: FleetUpdateEngine, options: FleetUpdateOptions): Promise<UpdateResult> {
   const { dir } = options;
   const now = options.now ?? Date.now;
@@ -362,7 +382,10 @@ export async function runFleetUpdate(engine: FleetUpdateEngine, options: FleetUp
     }
     return result;
   } finally {
-    if (lock !== null) releaseLock(dir, lock);
+    if (lock !== null) {
+      await rearmOverdueCheck(engine, dir, now, options.signal);
+      releaseLock(dir, lock);
+    }
   }
 }
 
@@ -554,7 +577,7 @@ export interface PostRollCheckOptions {
 export interface PostRollCheckOutcome {
   /** `PASS`, `ROLLED_BACK` and the other verdicts, or why the check could not judge. */
   detail: string;
-  /** The recorded verdict; null when the check judged nothing and stays armed. */
+  /** The recorded verdict; null when the check judged nothing; the armed file stays, and the next update run arms the check again. */
   result: PostRollResult | null;
   exitCode: number;
 }
@@ -619,6 +642,11 @@ export async function runFleetPostRollCheck(engine: FleetUpdateEngine, options: 
       return refuse("no_previous_compose");
     }
     if (previous === null) return refuse("no_previous_compose");
+    // An update that started from this release and did not finish saved this release's own file as the
+    // previous one (CTC-7570). Restoring it would move nothing and record a rollback that never happened.
+    const current = fleetImages(compose);
+    if (current !== null && previous.runner === current.runner && previous.supervisor === current.supervisor)
+      return refuse("previous_compose_is_this_release");
     // The apply removed the images it replaced, so the previous ones may need pulling again.
     const unprepared = await engine.prepare([previous.runner, previous.supervisor], signal);
     if (unprepared !== null) return finish("ROLLBACK_FAILED", { reason: unprepared }, 1);
