@@ -790,7 +790,26 @@ describe("fleet update: a post-roll check an update run kept from judging is arm
     expect(ctx.out).toEqual(["Post-roll check: update_running."]);
   });
 
-  // Phase 2's RED test goes here (see Phase 2).
+  it("RED: a late judgment after a run that did not finish refuses to roll back onto the release's own file", async () => {
+    const { dir, engine, calls, armedAtMs, host, run, letGo, setLogs } = await scheduledRunHoldingTheLock({ logsFor: newerFails });
+    host.at(armedAtMs + 600_000);
+    await runFleetPostRollCheck(engine, { dir, now: host.now });
+    letGo();
+    await run;
+    const compose = readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8");
+    expect(readFileSync(join(dir, PREVIOUS_COMPOSE_FILE), "utf8")).toBe(compose);
+    const recreates = calls.recreate;
+    setLogs(lines(noResponseLine, 3));
+    host.at(host.now() + RETRY_MS);
+    expect(await runFleetPostRollCheck(engine, { dir, now: host.now })).toMatchObject({ detail: "ROLLBACK_REFUSED", exitCode: 1 });
+    expect(readJson(dir, POST_ROLL_RESULT_FILE)).toMatchObject({ verdict: "ROLLBACK_REFUSED", generation: 2, reason: "previous_compose_is_this_release" });
+    expect(calls.recreate).toBe(recreates);
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(compose);
+    expect(existsSync(join(dir, POST_ROLL_ARMED_FILE))).toBe(false);
+    const ctx = makeCtx(tempHome());
+    await main(["runner", "update", "--fleet", "--check", "--dir", dir], ctx, { runner: { fleetEngine: engine } });
+    expect(ctx.out.join("\n")).toContain("did not roll back (previous_compose_is_this_release; generation 2;");
+  });
 
   it("the re-arm is the same transient timer, 5 minutes out, replacing whatever was armed", async () => {
     const calls: [string, string[]][] = [];

@@ -580,6 +580,11 @@ export async function runFleetPostRollCheck(engine: FleetUpdateEngine, options: 
       return refuse("no_previous_compose");
     }
     if (previous === null) return refuse("no_previous_compose");
+    // An update that started from this release and did not finish saved this release's own file as the
+    // previous one (CTC-7570). Restoring it would move nothing and record a rollback that never happened.
+    const current = fleetImages(compose);
+    if (current !== null && previous.runner === current.runner && previous.supervisor === current.supervisor)
+      return refuse("previous_compose_is_this_release");
     // The apply removed the images it replaced, so the previous ones may need pulling again.
     const unprepared = await engine.prepare([previous.runner, previous.supervisor], signal);
     if (unprepared !== null) return finish("ROLLBACK_FAILED", { reason: unprepared }, 1);
