@@ -425,12 +425,13 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
     // An earlier run that ended back on the previous release, its rollback unqualified, left its scopes
     // saved. Only when compose.json and the running supervisor are that previous release, up long enough
     // to have qualified every scope it serves, does its log trim the saved set: a saved scope it no
-    // longer qualifies stopped being delegated. Anything less keeps the saved set whole.
+    // longer qualifies stopped being delegated. A `host_not_ready` for a saved scope is a scope still
+    // started, not one dropped. Anything less keeps the saved set whole.
     const previous = savedImages(join(dir, PREVIOUS_COMPOSE_FILE));
     const onPrevious = previous !== null && current.runner === previous.runner && current.supervisor === previous.supervisor && runs(previous);
     if (live && onPrevious && now() - Date.parse(live.startedAt) >= (options.qualifyDeadlineMs ?? QUALIFY_DEADLINE_MS)) {
       const recent = await engine.logs(live.id, new Date(now() - QUALIFIED_LOOKBACK_MS).toISOString(), signal);
-      const serving = recent === null ? new Set<string>() : qualifiedScopes(recent);
+      const serving = recent === null || notReadyScope(recent, scopes) !== null ? new Set<string>() : qualifiedScopes(recent);
       const kept = [...scopes].filter((scope) => serving.has(scope));
       if (kept.length > 0 && kept.length < scopes.size) {
         dropped = [...scopes].filter((scope) => !serving.has(scope));

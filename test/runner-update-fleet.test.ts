@@ -441,6 +441,8 @@ describe("fleet update: a scope whose delegation ends during the update (CTC-756
         return { ...f.engine, logs: async (...args) => (reads++ === 0 ? null : f.engine.logs(...args)) };
       }],
       ["it qualifies none of the saved scopes", (f) => (f.setLogs(""), f.engine)],
+      ["it logs host_not_ready for the saved scope it does not qualify",
+        (f) => (f.setLogs(`${servingScopes(STILL_DELEGATED)}\n${notReadyLine("tenant-0", "ZCTC163")}`), f.engine)],
     ])("NEGATIVE: %s, so the saved scopes stay the requirement", async (_label, alter) => {
       const fleet = afterFailedRollback();
       await runFleetUpdate(alter(fleet), { dir: fleet.dir, ...clock() });
