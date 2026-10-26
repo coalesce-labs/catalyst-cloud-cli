@@ -31,12 +31,20 @@ export interface AutoUpdateDeps {
   run?: SchedulerRun;
 }
 
+/** What an installed schedule runs: the directory it updates, and whether that directory is a
+ *  supervisor fleet's (compose.json) rather than a single runner's (CTC-6384). */
+export interface ScheduleTarget {
+  fleet: boolean;
+  dir: string;
+}
+
 export type AutoUpdateStatus =
   /** `linger` is set on Linux only: whether the schedule keeps running after this person logs out.
-   *  `lingerTurnedOn` says this call turned it on, so the person can be told how to undo it. */
-  | { state: "on"; detail: string; path: string; linger?: boolean; lingerTurnedOn?: boolean }
+   *  `lingerTurnedOn` says this call turned it on, so the person can be told how to undo it.
+   *  `fleet` and `dir` are set when the installed schedule file could be read back. */
+  | ({ state: "on"; detail: string; path: string; linger?: boolean; lingerTurnedOn?: boolean } & Partial<ScheduleTarget>)
   /** `linger` on a Linux `off`: lingering is left as it is, since it may have been on before setup. */
-  | { state: "off"; detail: string; linger?: boolean }
+  | ({ state: "off"; detail: string; linger?: boolean } & Partial<ScheduleTarget>)
   | { state: "unsupported"; detail: string };
 
 /** `su` and many ssh sessions leave XDG_RUNTIME_DIR unset, so `systemctl --user` cannot find a
@@ -57,8 +65,18 @@ export const defaultRun: SchedulerRun = (cmd, args) => {
 
 export const xml = (value: string) =>
   value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+export const unxml = (value: string) =>
+  value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
 /** systemd's own quoting for one ExecStart/Environment word. */
 const unitWord = (value: string) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%")}"`;
+/** systemd's quoted words, as systemdUnits writes them. */
+export function unitWords(line: string): string[] {
+  return [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => (m[1] ?? "").replace(/\\(.)/g, "$1").replace(/%%/g, "%"));
+}
+
+/** The command the schedule runs. CTC-6384: a supervisor fleet's schedule adds --fleet, so each run
+ *  updates the fleet's compose.json in `dir` instead of a single runner's .env. */
+const updateArgs = (dir: string, fleet: boolean) => ["runner", "update", "--auto", ...(fleet ? ["--fleet"] : []), "--dir", dir];
 
 export function launchAgentPath(home: string): string {
   return join(home, "Library", "LaunchAgents", `${AUTO_UPDATE_LABEL}.plist`);
@@ -68,8 +86,8 @@ export function systemdUnitPaths(home: string): { service: string; timer: string
   return { service: join(base, `${AUTO_UPDATE_UNIT}.service`), timer: join(base, `${AUTO_UPDATE_UNIT}.timer`) };
 }
 
-export function launchAgentPlist(deps: Pick<AutoUpdateDeps, "cli" | "node" | "path" | "home" | "claude">, dir: string): string {
-  const args = [...(deps.node ? [deps.node] : []), deps.cli, "runner", "update", "--auto", "--dir", dir];
+export function launchAgentPlist(deps: Pick<AutoUpdateDeps, "cli" | "node" | "path" | "home" | "claude">, dir: string, fleet = false): string {
+  const args = [...(deps.node ? [deps.node] : []), deps.cli, ...updateArgs(dir, fleet)];
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -89,7 +107,7 @@ export function launchAgentPlist(deps: Pick<AutoUpdateDeps, "cli" | "node" | "pa
   ].join("\n");
 }
 
-export function systemdUnits(deps: Pick<AutoUpdateDeps, "cli" | "path" | "claude">, dir: string): { service: string; timer: string } {
+export function systemdUnits(deps: Pick<AutoUpdateDeps, "cli" | "path" | "claude">, dir: string, fleet = false): { service: string; timer: string } {
   return {
     service: [
       "[Unit]",
@@ -99,7 +117,7 @@ export function systemdUnits(deps: Pick<AutoUpdateDeps, "cli" | "path" | "claude
       "Type=oneshot",
       `Environment=${unitWord(`PATH=${deps.path}`)}`,
       ...(deps.claude ? [`Environment=${unitWord(`${CLAUDE_PATH_ENV}=${deps.claude}`)}`] : []),
-      `ExecStart=${[deps.cli, "runner", "update", "--auto", "--dir", dir].map(unitWord).join(" ")}`,
+      `ExecStart=${[deps.cli, ...updateArgs(dir, fleet)].map(unitWord).join(" ")}`,
       "",
     ].join("\n"),
     timer: [
@@ -145,22 +163,46 @@ export function writeFileAtomic(path: string, text: string): void {
   renameSync(temp, path);
 }
 
+/** The installed schedule's own command, read back from the file this CLI wrote. Null when the file
+ *  is missing or names no update directory. */
+function installedTarget(platform: NodeJS.Platform, home: string): ScheduleTarget | null {
+  let args: string[];
+  try {
+    if (platform === "darwin") {
+      const array = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(readFileSync(launchAgentPath(home), "utf8"))?.[1];
+      args = array === undefined ? [] : [...array.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((m) => unxml(m[1] ?? ""));
+    } else {
+      const exec = readFileSync(systemdUnitPaths(home).service, "utf8").split("\n").find((l) => l.startsWith("ExecStart="));
+      args = exec === undefined ? [] : unitWords(exec);
+    }
+  } catch {
+    return null;
+  }
+  const at = args.indexOf("--dir");
+  const dir = at === -1 ? undefined : args[at + 1];
+  if (!args.includes("update") || dir === undefined || !dir.startsWith("/")) return null;
+  return { fleet: args.includes("--fleet"), dir };
+}
+
 export function autoUpdateStatus(deps: AutoUpdateDeps): AutoUpdateStatus {
   const platform = deps.platform ?? process.platform;
   const run = deps.run ?? defaultRun;
+  const target = () => installedTarget(platform, deps.home) ?? {};
   if (platform === "darwin") {
     const path = launchAgentPath(deps.home);
     if (!existsSync(path)) return { state: "off", detail: "no_launch_agent" };
     const loaded = run("launchctl", ["print", `gui/${deps.uid ?? process.getuid?.() ?? 0}/${AUTO_UPDATE_LABEL}`]).status === 0;
-    return loaded ? { state: "on", detail: "launch_agent_loaded", path } : { state: "off", detail: "launch_agent_not_loaded" };
+    return loaded
+      ? { state: "on", detail: "launch_agent_loaded", path, ...target() }
+      : { state: "off", detail: "launch_agent_not_loaded", ...target() };
   }
   if (platform === "linux") {
     const { timer } = systemdUnitPaths(deps.home);
     if (!existsSync(timer)) return { state: "off", detail: "no_timer" };
     const enabled = run("systemctl", ["--user", "is-enabled", `${AUTO_UPDATE_UNIT}.timer`]);
-    if (enabled.status !== 0) return { state: "off", detail: "timer_not_enabled" };
+    if (enabled.status !== 0) return { state: "off", detail: "timer_not_enabled", ...target() };
     const linger = lingering(run, deps.uid ?? process.getuid?.() ?? 0);
-    return { state: "on", detail: linger ? "timer_enabled" : "timer_enabled_without_linger", path: timer, linger };
+    return { state: "on", detail: linger ? "timer_enabled" : "timer_enabled_without_linger", path: timer, linger, ...target() };
   }
   return { state: "unsupported", detail: `platform_${platform}` };
 }
@@ -181,30 +223,32 @@ export function custodyNode(dir: string): string | null {
   }
 }
 
-/** Install and start the schedule. Rewrites the files every time, so a moved CLI or PATH is picked up. */
-export function enableAutoUpdate(deps: AutoUpdateDeps, dir: string): AutoUpdateStatus {
+/** Install and start the schedule. Rewrites the files every time, so a moved CLI or PATH is picked up.
+ *  `fleet` schedules a supervisor fleet's update of the compose.json in `dir` (CTC-6384). */
+export function enableAutoUpdate(deps: AutoUpdateDeps, dir: string, { fleet = false }: { fleet?: boolean } = {}): AutoUpdateStatus {
   const platform = deps.platform ?? process.platform;
   const run = deps.run ?? defaultRun;
+  const target: ScheduleTarget = { fleet, dir };
   if (platform === "darwin") {
     const uid = deps.uid ?? process.getuid?.() ?? 0;
     const path = launchAgentPath(deps.home);
-    const text = launchAgentPlist({ ...deps, node: deps.node === undefined ? custodyNode(dir) : deps.node }, dir);
+    const text = launchAgentPlist({ ...deps, node: deps.node === undefined ? custodyNode(dir) : deps.node }, dir, fleet);
     const unchanged = existsSync(path) && readFileSync(path, "utf8") === text;
     const domain = `gui/${uid}`;
     const loaded = run("launchctl", ["print", `${domain}/${AUTO_UPDATE_LABEL}`]).status === 0;
-    if (unchanged && loaded) return { state: "on", detail: "launch_agent_loaded", path };
+    if (unchanged && loaded) return { state: "on", detail: "launch_agent_loaded", path, ...target };
     if (loaded) run("launchctl", ["bootout", `${domain}/${AUTO_UPDATE_LABEL}`]);
     writeFileAtomic(path, text);
     const boot = run("launchctl", ["bootstrap", domain, path]);
     return boot.status === 0
-      ? { state: "on", detail: "launch_agent_loaded", path }
+      ? { state: "on", detail: "launch_agent_loaded", path, ...target }
       : { state: "off", detail: `launchctl_bootstrap_failed:${boot.stderr.trim().slice(0, 160)}` };
   }
   if (platform === "linux") {
     if (run("systemctl", ["--user", "show-environment"]).status !== 0)
       return { state: "unsupported", detail: "no_systemd_user_manager" };
     const paths = systemdUnitPaths(deps.home);
-    const units = systemdUnits(deps, dir);
+    const units = systemdUnits(deps, dir, fleet);
     writeFileAtomic(paths.service, units.service);
     writeFileAtomic(paths.timer, units.timer);
     run("systemctl", ["--user", "daemon-reload"]);
@@ -213,7 +257,7 @@ export function enableAutoUpdate(deps: AutoUpdateDeps, dir: string): AutoUpdateS
       return { state: "off", detail: `systemctl_enable_failed:${enabled.stderr.trim().slice(0, 160)}` };
     const { linger, turnedOn } = ensureLingering(run, deps.uid ?? process.getuid?.() ?? 0);
     return { state: "on", detail: linger ? "timer_enabled" : "timer_enabled_without_linger", path: paths.timer, linger,
-      ...(turnedOn ? { lingerTurnedOn: true } : {}) };
+      ...(turnedOn ? { lingerTurnedOn: true } : {}), ...target };
   }
   return { state: "unsupported", detail: `platform_${platform}` };
 }
