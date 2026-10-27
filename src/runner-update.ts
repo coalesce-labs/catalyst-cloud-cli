@@ -124,9 +124,12 @@ export function parseDrainAnswer(read: DesiredReleaseRead): { status: DrainStatu
   return { status: { revision: body.revision as number, liveGenerations: body.liveGenerations as number, drain: drain as DrainStatus["drain"] } };
 }
 
+/** The parsed answer, with the HTTP status when the cloud answered at all. */
 async function drainAnswer(engine: RunnerUpdateEngine, dir: string, request: DrainRequest | null, signal?: AbortSignal) {
-  try { return parseDrainAnswer(await engine.updateDrain(dir, request, signal)); }
-  catch { return { refused: "unreachable" } as const; }
+  try {
+    const read = await engine.updateDrain(dir, request, signal);
+    return { ...parseDrainAnswer(read), http: read.kind === "answered" ? read.status : null };
+  } catch { return { refused: "unreachable", http: null } as const; }
 }
 
 /** The busy-release clock begins at approval or the first busy look, whichever came first. */
@@ -399,20 +402,20 @@ async function releaseDrain(engine: RunnerUpdateEngine, dir: string, state: Rele
 export async function releaseUpdateDrain(
   engine: RunnerUpdateEngine, dir: string, { cloud, sleep = sleepDefault }: { cloud: boolean; sleep?: (ms: number) => Promise<void> },
 ): Promise<"released" | "none" | "pending" | "failed"> {
-  if (!cloud && readReleaseState(dir).drain === null) {
-    const state = readReleaseState(dir);
-    if (state.deferral !== null) writeReleaseState(dir, { ...state, deferral: null });
-    return "none";
-  }
   let lock: string | null = null;
   for (let elapsed = 0; elapsed <= (cloud ? 10_000 : 0); elapsed += DRAIN_POLL_MS) {
     lock = takeLock(dir, Date.now());
     if (lock !== null) break;
     if (elapsed < 10_000 && cloud) await sleep(DRAIN_POLL_MS);
   }
+  // A running update owns release-state.json and ends its own wait on the hold: never write over it.
   if (lock === null) return "pending";
   try {
     const state = readReleaseState(dir);
+    if (!cloud && state.drain === null) {
+      if (state.deferral !== null) writeReleaseState(dir, { ...state, deferral: null });
+      return "none";
+    }
     const looked = parseDrainAnswer(await engine.updateDrain(dir, null));
     if ("refused" in looked) return "failed";
     if (looked.status.drain === null) {
@@ -577,7 +580,8 @@ async function waitForIdle(
   engine: RunnerUpdateEngine, options: RunnerUpdateOptions, now: () => number, hostId: string, result: UpdateResult,
 ): Promise<"idle" | "aborted" | "held" | "gone"> {
   const sleep = options.sleep ?? sleepDefault;
-  const passAt = now() + (result.detail.includes(",read:") ? DRAIN_READ_RETRY_MS : DRAIN_PASS_EVERY_MS);
+  const retry = result.detail.includes(",read:");
+  const passAt = now() + (retry ? DRAIN_READ_RETRY_MS : DRAIN_PASS_EVERY_MS);
   for (;;) {
     if (options.signal?.aborted) return "aborted";
     if (options.held?.() === "owner_setting") return "held";
@@ -592,7 +596,8 @@ async function waitForIdle(
           writeReleaseState(options.dir, { ...state, drain: null, deferral: state.deferral === null ? null : { ...state.deferral, sinceMs: now(), offeredSinceMs: now() } });
           return "gone";
         }
-        if (looked.status.liveGenerations === 0) return "idle";
+        // After a failed read, an idle machine still waits for the retry time before reading again.
+        if (looked.status.liveGenerations === 0 && !retry) return "idle";
       }
     }
     await sleep(DRAIN_POLL_MS);
@@ -642,7 +647,10 @@ async function drainedLook({ engine, options, state, release, target, hostId, no
           drain = conflict.status.drain;
           revision = conflict.status.revision;
         } else {
-          if (!["unreachable", "no_credential", "response_invalid"].includes(requested.refused))
+          // Only a 4xx answer shows the cloud did not record the request. No answer, any 5xx (such as
+          // 503 update_drain_unavailable) or a malformed 200 may follow a commit: keep the pending id
+          // so a later check adopts or releases it.
+          if (requested.http !== null && requested.http >= 400 && requested.http < 500)
             writeReleaseState(dir, { ...readReleaseState(dir), drain: null });
           return done("drain_unavailable", `${detail},drain:${requested.refused}`, tagged);
         }
@@ -701,7 +709,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   // settled none yet (its first run on this CLI) takes it now, and drift on the applied generation
   // is put right at once, as before.
   const { window } = options;
-  if (window && state.drain === null && !options.check && decision.action === "update" && state.windowSettledMs !== null && window.lastOpenedMs <= state.windowSettledMs)
+  if (window && state.drain?.acknowledgedAtMs == null && !options.check && decision.action === "update" && state.windowSettledMs !== null && window.lastOpenedMs <= state.windowSettledMs)
     return done("waiting_window", `next_window:${new Date(window.nextOpensMs).toISOString()}`, tagged);
   const target = Object.fromEntries(RELEASE_COMPONENTS.map((c) => [c, release.images[c].reference])) as Images;
   const envText = readFileSync(envPath, "utf8");

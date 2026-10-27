@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { DRAIN_AFTER_MS, DRAIN_SOFT_LIMIT_MS, readReleaseState, runRunnerUpdate, writeReleaseState, type UpdateResult } from "../src/runner-update";
+import { DRAIN_AFTER_MS, DRAIN_SOFT_LIMIT_MS, readReleaseState, releaseLock, releaseUpdateDrain, runRunnerUpdate, takeLock, writeReleaseState,
+  type UpdateResult } from "../src/runner-update";
 import { answered, fakeDrainCloud, fakeEngine, imagesIn, install, OLD, ORIGINAL_ENV, release, TARGET } from "./runner-update-fixtures";
 
 const A = 1_800_000_000_000;
@@ -193,6 +194,46 @@ describe("CTC-7749: a busy machine drains and takes an approved release", () => 
     expect(readReleaseState(dir).drain).toBeNull();
   });
 
+  it.each([
+    ["update_drain_unavailable", { status: 503, body: { ok: false, refusal: "update_drain_unavailable" } }],
+    ["http_502", { status: 502, body: null }],
+    ["a 500 with another refusal", { status: 500, body: { ok: false, refusal: "internal_error" } }],
+  ] as const)("a committed request answered %s keeps its pending id until an idle check releases the drain", async (_label, lost) => {
+    const dir = machine();
+    const time = clock(A + DRAIN_AFTER_MS);
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
+    const drain = async (request: Parameters<typeof cloud.call>[0]) => {
+      const answer = await cloud.call(request);
+      return request?.action === "request" ? { kind: "answered" as const, ...lost, hostId: "host_abc" } : answer;
+    };
+    const busy = fakeEngine(dir, { read: offered(), phases: () => 1, drain });
+    expect(await runRunnerUpdate(busy.engine, { dir, drain: true, now: time.now, sleep: time.sleep }))
+      .toMatchObject({ outcome: "drain_unavailable" });
+    expect(cloud.drain).not.toBeNull();
+    expect(readReleaseState(dir).drain).toMatchObject({ requestId: cloud.drain?.requestId, acknowledgedAtMs: null });
+    const idle = fakeEngine(dir, { read: offered(), phases: () => 0, drain });
+    expect(await runRunnerUpdate(idle.engine, { dir, drain: true, now: time.now, sleep: time.sleep }))
+      .toMatchObject({ outcome: "updated", generation: 106 });
+    expect(cloud.drain).toBeNull();
+    expect(readReleaseState(dir).drain).toBeNull();
+  });
+
+  it("an owner hold never rewrites release-state.json while another update holds the lock", async () => {
+    const dir = machine();
+    const deferral = { sinceMs: A, offered: 106, offeredSinceMs: A };
+    writeReleaseState(dir, { ...readReleaseState(dir), deferral });
+    const fake = fakeEngine(dir, { read: offered() });
+    const token = takeLock(dir, A);
+    expect(token).not.toBeNull();
+    try {
+      expect(await releaseUpdateDrain(fake.engine, dir, { cloud: false })).toBe("pending");
+      expect(readReleaseState(dir).deferral).toEqual(deferral);
+    } finally { releaseLock(dir, token!); }
+    expect(await releaseUpdateDrain(fake.engine, dir, { cloud: false })).toBe("none");
+    expect(readReleaseState(dir).deferral).toBeNull();
+    expect(fake.calls).toEqual([]);
+  });
+
   it("an active cloud drain is adopted without another request", async () => {
     const dir = machine();
     const time = clock(A + DRAIN_AFTER_MS);
@@ -299,6 +340,24 @@ describe("CTC-7749: a busy machine drains and takes an approved release", () => 
     expect(fake.calls).toContain("stop");
   });
 
+  it("a pending request the cloud never recorded still waits for the owner's update window", async () => {
+    const dir = machine();
+    const time = clock(A + DRAIN_AFTER_MS);
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now,
+      refuse: (request) => request?.action === "request" ? { kind: "answered", status: 502, body: null, hostId: "host_abc" } : null });
+    const busy = fakeEngine(dir, { read: offered(), phases: () => 1, drain: cloud.call });
+    expect(await runRunnerUpdate(busy.engine, { dir, drain: true, now: time.now, sleep: time.sleep }))
+      .toMatchObject({ outcome: "drain_unavailable" });
+    expect(cloud.drain).toBeNull();
+    expect(readReleaseState(dir).drain).toMatchObject({ acknowledgedAtMs: null });
+    const window = { lastOpenedMs: A + DRAIN_AFTER_MS - 3_600_000, nextOpensMs: A + DRAIN_AFTER_MS + 3_600_000 };
+    writeReleaseState(dir, { ...readReleaseState(dir), windowSettledMs: window.lastOpenedMs });
+    const idle = fakeEngine(dir, { read: offered(), phases: () => 0, drain: cloud.call });
+    expect(await runRunnerUpdate(idle.engine, { dir, drain: true, now: time.now, sleep: time.sleep, window }))
+      .toMatchObject({ outcome: "waiting_window" });
+    expect(idle.calls).not.toContain("stop");
+  });
+
   it("a transient desired-release failure keeps the drain and waits a minute before retry", async () => {
     const dir = machine();
     const time = clock(A + DRAIN_AFTER_MS);
@@ -317,6 +376,27 @@ describe("CTC-7749: a busy machine drains and takes an approved release", () => 
     expect(passTimes).toHaveLength(2);
     expect(passTimes[1]! - passTimes[0]!).toBeGreaterThanOrEqual(60_000);
     expect(readReleaseState(dir).drain).not.toBeNull();
+  });
+
+  it("an idle drained machine whose release read fails still waits a minute between passes", async () => {
+    const dir = machine();
+    const time = clock(A + DRAIN_AFTER_MS);
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
+    const abort = new AbortController();
+    await runRunnerUpdate(fakeEngine(dir, { read: offered(), phases: () => 1, drain: cloud.call }).engine,
+      { dir, drain: true, now: time.now, signal: abort.signal, sleep: async () => abort.abort() });
+    const recovers = time.now() + 150_000;
+    const unavailable = { kind: "answered", status: 503, body: { ok: false, refusal: "release_unavailable" }, hostId: "host_abc" } as const;
+    const fake = fakeEngine(dir, { read: () => (time.now() < recovers ? unavailable : offered()), phases: () => 0, drain: cloud.call });
+    const passTimes: number[] = [];
+    const guard = new AbortController();
+    const result = await runRunnerUpdate(fake.engine, { dir, drain: true, now: time.now, sleep: time.sleep, signal: guard.signal,
+      onPass: () => { passTimes.push(time.now()); if (passTimes.length >= 10) guard.abort(); } });
+    expect(result).toMatchObject({ outcome: "updated", generation: 106 });
+    expect(passTimes.length).toBeGreaterThan(1);
+    for (let pass = 1; pass < passTimes.length; pass++)
+      expect(passTimes[pass]! - passTimes[pass - 1]!).toBeGreaterThanOrEqual(60_000);
+    expect(cloud.drain).toBeNull();
   });
 
   it("an owner hold during the wait releases the drain without stopping the supervisor", async () => {
