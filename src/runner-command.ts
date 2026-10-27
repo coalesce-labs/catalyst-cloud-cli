@@ -29,7 +29,15 @@ import {
   type RunnerUpdateEngine,
   type UpdateResult,
 } from "./runner-update.js";
-import { dockerFleetUpdateEngine, postRollLines, readPostRollResult, runFleetPostRollCheck, runFleetUpdate, type FleetUpdateEngine } from "./runner-update-fleet.js";
+import {
+  dockerFleetUpdateEngine,
+  postRollLines,
+  readPostRollResult,
+  runFleetPostRollCheck,
+  runFleetUpdate,
+  type FleetUpdateEngine,
+  type FleetUpdateOptions,
+} from "./runner-update-fleet.js";
 import { runUpdate, sharedReleaseRead, updateReportJson, updateReportLines, type UpdateOptions } from "./update.js";
 import { effectivePolicy, readUpdatePolicy, setComponentPolicy } from "./update-policy.js";
 import { resolveClaude } from "./update-plugin.js";
@@ -45,6 +53,8 @@ import { cmdRunnerLifecycle, RUNNER_LIFECYCLE_ACTIONS, type RunnerLifecycleDeps 
 export interface RunnerCommandDeps extends RunnerLifecycleDeps {
   engine?: RunnerUpdateEngine;
   fleetEngine?: FleetUpdateEngine;
+  /** The fleet update's clock and wait between polls; tests pass a simulated one. */
+  fleetClock?: Pick<FleetUpdateOptions, "now" | "sleep">;
   scheduler?: Partial<AutoUpdateDeps>;
   /** The scheduled run's component movers; tests pass fakes. */
   components?: Pick<UpdateOptions, "cliApply" | "replicaRestart" | "packApply" | "pluginApply" | "sdkExec">;
@@ -224,8 +234,13 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
       return print(retained, hold === "owner_setting" ? await components(undefined) : null);
     }
     const ownerWindows = auto && !check && !fleet ? readUpdatePolicy(ctx.home).windows : undefined;
+    // A fleet supervisor that misses its qualification deadline names each scope it had not qualified,
+    // and why, on stderr before the restore, so stdout keeps its one line or JSON object (CTC-8163).
     const result = fleet
-      ? await runFleetUpdate(deps.fleetEngine ?? dockerFleetUpdateEngine({ env: ctx.env }), { dir: dir(), check })
+      ? await runFleetUpdate(deps.fleetEngine ?? dockerFleetUpdateEngine({ env: ctx.env }), {
+        dir: dir(), check, ...deps.fleetClock,
+        onQualificationPending: (line) => ctx.stderr(`catalyst: ${line}`),
+      })
       : await runRunnerUpdate(engine, {
         dir: dir(), check,
         ...(ownerWindows ? { window: windowBounds(ctx.now().getTime(), ownerWindows) } : {}),

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { main } from "../src/cli";
 import type { SchedulerRun } from "../src/runner-auto-update";
 import type { RunnerUpdateEngine } from "../src/runner-update";
+import type { FleetUpdateEngine } from "../src/runner-update-fleet";
 import { effectivePolicy, readUpdatePolicy, setComponentPolicy } from "../src/update-policy";
 import { makeCtx, tempHome } from "./helpers";
 import { answered, countingEngine, hostRelease, ref, runnerInstall } from "./update-fixtures";
@@ -479,5 +480,78 @@ describe("catalyst runner update under another node than its custody's", () => {
     const custody = { platform: "darwin" as const, execPath: "/home/node/bin/node", argv: ["/x"], node: () => "/brew/node/bin/node", run: r.run };
     expect(await main(["runner", "update", "--check", "--dir", dir], ctx, { runner: { engine: engine(503), custody } })).toBe(0);
     expect(r.calls).toEqual([]);
+  });
+});
+
+// CTC-8163: a fleet supervisor that misses its qualification deadline names each saved scope it had not
+// qualified, and the gate condition failing, on stderr before the restore. stdout keeps the schedule's
+// one line, or the one JSON object.
+describe("catalyst runner update --fleet: a qualification deadline is explained on stderr", () => {
+  const OLD_IMAGES = { runner: ref("runner", "8"), supervisor: ref("supervisor", "9") };
+  const NEW_IMAGES = { runner: ref("runner", "1"), supervisor: ref("supervisor", "2") };
+  const scopeLine = (event: string, team: string, fields: Record<string, unknown> = {}) => JSON.stringify({ event, tenant: "tenant-0", team, ...fields });
+  const SERVING = [scopeLine("supervisor_scope_qualified", "CTC"), scopeLine("supervisor_scope_qualified", "WID")].join("\n");
+  const CTC_NOT_READOPTED = [
+    scopeLine("supervisor_scope_qualified", "WID"),
+    scopeLine("supervisor_scope_qualification_state", "CTC", { resourcesReady: true, scopeEligible: true, readyUntilValid: true, sessionsReadopted: false }),
+  ].join("\n");
+  const PENDING = "catalyst: fleet qualification pending: roll=candidate scope=tenant-0/CTC failed=sessions_readopted";
+
+  /** A fleet on OLD_IMAGES offered NEW_IMAGES, whose supervisor logs `candidateLog`; the previous one serves both scopes. */
+  function fleet(candidateLog: string) {
+    const dir = mkdtempSync(join(tmpdir(), "runner-cmd-fleet-"));
+    const composeFor = (images: typeof OLD_IMAGES) =>
+      `${JSON.stringify({ name: "catalyst-fleet", services: { supervisor: { image: images.supervisor, environment: { CATALYST_RUNNER_IMAGE: images.runner } } } }, null, 2)}\n`;
+    writeFileSync(join(dir, "compose.json"), composeFor(OLD_IMAGES), { mode: 0o600 });
+    const running = () => JSON.parse(readFileSync(join(dir, "compose.json"), "utf8")).services.supervisor as { image: string; environment: { CATALYST_RUNNER_IMAGE: string } };
+    let recreates = 0;
+    let log = SERVING;
+    let t = Date.parse("2026-10-27T16:00:00Z");
+    const fleetEngine: FleetUpdateEngine = {
+      desiredRelease: async () => answered(hostRelease()),
+      supervisor: async () => ({
+        id: String(recreates).repeat(64), image: running().image, runnerImage: running().environment.CATALYST_RUNNER_IMAGE,
+        running: true, restartCount: 0, startedAt: "2026-10-27T16:00:00Z",
+      }),
+      logs: async () => log,
+      children: async () => ({}),
+      prepare: async () => null,
+      configValid: async () => true,
+      recreate: async () => {
+        recreates++;
+        log = running().image === NEW_IMAGES.supervisor ? candidateLog : SERVING;
+        return true;
+      },
+      removeImages: async () => undefined,
+      armPostRollCheck: async () => true,
+    };
+    return { dir, deps: { fleetEngine, fleetClock: { now: () => t, sleep: async (ms: number) => void (t += ms) } } };
+  }
+
+  it("RED: the schedule's run writes the scope and its failed condition to stderr, and stdout keeps its one line", async () => {
+    const { dir, deps } = fleet(CTC_NOT_READOPTED);
+    const ctx = makeCtx(tempHome(), { now: () => new Date("2026-10-27T16:10:00.000Z") });
+    expect(await main(["runner", "update", "--auto", "--fleet", "--dir", dir], ctx, { runner: deps })).toBe(1);
+    expect(ctx.out).toEqual(["2026-10-27T16:10:00.000Z rolled_back new_supervisor_not_qualified generation=none"]);
+    expect(ctx.err).toEqual([PENDING]);
+  });
+
+  it("RED: --json keeps stdout to the one JSON result, with the same detail", async () => {
+    const { dir, deps } = fleet(CTC_NOT_READOPTED);
+    const ctx = makeCtx(tempHome());
+    expect(await main(["runner", "update", "--fleet", "--json", "--dir", dir], ctx, { runner: deps })).toBe(1);
+    expect(ctx.out).toHaveLength(1);
+    expect(JSON.parse(ctx.out[0]!)).toEqual({
+      outcome: "rolled_back", detail: "new_supervisor_not_qualified", generation: null, exitCode: 1, releaseId: hostRelease().releaseId,
+    });
+    expect(ctx.err).toEqual([PENDING]);
+  });
+
+  it("POSITIVE CONTROL: a supervisor that qualifies every scope writes nothing to stderr", async () => {
+    const { dir, deps } = fleet(SERVING);
+    const ctx = makeCtx(tempHome(), { now: () => new Date("2026-10-27T16:10:00.000Z") });
+    expect(await main(["runner", "update", "--auto", "--fleet", "--dir", dir], ctx, { runner: deps })).toBe(0);
+    expect(ctx.out).toEqual(["2026-10-27T16:10:00.000Z updated updated:runner,supervisor generation=89"]);
+    expect(ctx.err).toEqual([]);
   });
 });
