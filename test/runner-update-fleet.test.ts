@@ -981,3 +981,254 @@ describe("fleet update: a post-roll check an update run kept from judging is arm
     expect(calls[1]![1]).toContain("--on-active=300s");
   });
 });
+
+// CTC-8163: a busy host re-adopts its live sessions before its supervisor qualifies. On hetzner-3072373
+// that took 240 to 300 seconds, past the fixed 240 the updater gave every recreate, so the release and
+// then its rollback both timed out. The timed fake below logs each line a set number of seconds after
+// its container started, on the same simulated clock the update polls with.
+
+/** What one recreated supervisor does, in seconds after it started. */
+interface Timeline {
+  lines?: readonly (readonly [number, string])[];
+  restartAt?: number;
+  otherImageAt?: number;
+  /** Its log cannot be read from this second on. */
+  unreadableAt?: number;
+}
+const at = (seconds: number, ...texts: string[]) => texts.map((text) => [seconds, text] as const);
+const scopeEvent = (event: string, scope: string, fields: Record<string, unknown> = {}) => {
+  const [tenant = "", team = ""] = scope.split("/");
+  return `2026-10-27T16:00:00Z ${JSON.stringify({ event, tenant, team, ...fields })}`;
+};
+const TENURE = `2026-10-27T16:00:00Z ${JSON.stringify({ event: "supervisor_fleet_tenure", tenure: 1, instanceId: "inst_1" })}`;
+const readoptedLine = (scope: string) => scopeEvent("supervisor_readopted", scope, { continued: 1, stopped: 0 });
+const readyLine = (scope: string) => scopeEvent("host_ready", scope, { freeSlots: 0 });
+const qualifiedScope = (scope: string) => scopeEvent("supervisor_scope_qualified", scope, { hostId: "host_x" });
+/** A gate snapshot for `scope` with the named conditions false. */
+const gateLine = (scope: string, failing: string[] = []) => scopeEvent("supervisor_scope_qualification_state", scope,
+  Object.fromEntries(["resourcesReady", "scopeEligible", "readyUntilValid", "sessionsReadopted"].map((field) => [field, !failing.includes(field)])));
+
+/** hetzner-3072373's timing: tenure at +94 s, every saved scope re-adopted at +161 and ready at +238,
+ *  then qualified one by one from +245 to +300. */
+const busyHost = (scopes: readonly string[] = FIFTEEN): Timeline => ({
+  lines: [
+    ...at(94, TENURE),
+    ...at(161, ...scopes.map(readoptedLine)),
+    ...at(238, ...scopes.map(readyLine)),
+    ...scopes.map((scope, i) => [245 + Math.round((i * 55) / Math.max(1, scopes.length - 1)), qualifiedScope(scope)] as const),
+  ],
+});
+/** Every saved scope qualified at once. */
+const quick = (scopes: readonly string[] = FIFTEEN): Timeline => ({ lines: at(0, ...scopes.map(qualifiedScope)) });
+
+/** A fleet serving the fifteen scopes whose recreated supervisors follow `timeline`. `upSince` is when the
+ *  supervisor the run starts from was started. */
+function timedFleet(dir: string, timeline: (roll: "candidate" | "previous") => Timeline, setup: { fake?: FakeOptions; upSince?: string } = {}) {
+  const host = clock();
+  const t0 = host.now();
+  const fleet = fake(dir, { before: servingScopes(FIFTEEN), ...setup.fake });
+  /** Each recreate and each line the update reported, in order. */
+  const order: string[] = [];
+  /** Seconds after the run began that each recreate happened. */
+  const recreatedAt: number[] = [];
+  let current: { startMs: number; timeline: Timeline } | null = null;
+  const engine: FleetUpdateEngine = {
+    ...fleet.engine,
+    recreate: async (...args) => {
+      const ok = await fleet.engine.recreate(...args);
+      const roll = fleet.calls.recreatedOn.at(-1) === NEW.supervisor ? "candidate" : "previous";
+      current = { startMs: host.now(), timeline: timeline(roll) };
+      recreatedAt.push((host.now() - t0) / 1000);
+      order.push(`recreate ${roll}`);
+      return ok;
+    },
+    supervisor: async (...args) => {
+      const live = await fleet.engine.supervisor(...args);
+      const roll = current;
+      if (!live) return live;
+      if (roll === null) return setup.upSince ? { ...live, startedAt: setup.upSince } : live;
+      const age = (host.now() - roll.startMs) / 1000;
+      if (roll.timeline.restartAt !== undefined && age >= roll.timeline.restartAt) return { ...live, restartCount: 1 };
+      if (roll.timeline.otherImageAt !== undefined && age >= roll.timeline.otherImageAt) return { ...live, image: OLD.supervisor };
+      return live;
+    },
+    logs: async (...args) => {
+      const roll = current;
+      if (roll === null) return fleet.engine.logs(...args);
+      const age = (host.now() - roll.startMs) / 1000;
+      if (roll.timeline.unreadableAt !== undefined && age >= roll.timeline.unreadableAt) return null;
+      return (roll.timeline.lines ?? []).filter(([second]) => second <= age).map(([, text]) => text).join("\n");
+    },
+  };
+  const run = (report: (line: string) => void = (line) => void order.push(line)) =>
+    runFleetUpdate(engine, { dir, now: host.now, sleep: host.sleep, onQualificationPending: report });
+  return { ...fleet, engine, run, order, recreatedAt, pending: () => order.filter((entry) => !entry.startsWith("recreate ")) };
+}
+
+describe("fleet update: a supervisor still making progress gets time to qualify (CTC-8163)", () => {
+  it("RED: a busy host whose new supervisor qualifies 245 to 300 s after it starts applies the release with one recreate", async () => {
+    const { dir } = install();
+    const fleet = timedFleet(dir, (roll) => (roll === "candidate" ? busyHost() : quick()));
+    expect(await fleet.run()).toMatchObject({ outcome: "updated", detail: "updated:runner,supervisor", generation: 2, exitCode: 0 });
+    expect(fleet.order).toEqual(["recreate candidate"]);
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(NEW_COMPOSE);
+    expect(readReleaseState(dir)).toMatchObject({ generation: 2, last: { outcome: "updated" } });
+    expect(existsSync(join(dir, IN_FLIGHT_FILE))).toBe(false);
+  });
+
+  it("RED: a candidate that fails fast is restored within a minute, and a restore that qualifies by +300 s is a clean rollback", async () => {
+    const { dir, text } = install();
+    const fleet = timedFleet(dir, (roll) => (roll === "candidate" ? { lines: at(15, notReadyLine("tenant-1", "T01")) } : busyHost()));
+    expect(await fleet.run()).toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_qualified", generation: null, exitCode: 1 });
+    expect(fleet.order).toEqual(["recreate candidate", "recreate previous"]);
+    expect(fleet.recreatedAt).toEqual([0, 20]);
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(text);
+    expect(existsSync(join(dir, IN_FLIGHT_FILE))).toBe(false);
+    expect(readReleaseState(dir)).toMatchObject({ generation: null, last: { outcome: "rolled_back", detail: "new_supervisor_not_qualified" } });
+  });
+
+  /** Tenure and every re-adoption already logged, which moves the deadline to +320 s. */
+  const progressing = (then: Timeline): Timeline => ({ ...then, lines: [...at(94, TENURE), ...at(161, ...FIFTEEN.map(readoptedLine)), ...(then.lines ?? [])] });
+  it.each<[string, Timeline]>([
+    ["logs host_not_ready for a saved scope", progressing({ lines: at(171, notReadyLine("tenant-1", "T01")) })],
+    ["restarts", progressing({ restartAt: 171 })],
+    ["runs another image", progressing({ otherImageAt: 171 })],
+  ])("NEGATIVE: a candidate that has shown progress and then %s is restored at the next poll", async (_label, candidate) => {
+    const { dir } = install();
+    const fleet = timedFleet(dir, (roll) => (roll === "candidate" ? candidate : quick()));
+    expect(await fleet.run()).toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_qualified", exitCode: 1 });
+    expect(fleet.recreatedAt).toEqual([0, 180]);
+    expect(fleet.pending()).toEqual([]);
+  });
+
+  it.each<[string, number, Timeline]>([
+    ["a silent candidate", 240, {}],
+    ["a candidate that keeps re-adopting scopes and never qualifies", 420,
+      { lines: [...at(94, TENURE), ...FIFTEEN.map((scope, i) => [100 + i * 20, readoptedLine(scope)] as const)] }],
+    ["a candidate whose later lines only repeat a step or name another scope", 250, {
+      lines: [
+        ...at(100, TENURE, readoptedLine("tenant-0/T00")),
+        ...at(200, TENURE, readoptedLine("tenant-0/T00"), readoptedLine("tenant-9/ADV"), readyLine("tenant-9/ADV"),
+          '{"event":"supervisor_readopted","tenant":"tenant-0"}', '{"event":"host_ready","freeSlots":0}', "supervisor_readopted tenant-0/T00"),
+      ],
+    }],
+    ["a candidate with a scope ready but not re-adopted", 240, { lines: at(150, readyLine("tenant-0/T00")) }],
+    ["a candidate with a scope ready, then re-adopted", 380, { lines: [...at(150, readyLine("tenant-0/T00")), ...at(225, readoptedLine("tenant-0/T00"))] }],
+    ["a candidate with a scope re-adopted and its readiness pending", 350, { lines: at(200, readoptedLine("tenant-0/T00")) }],
+  ])("the deadline: %s is restored at +%i s", async (_label, restoredAt, candidate) => {
+    const { dir } = install();
+    const fleet = timedFleet(dir, (roll) => (roll === "candidate" ? candidate : quick()));
+    expect(await fleet.run()).toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_qualified" });
+    expect(fleet.recreatedAt).toEqual([0, restoredAt]);
+  });
+
+  /** The host as a rollback that did not qualify left it: compose.json on the previous release, which
+   *  the running supervisor runs and which has qualified 8 of the 15 saved scopes so far. */
+  function afterSlowRollback(upSince: string) {
+    const { dir, text } = install();
+    writeFileSync(join(dir, PREVIOUS_COMPOSE_FILE), text, { mode: 0o600 });
+    writeFileSync(join(dir, IN_FLIGHT_FILE), JSON.stringify({ version: 1, scopes: FIFTEEN, atMs: 1 }));
+    return { dir, ...timedFleet(dir, () => quick(), { fake: { before: servingScopes(FIFTEEN.slice(0, 8)) }, upSince }) };
+  }
+
+  it("RED: a run 250 s after the previous supervisor started keeps every saved scope it is still qualifying", async () => {
+    const fleet = afterSlowRollback("2026-10-22T19:55:50Z");
+    expect(await fleet.run()).toMatchObject({ outcome: "updated", detail: "updated:runner,supervisor", generation: 2 });
+    expect(fleet.calls.inFlight).toEqual([[...FIFTEEN].sort()]);
+  });
+
+  it("POSITIVE CONTROL: a run 430 s after it started, past the most any supervisor is given, drops the scopes it no longer qualifies", async () => {
+    const fleet = afterSlowRollback("2026-10-22T19:52:50Z");
+    const gone = FIFTEEN.slice(8).sort();
+    expect(await fleet.run()).toMatchObject({ outcome: "updated", detail: `updated:runner,supervisor;dropped_scope:${gone.join(",")}` });
+    expect(fleet.calls.inFlight).toEqual([FIFTEEN.slice(0, 8).sort()]);
+  });
+});
+
+describe("fleet update: each saved scope still unqualified at the deadline is named before the restore (CTC-8163)", () => {
+  const T13 = "tenant-1/T13";
+  const T10 = "tenant-2/T10";
+  /** Every saved scope qualified at once except `missing`; `extra` logged at +30 s. */
+  const allBut = (missing: readonly string[], ...extra: string[]): Timeline => ({
+    lines: [...at(0, ...FIFTEEN.filter((scope) => !missing.includes(scope)).map(qualifiedScope)), ...at(30, ...extra)],
+  });
+  const pending = (roll: string, scope: string, failed: string) => `fleet qualification pending: roll=${roll} scope=${scope} failed=${failed}`;
+
+  it("RED: a scope whose sessions were not re-adopted is named with that condition after the candidate's deadline, before the restore", async () => {
+    const { dir } = install();
+    const fleet = timedFleet(dir, (roll) => (roll === "candidate" ? allBut([T13], gateLine(T13, ["sessionsReadopted"])) : quick()));
+    expect(await fleet.run()).toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_qualified", exitCode: 1 });
+    expect(fleet.order).toEqual(["recreate candidate", pending("candidate", T13, "sessions_readopted"), "recreate previous"]);
+  });
+
+  it.each<[string, string[], string]>([
+    ["two conditions failing are both named, sorted", [gateLine(T13, ["sessionsReadopted", "resourcesReady"])], "resources_ready,sessions_readopted"],
+    ["the latest valid line is the one read", [gateLine(T13, ["scopeEligible"]), gateLine(T13, ["readyUntilValid"])], "ready_until"],
+    ["a malformed line is skipped for the latest valid one", [gateLine(T13, ["scopeEligible"]),
+      scopeEvent("supervisor_scope_qualification_state", T13, { resourcesReady: true, scopeEligible: "yes", readyUntilValid: true, sessionsReadopted: false })], "scope_eligible"],
+    ["only a malformed line", [scopeEvent("supervisor_scope_qualification_state", T13, { resourcesReady: true })], "diagnostic_unavailable"],
+    ["no gate line, as from an older supervisor image", [], "diagnostic_unavailable"],
+    ["only another scope's gate line", [gateLine("tenant-9/ADV", ["sessionsReadopted"])], "diagnostic_unavailable"],
+    ["every condition held but no qualification line came", [gateLine(T13)], "qualification_event_missing"],
+  ])("%s", async (_label, extra, failed) => {
+    const { dir } = install();
+    const fleet = timedFleet(dir, (roll) => (roll === "candidate" ? allBut([T13], ...extra) : quick()));
+    await fleet.run();
+    expect(fleet.pending()).toEqual([pending("candidate", T13, failed)]);
+  });
+
+  it("two missing scopes get one line each, sorted, and no scope that qualified is named", async () => {
+    const { dir } = install();
+    const fleet = timedFleet(dir, (roll) => (roll === "candidate"
+      ? allBut([T10, T13], gateLine(T10, ["resourcesReady"]), gateLine(T13, ["sessionsReadopted"]), gateLine("tenant-0/T00", ["scopeEligible"]))
+      : quick()));
+    await fleet.run();
+    expect(fleet.pending()).toEqual([pending("candidate", T13, "sessions_readopted"), pending("candidate", T10, "resources_ready")]);
+  });
+
+  it("the restored supervisor's deadline reads its own log, never the candidate's gate lines", async () => {
+    const { dir } = install();
+    const fleet = timedFleet(dir, (roll) => (roll === "candidate"
+      ? allBut([T13], gateLine(T13, ["sessionsReadopted"]), gateLine(T10, ["resourcesReady"]))
+      : allBut([T10])));
+    expect(await fleet.run()).toMatchObject({ outcome: "failed", detail: "rollback_not_qualified" });
+    expect(fleet.order).toEqual([
+      "recreate candidate", pending("candidate", T13, "sessions_readopted"),
+      "recreate previous", pending("rollback", T10, "diagnostic_unavailable"),
+    ]);
+  });
+
+  it("a log that cannot be read at the deadline names every saved scope as unavailable", async () => {
+    const { dir } = install();
+    const fleet = timedFleet(dir, (roll) => (roll === "candidate" ? { ...allBut([T13], gateLine(T13, ["sessionsReadopted"])), unreadableAt: 200 } : quick()));
+    expect(await fleet.run()).toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_qualified" });
+    expect(fleet.pending()).toEqual([...FIFTEEN].sort().map((scope) => pending("candidate", scope, "diagnostic_unavailable")));
+  });
+
+  it("a report that cannot be written still lets the restore run", async () => {
+    const { dir, text } = install();
+    const fleet = timedFleet(dir, (roll) => (roll === "candidate" ? allBut([T10, T13]) : quick()));
+    let calls = 0;
+    const report = (line: string) => {
+      if (calls++ === 0) throw new Error("write EPIPE");
+      fleet.order.push(line);
+    };
+    expect(await fleet.run(report)).toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_qualified" });
+    // The first line, T13's, could not be written; T10's still was, and the restore still ran.
+    expect(fleet.order).toEqual(["recreate candidate", pending("candidate", T10, "diagnostic_unavailable"), "recreate previous"]);
+    expect(readFileSync(join(dir, FLEET_COMPOSE_FILE), "utf8")).toBe(text);
+  });
+
+  it("a saved scope with control characters or no end is printed escaped and cut short", async () => {
+    const { dir } = install();
+    const odd = "tenant-0/E\u001b[2JVIL\nX\\u0020";
+    const long = `tenant-0/${"L".repeat(300)}`;
+    writeFileSync(join(dir, IN_FLIGHT_FILE), JSON.stringify({ version: 1, scopes: ["tenant-0/CTC", odd, long], atMs: 1 }));
+    const fleet = timedFleet(dir, () => ({ lines: at(0, qualifiedScope("tenant-0/CTC")) }));
+    await fleet.run();
+    const [first, second] = fleet.pending();
+    expect(first).toBe(pending("candidate", "tenant-0/E\\u001b[2JVIL\\u000aX\\u005cu0020", "diagnostic_unavailable"));
+    expect(second).toBe(pending("candidate", `tenant-0/${"L".repeat(111)}...`, "diagnostic_unavailable"));
+    expect(fleet.pending().some((line) => /[\u0000-\u001f\u007f]/.test(line))).toBe(false);
+  });
+});
