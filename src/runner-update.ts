@@ -376,10 +376,12 @@ export interface RunnerUpdateOptions {
 const SETTLES_WINDOW: ReadonlySet<UpdateOutcome> = new Set(["current", "recorded", "updated", "rolled_back", "failed"]);
 const REPORTED_AT_ONCE: ReadonlySet<UpdateOutcome> = new Set(["deferred_busy", "draining_for_update", "drain_soft_limit", "drain_unavailable"]);
 const WAITS: ReadonlySet<UpdateOutcome> = new Set(["draining_for_update", "drain_soft_limit"]);
-/** CTC-8076: the two failed passes that leave the previous supervisor serving (the storage check was
- *  refused before any stop, or the rollback came back ready but storage was not attested back). They
- *  release the drain. Every other failed pass keeps it. */
-const servesPrevious = (result: UpdateResult): boolean =>
+/** CTC-8076: Mac private thoughts storage guards running phases, not only this update. Its native
+ *  producer answers every phase storage request on the attested supervisor image and checks the engine
+ *  binding on each one, and the supervisor mounts that channel. A pass that could not attest storage
+ *  back onto the images the machine keeps is failed: it keeps any drain, so no new phase reaches
+ *  storage that refuses it, and it is reported at once so the owner hears of it. */
+export const custodyUnattested = (result: Pick<UpdateResult, "outcome" | "detail">): boolean =>
   result.outcome === "failed" && result.detail.startsWith("custody_restore_failed:");
 
 const sleepDefault = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -482,7 +484,7 @@ export async function runRunnerUpdate(engine: RunnerUpdateEngine, options: Runne
           writeReleaseState(dir, state);
         }
       }
-      if (state.drain !== null && (["updated", "recorded", "current", "rolled_back", "retained"].includes(result.outcome) || servesPrevious(result))) {
+      if (state.drain !== null && ["updated", "recorded", "current", "rolled_back", "retained"].includes(result.outcome)) {
         const released = await releaseDrain(engine, dir, state, options.signal, options.sleep);
         if (released) writeReleaseState(dir, { ...readReleaseState(dir), drain: null });
         else if (result.outcome === "updated") {
@@ -491,8 +493,10 @@ export async function runRunnerUpdate(engine: RunnerUpdateEngine, options: Runne
             generation: result.generation, offered: result.offeredGeneration ?? null } });
         }
       }
-      if (REPORTED_AT_ONCE.has(result.outcome))
-        await engine.desiredRelease(dir, options.signal, updateReport(readReleaseState(dir), readManifest().version), true);
+      if (REPORTED_AT_ONCE.has(result.outcome) || custodyUnattested(result)) {
+        try { await engine.desiredRelease(dir, options.signal, updateReport(readReleaseState(dir), readManifest().version), true); }
+        catch { /* The next read carries the same report. */ }
+      }
       if (!options.drain || !WAITS.has(result.outcome)) return result;
       options.onPass?.(result);
       const woke = await waitForIdle(engine, options, now, hostId, result);
@@ -796,15 +800,17 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
 
   // The boundary between phases: stop the supervisor so it admits nothing, then look again. A phase
   // that started since the first look keeps running, the supervisor comes back, and the update waits.
+  const unattested = (refused: string) => done("failed", `custody_restore_failed:${refused}`, { ...tagged, exitCode: 1 });
   if (!(await engine.stopSupervisor(dir, signal))) {
     await engine.composeUp(dir, signal);
-    await restoreCustody(rollbackImages ?? current);
-    return done("retained", "supervisor_stop_failed", tagged);
+    const restoreRefused = await restoreCustody(rollbackImages ?? current);
+    return restoreRefused === null ? done("retained", "supervisor_stop_failed", tagged) : unattested(restoreRefused);
   }
   const busyAfterStop = inPlace ? 0 : await engine.attemptContainers(dir, hostId, signal);
   if (busyAfterStop !== 0) {
     await engine.composeUp(dir, signal);
-    await restoreCustody(rollbackImages ?? current);
+    const restoreRefused = await restoreCustody(rollbackImages ?? current);
+    if (restoreRefused !== null) return unattested(restoreRefused);
     return state.drain?.acknowledgedAtMs != null ? drainingResult(dir, readReleaseState(dir), now(), busyAfterStop, undefined, undefined, tagged) : busyAfterStop === null
       ? done("retained", "docker_unavailable", tagged)
       : deferBusy(dir, state, release, now(), busyAfterStop, done, tagged);
@@ -1110,12 +1116,18 @@ export function lastProblemLines(state: ReleaseState): string[] {
   const last = lastProblem(state);
   if (last === null) return [];
   const what = last.outcome === "rolled_back" ? "was rolled back" : "failed";
-  return [`The last update, at ${new Date(last.atMs).toISOString()}, ${what} (${last.detail}; offered generation ${last.offered ?? last.generation ?? "none"}).`];
+  return [`The last update, at ${new Date(last.atMs).toISOString()}, ${what} (${last.detail}; offered generation ${last.offered ?? last.generation ?? "none"}).`,
+    ...(custodyUnattested(last) ? [CUSTODY_UNATTESTED_LINE] : [])];
 }
+
+/** The owner's line for a pass that left private thoughts storage unattested (CTC-8076). */
+export const CUSTODY_UNATTESTED_LINE = "Private thoughts storage on this Mac is not attested to the images it runs, so phases that use it are refused. " +
+  "If Catalyst had stopped sending this machine new phases for an update, it still sends none. To repair storage: catalyst onboard --runner";
 
 export function updateResultLines(result: UpdateResult): string[] {
   return [
     OUTCOME_TEXT[result.outcome],
     `Release: ${result.releaseId ?? "none"}, generation ${result.generation ?? "none"} (${result.detail}).`,
+    ...(custodyUnattested(result) ? [CUSTODY_UNATTESTED_LINE] : []),
   ];
 }

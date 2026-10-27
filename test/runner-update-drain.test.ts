@@ -3,10 +3,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { DRAIN_AFTER_MS, DRAIN_SOFT_LIMIT_MS, readReleaseState, RELEASE_STATE_FILE, releaseLock, releaseUpdateDrain, runRunnerUpdate, takeLock,
-  writeReleaseState, type UpdateResult } from "../src/runner-update";
+import { CUSTODY_UNATTESTED_LINE, DRAIN_AFTER_MS, DRAIN_SOFT_LIMIT_MS, lastProblemLines, readReleaseState, RELEASE_STATE_FILE, releaseLock,
+  releaseUpdateDrain, runRunnerUpdate, takeLock, updateResultLines, writeReleaseState, type UpdateResult } from "../src/runner-update";
+import { main } from "../src/cli";
 import { canonicalDarwinThoughtsJson } from "../vendor/self-host/darwin-thoughts-custody/verifier.mjs";
-import { answered, fakeDrainCloud, fakeEngine, imagesIn, install, OLD, ORIGINAL_ENV, release, TARGET, type Images } from "./runner-update-fixtures";
+import { makeCtx, tempHome } from "./helpers";
+import { answered, fakeDrainCloud, fakeEngine, imagesIn, install, OLD, ORIGINAL_ENV, release, TARGET, type FakeOptions, type Images } from "./runner-update-fixtures";
 
 const A = 1_800_000_000_000;
 const FIFTEEN_MINUTES = 15 * 60_000;
@@ -33,6 +35,9 @@ function custodyMachine(): { dir: string; authority: string } {
   writeReleaseState(dir, { ...readReleaseState(dir), generation: 102, journal: null });
   return { dir, authority };
 }
+/** Custody that holds the installed authority on the target images and refuses `refusal` on any other. */
+const keepsAuthority = (refusal: string, authority: string) => (images: Images) =>
+  images.supervisor === TARGET.supervisor ? authority : { refused: refusal };
 function clock(start = A) {
   let time = start;
   return { now: () => time, sleep: async (ms: number) => { time += ms; }, advance: (ms: number) => { time += ms; } };
@@ -497,28 +502,42 @@ describe("CTC-7749: a busy machine drains and takes an approved release", () => 
     expect(readReleaseState(dir).deferral?.sinceMs).toBe(time.now());
   });
 
-  // CTC-8076: a failed pass releases the drain only when the previous supervisor is still serving.
-  it.each([
-    { label: "the rollback is not ready", detail: "rollback_not_ready", releases: false },
-    { label: "storage is refused before any stop and is not attested back", detail: "custody_restore_failed:engine_authority_mismatch", releases: true },
-    { label: "the rollback is ready but storage is not attested back", detail: "custody_restore_failed:bootstrap_signed_receipt_unavailable", releases: true },
-  ] as const)("a failed apply where $label ends $detail, and releases its drain only if the old supervisor serves", async ({ detail, releases }) => {
+  // CTC-8076, case B: private thoughts storage guards running phases, not only the update. A pass that
+  // could not attest storage back onto the images the machine keeps holds the drain and tells the
+  // owner (a report at once, and the CLI line). One that attested it back releases as before.
+  type CustodyRow = { label: string; detail: string; outcome: "failed" | "retained"; releases: boolean; alerts: boolean; options: (authority: string) => FakeOptions };
+  it.each<CustodyRow>([
+    { label: "the rollback is not ready", detail: "rollback_not_ready", outcome: "failed", releases: false, alerts: false,
+      options: () => ({ composeUp: [false, false] }) },
+    { label: "storage is refused before any stop and is not attested back", detail: "custody_restore_failed:engine_authority_mismatch", outcome: "failed", releases: false, alerts: true,
+      options: () => ({ custody: (images: Images) => ({ refused: images.supervisor === TARGET.supervisor ? "bootstrap_cleanup_unproved" : "engine_authority_mismatch" }) }) },
+    { label: "the rollback is ready but storage is not attested back", detail: "custody_restore_failed:bootstrap_signed_receipt_unavailable", outcome: "failed", releases: false, alerts: true,
+      options: (authority: string) => ({ custody: keepsAuthority("bootstrap_signed_receipt_unavailable", authority), ready: (image: string) => image === OLD.supervisor }) },
+    { label: "the supervisor does not stop and storage is not attested back", detail: "custody_restore_failed:engine_binding_mismatch", outcome: "failed", releases: false, alerts: true,
+      options: (authority: string) => ({ stop: false, custody: keepsAuthority("engine_binding_mismatch", authority) }) },
+    { label: "a phase is found after the stop and storage is not attested back", detail: "custody_restore_failed:producer_config_unavailable", outcome: "failed", releases: false, alerts: true,
+      options: (authority: string) => ({ busy: [1, 0, 0, 1], custody: keepsAuthority("producer_config_unavailable", authority) }) },
+    { label: "the supervisor does not stop and storage is attested back", detail: "supervisor_stop_failed", outcome: "retained", releases: true, alerts: false,
+      options: (authority: string) => ({ stop: false, custody: () => authority }) },
+  ])("when $label the pass ends $detail; it keeps the drain unless storage is attested back", async ({ detail, outcome, releases, alerts, options }) => {
     const { dir, authority } = detail === "rollback_not_ready" ? { dir: machine(), authority: "" } : custodyMachine();
     const time = clock(A + DRAIN_AFTER_MS);
     const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
-    const fake = fakeEngine(dir, { read: offered(), busy: [1, 0, 0, 0], drain: cloud.call,
-      ...(detail === "rollback_not_ready" ? { composeUp: [false, false] }
-        : detail === "custody_restore_failed:engine_authority_mismatch"
-          ? { custody: (images: Images) => ({ refused: images.supervisor === TARGET.supervisor ? "bootstrap_cleanup_unproved" : "engine_authority_mismatch" }) }
-          : { custody: (images: Images) => images.supervisor === TARGET.supervisor ? authority : { refused: "bootstrap_signed_receipt_unavailable" },
-              ready: (image: string) => image === OLD.supervisor }) });
-    expect(await runRunnerUpdate(fake.engine, { dir, drain: true, now: time.now, sleep: time.sleep, readyDeadlineMs: 20_000 }))
-      .toMatchObject({ outcome: "failed", detail, exitCode: 1 });
+    const fake = fakeEngine(dir, { read: offered(), busy: [1, 0, 0, 0], drain: cloud.call, ...options(authority) });
+    const result = await runRunnerUpdate(fake.engine, { dir, drain: true, now: time.now, sleep: time.sleep, readyDeadlineMs: 20_000 });
+    expect(result).toMatchObject({ outcome, detail, exitCode: outcome === "failed" ? 1 : 0 });
+    // The drain was really held before this pass ended.
+    expect(cloud.calls).toContain("request:106");
     expect(cloud.calls.includes("release")).toBe(releases);
     expect(cloud.drain === null).toBe(releases);
     expect(readReleaseState(dir).drain === null).toBe(releases);
     if (detail === "custody_restore_failed:engine_authority_mismatch") expect(fake.calls).not.toContain("stop");
     if (releases) expect(readReleaseState(dir).deferral?.sinceMs).toBe(time.now());
+    // The owner hears of it: the outcome is reported at once, and the CLI says what to do.
+    const reported = fake.reports.filter((raw): raw is string => raw !== undefined).map((raw) => JSON.parse(raw) as { outcome: string; detail: string });
+    expect(reported.some((report) => report.outcome === "failed" && report.detail === detail)).toBe(alerts);
+    expect(updateResultLines(result).includes(CUSTODY_UNATTESTED_LINE)).toBe(alerts);
+    expect(lastProblemLines(readReleaseState(dir)).includes(CUSTODY_UNATTESTED_LINE)).toBe(alerts);
   });
 
   it("an applied release releases a cloud drain after release-state.json was deleted", async () => {
@@ -537,6 +556,29 @@ describe("CTC-7749: a busy machine drains and takes an approved release", () => 
     expect(cloud.calls).toEqual(["GET", "release"]);
     expect(cloud.drain).toBeNull();
     expect(readReleaseState(dir).drain).toBeNull();
+  });
+});
+
+describe("CTC-8076: the schedule's log tells the owner when storage is not attested back", () => {
+  it("runner update --auto prints the owner's line after its timestamped result, and exits 1", async () => {
+    const { dir, authority } = custodyMachine();
+    const fake = fakeEngine(dir, { read: offered(), stop: false, custody: keepsAuthority("engine_binding_mismatch", authority) });
+    const ctx = makeCtx(tempHome(), { now: () => new Date("2026-10-27T09:00:00.000Z") });
+    expect(await main(["runner", "update", "--auto", "--dir", dir], ctx, { runner: { engine: fake.engine, custody: { platform: "linux" } } })).toBe(1);
+    expect(ctx.out[0]).toBe("2026-10-27T09:00:00.000Z failed custody_restore_failed:engine_binding_mismatch generation=102");
+    expect(ctx.out[1]).toBe(CUSTODY_UNATTESTED_LINE);
+  });
+
+  it("a report that cannot be sent at once does not throw out of the update", async () => {
+    const { dir, authority } = custodyMachine();
+    let reads = 0;
+    const read = () => {
+      if (reads++ > 0) throw new Error("the report read failed");
+      return offered();
+    };
+    const fake = fakeEngine(dir, { read, stop: false, custody: keepsAuthority("engine_binding_mismatch", authority) });
+    await expect(runRunnerUpdate(fake.engine, { dir })).resolves.toMatchObject({ outcome: "failed", detail: "custody_restore_failed:engine_binding_mismatch" });
+    expect(reads).toBe(2);
   });
 });
 

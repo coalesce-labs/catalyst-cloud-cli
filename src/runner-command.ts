@@ -23,6 +23,8 @@ import {
   lastProblem,
   lastProblemLines,
   drainLines,
+  custodyUnattested,
+  CUSTODY_UNATTESTED_LINE,
   releaseUpdateDrain,
   type RunnerUpdateEngine,
   type UpdateResult,
@@ -203,6 +205,7 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
       if (args.json) ctx.stdout(JSON.stringify(extra ? { ...result, components: extra.rows } : result));
       else if (auto) {
         ctx.stdout(autoLine(result, ctx.now()));
+        if (custodyUnattested(result)) ctx.stdout(CUSTODY_UNATTESTED_LINE);
         if (extra) ctx.stdout(extra.line);
       } else for (const line of updateResultLines(result)) ctx.stdout(line);
       return Math.max(result.exitCode, extra?.exitCode ?? 0);
