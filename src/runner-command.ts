@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { flagBool, flagString, positionals, type ParsedArgs } from "./args.js";
 import type { Ctx } from "./config.js";
@@ -22,6 +22,8 @@ import {
   updateResultLines,
   lastProblem,
   lastProblemLines,
+  drainLines,
+  releaseUpdateDrain,
   type RunnerUpdateEngine,
   type UpdateResult,
 } from "./runner-update.js";
@@ -121,6 +123,17 @@ function statusLine(status: AutoUpdateStatus): string {
   return `Automatic runner updates are not available on this machine (${status.detail}). Run catalyst runner update yourself.`;
 }
 
+function autoLine(result: UpdateResult, at: Date): string {
+  return `${at.toISOString()} ${result.outcome} ${result.detail} generation=${result.generation ?? "none"}`;
+}
+
+function drainReleaseLine(result: "released" | "none" | "pending" | "failed"): string | null {
+  if (result === "released") return "Catalyst can send this machine new phases again: it had stopped sending them so the machine could update.";
+  if (result === "pending") return "The update that was waiting for running phases ends within a few seconds, and Catalyst can then send this machine new phases again.";
+  if (result === "failed") return "Catalyst may still be holding new phases back from this machine. Run catalyst runner auto-update off again to retry.";
+  return null;
+}
+
 /** Why this machine's images must not move now: an owner's hold, or settings that cannot be read
  *  (which never count as "everything on"). Null when every image may move. */
 function imageHold(ctx: Ctx): "owner_setting" | "update_policy_unreadable" | null {
@@ -189,7 +202,7 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     const print = (result: UpdateResult, extra: Awaited<ReturnType<typeof components>>) => {
       if (args.json) ctx.stdout(JSON.stringify(extra ? { ...result, components: extra.rows } : result));
       else if (auto) {
-        ctx.stdout(`${ctx.now().toISOString()} ${result.outcome} ${result.detail} generation=${result.generation ?? "none"}`);
+        ctx.stdout(autoLine(result, ctx.now()));
         if (extra) ctx.stdout(extra.line);
       } else for (const line of updateResultLines(result)) ctx.stdout(line);
       return Math.max(result.exitCode, extra?.exitCode ?? 0);
@@ -200,13 +213,21 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     // windows; then only in a window. An owner's own run applies at once (CTC-7465, update-windows.ts).
     if (hold !== null) {
       const retained = { outcome: "retained" as const, detail: hold, generation: readReleaseState(dir()).generation, exitCode: hold === "owner_setting" ? 0 : 1 };
+      if (hold === "owner_setting" && !fleet) {
+        const released = await releaseUpdateDrain(engine, dir(), { cloud: false });
+        if (released === "failed" && !auto && !args.json) ctx.stdout(drainReleaseLine(released)!);
+      }
       // Unreadable settings move nothing; a hold leaves the other components to the release check.
       return print(retained, hold === "owner_setting" ? await components(undefined) : null);
     }
     const ownerWindows = auto && !check && !fleet ? readUpdatePolicy(ctx.home).windows : undefined;
     const result = fleet
       ? await runFleetUpdate(deps.fleetEngine ?? dockerFleetUpdateEngine({ env: ctx.env }), { dir: dir(), check })
-      : await runRunnerUpdate(engine, { dir: dir(), check, ...(ownerWindows ? { window: windowBounds(ctx.now().getTime(), ownerWindows) } : {}) });
+      : await runRunnerUpdate(engine, {
+        dir: dir(), check,
+        ...(ownerWindows ? { window: windowBounds(ctx.now().getTime(), ownerWindows) } : {}),
+        ...(auto && !check ? { drain: true, held: () => imageHold(ctx), ...(args.json ? {} : { onPass: (pass: UpdateResult) => ctx.stdout(autoLine(pass, ctx.now())) }) } : {}),
+      });
     // `runner update --check` also lists every installed component against the approved release, as
     // `catalyst update --check` does. The image fields stay where scripts already read them.
     if (check && !fleet && !auto) {
@@ -225,8 +246,8 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
       const state = readReleaseState(dir());
       if (args.json) {
         const { schemaVersion, release, components, projects } = updateReportJson(report);
-        ctx.stdout(JSON.stringify({ ...result, schemaVersion, release, components, projects, lastProblem: lastProblem(state) }));
-      } else for (const line of [...updateResultLines(result), ...lastProblemLines(state), ...updateReportLines(report)]) ctx.stdout(line);
+        ctx.stdout(JSON.stringify({ ...result, schemaVersion, release, components, projects, lastProblem: lastProblem(state), drain: state.drain === null ? null : { generation: state.drain.generation, acknowledgedAtMs: state.drain.acknowledgedAtMs }, deferral: state.deferral }));
+      } else for (const line of [...updateResultLines(result), ...lastProblemLines(state), ...drainLines(state), ...updateReportLines(report)]) ctx.stdout(line);
       return result.exitCode;
     }
     // A fleet check also names the last post-roll verdict (CTC-6564).
@@ -253,11 +274,20 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
     // reports them as held (CTC-6708). Setup's own call (enableRunnerAutoUpdate) never lifts a hold.
     if (mode === "off" || (mode === "on" && status.state === "on"))
       for (const id of RELEASE_COMPONENTS) setComponentPolicy(ctx.home, id, mode === "on");
+    let updateDrain: "released" | "none" | "pending" | "failed" = "none";
+    if (mode === "off" && !fleet) {
+      let runner: string | null = null;
+      try { runner = dir(); } catch { /* No runner directory to release. */ }
+      if (runner !== null && existsSync(resolve(runner, ".env")) && existsSync(resolve(runner, "compose.yaml")))
+        updateDrain = await releaseUpdateDrain(deps.engine ?? dockerRunnerUpdateEngine({ env: ctx.env }), runner, { cloud: true });
+    }
     if (args.json) {
       const state = mode === "status" && dirFlag !== undefined ? readReleaseState(dirFlag) : undefined;
-      ctx.stdout(JSON.stringify({ ...status, ...(state ? { release: state } : {}) }));
+      ctx.stdout(JSON.stringify({ ...status, ...(state ? { release: state } : {}), ...(mode === "off" ? { updateDrain } : {}) }));
     } else {
       ctx.stdout(statusLine(status));
+      const line = mode === "off" ? drainReleaseLine(updateDrain) : null;
+      if (line !== null) ctx.stdout(line);
       // A single runner's schedule prints what it always has; a fleet's says so, and for which directory.
       if (status.state === "on" && status.fleet) ctx.stdout(`This is a supervisor fleet's schedule: it updates the compose.json in ${status.dir}.`);
     }
