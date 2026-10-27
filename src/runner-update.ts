@@ -376,6 +376,11 @@ export interface RunnerUpdateOptions {
 const SETTLES_WINDOW: ReadonlySet<UpdateOutcome> = new Set(["current", "recorded", "updated", "rolled_back", "failed"]);
 const REPORTED_AT_ONCE: ReadonlySet<UpdateOutcome> = new Set(["deferred_busy", "draining_for_update", "drain_soft_limit", "drain_unavailable"]);
 const WAITS: ReadonlySet<UpdateOutcome> = new Set(["draining_for_update", "drain_soft_limit"]);
+/** CTC-8076: the two failed passes that leave the previous supervisor serving (the storage check was
+ *  refused before any stop, or the rollback came back ready but storage was not attested back). They
+ *  release the drain. Every other failed pass keeps it. */
+const servesPrevious = (result: UpdateResult): boolean =>
+  result.outcome === "failed" && result.detail.startsWith("custody_restore_failed:");
 
 const sleepDefault = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -466,7 +471,9 @@ export async function runRunnerUpdate(engine: RunnerUpdateEngine, options: Runne
       const windowSettledMs = options.window && SETTLES_WINDOW.has(result.outcome) ? options.window.lastOpenedMs : state.windowSettledMs;
       writeReleaseState(dir, { ...state, deferral, windowSettledMs, last: { atMs: now(), outcome: result.outcome, detail: result.detail, generation: result.generation, offered: result.offeredGeneration ?? null } });
       state = readReleaseState(dir);
-      if (result.outcome === "recorded" && state.drain === null) {
+      // CTC-8077: the schedule's applied release with no local drain record reads the cloud once, so
+      // a drain whose record was lost with release-state.json is still released.
+      if ((result.outcome === "recorded" || (result.outcome === "updated" && options.drain)) && state.drain === null) {
         const looked = await drainAnswer(engine, dir, null, options.signal);
         if ("status" in looked && looked.status.drain !== null) {
           const active = looked.status.drain;
@@ -475,7 +482,7 @@ export async function runRunnerUpdate(engine: RunnerUpdateEngine, options: Runne
           writeReleaseState(dir, state);
         }
       }
-      if (state.drain !== null && ["updated", "recorded", "current", "rolled_back", "retained"].includes(result.outcome)) {
+      if (state.drain !== null && (["updated", "recorded", "current", "rolled_back", "retained"].includes(result.outcome) || servesPrevious(result))) {
         const released = await releaseDrain(engine, dir, state, options.signal, options.sleep);
         if (released) writeReleaseState(dir, { ...readReleaseState(dir), drain: null });
         else if (result.outcome === "updated") {

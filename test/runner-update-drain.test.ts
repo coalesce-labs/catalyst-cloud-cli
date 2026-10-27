@@ -1,9 +1,12 @@
-import { readFileSync } from "node:fs";
+import { generateKeyPairSync } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { DRAIN_AFTER_MS, DRAIN_SOFT_LIMIT_MS, readReleaseState, releaseLock, releaseUpdateDrain, runRunnerUpdate, takeLock, writeReleaseState,
-  type UpdateResult } from "../src/runner-update";
-import { answered, fakeDrainCloud, fakeEngine, imagesIn, install, OLD, ORIGINAL_ENV, release, TARGET } from "./runner-update-fixtures";
+import { DRAIN_AFTER_MS, DRAIN_SOFT_LIMIT_MS, readReleaseState, RELEASE_STATE_FILE, releaseLock, releaseUpdateDrain, runRunnerUpdate, takeLock,
+  writeReleaseState, type UpdateResult } from "../src/runner-update";
+import { canonicalDarwinThoughtsJson } from "../vendor/self-host/darwin-thoughts-custody/verifier.mjs";
+import { answered, fakeDrainCloud, fakeEngine, imagesIn, install, OLD, ORIGINAL_ENV, release, TARGET, type Images } from "./runner-update-fixtures";
 
 const A = 1_800_000_000_000;
 const FIFTEEN_MINUTES = 15 * 60_000;
@@ -11,6 +14,24 @@ function machine() {
   const dir = install();
   writeReleaseState(dir, { ...readReleaseState(dir), generation: 102, journal: null });
   return dir;
+}
+/** A machine on 102 with Mac private thoughts storage installed where setup puts it. */
+function custodyMachine(): { dir: string; authority: string } {
+  const dir = join(mkdtempSync(join(tmpdir(), "custody-")), "home", ".local", "runner");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "compose.yaml"), "name: catalyst-host\n");
+  const authority = canonicalDarwinThoughtsJson({
+    version: 1 as const, installationId: "a".repeat(64),
+    publicKey: generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "der" }).toString("base64"),
+    nativeUid: 501, nativeGid: 20, nativeHome: join(dir, "..", ".."), endpoint: "unix:///fixture/docker.sock", daemonId: "fixture-daemon",
+    thoughtsRoot: join(dir, "thoughts"), locksRoot: join(dir, "locks"),
+    requestsRoot: join(dir, "..", "darwin-thoughts-requests"), responsesRoot: join(dir, "..", "darwin-thoughts-responses"),
+  });
+  writeFileSync(join(dir, ".env"), `${ORIGINAL_ENV}CATALYST_THOUGHTS_CUSTODY_AUTHORITY='${authority}'\n` +
+    `CATALYST_THOUGHTS_CUSTODY_REQUESTS_DIR=${join(dir, "..", "darwin-thoughts-requests")}\n` +
+    `CATALYST_THOUGHTS_CUSTODY_RESPONSES_DIR=${join(dir, "..", "darwin-thoughts-responses")}\n`, { mode: 0o600 });
+  writeReleaseState(dir, { ...readReleaseState(dir), generation: 102, journal: null });
+  return { dir, authority };
 }
 function clock(start = A) {
   let time = start;
@@ -115,7 +136,8 @@ describe("CTC-7749: a busy machine drains and takes an approved release", () => 
     const fake = fakeEngine(dir, { read: withFormat(106, ["4", "5", "6"]), phases: () => 2, drain: cloud.call });
     expect(await runRunnerUpdate(fake.engine, { dir, drain: true, now: () => A + DRAIN_AFTER_MS })).toMatchObject({ outcome: "updated", generation: 106 });
     expect(fake.calls).not.toContain("attempts:host_abc");
-    expect(cloud.calls).toEqual([]);
+    // The applied release reads the drain once (CTC-8077) and requests none.
+    expect(cloud.calls).toEqual(["GET"]);
   });
 
   it.each([
@@ -475,14 +497,46 @@ describe("CTC-7749: a busy machine drains and takes an approved release", () => 
     expect(readReleaseState(dir).deferral?.sinceMs).toBe(time.now());
   });
 
-  it("a failed apply keeps its acknowledged drain for a retry", async () => {
+  // CTC-8076: a failed pass releases the drain only when the previous supervisor is still serving.
+  it.each([
+    { label: "the rollback is not ready", detail: "rollback_not_ready", releases: false },
+    { label: "storage is refused before any stop and is not attested back", detail: "custody_restore_failed:engine_authority_mismatch", releases: true },
+    { label: "the rollback is ready but storage is not attested back", detail: "custody_restore_failed:bootstrap_signed_receipt_unavailable", releases: true },
+  ] as const)("a failed apply where $label ends $detail, and releases its drain only if the old supervisor serves", async ({ detail, releases }) => {
+    const { dir, authority } = detail === "rollback_not_ready" ? { dir: machine(), authority: "" } : custodyMachine();
+    const time = clock(A + DRAIN_AFTER_MS);
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
+    const fake = fakeEngine(dir, { read: offered(), busy: [1, 0, 0, 0], drain: cloud.call,
+      ...(detail === "rollback_not_ready" ? { composeUp: [false, false] }
+        : detail === "custody_restore_failed:engine_authority_mismatch"
+          ? { custody: (images: Images) => ({ refused: images.supervisor === TARGET.supervisor ? "bootstrap_cleanup_unproved" : "engine_authority_mismatch" }) }
+          : { custody: (images: Images) => images.supervisor === TARGET.supervisor ? authority : { refused: "bootstrap_signed_receipt_unavailable" },
+              ready: (image: string) => image === OLD.supervisor }) });
+    expect(await runRunnerUpdate(fake.engine, { dir, drain: true, now: time.now, sleep: time.sleep, readyDeadlineMs: 20_000 }))
+      .toMatchObject({ outcome: "failed", detail, exitCode: 1 });
+    expect(cloud.calls.includes("release")).toBe(releases);
+    expect(cloud.drain === null).toBe(releases);
+    expect(readReleaseState(dir).drain === null).toBe(releases);
+    if (detail === "custody_restore_failed:engine_authority_mismatch") expect(fake.calls).not.toContain("stop");
+    if (releases) expect(readReleaseState(dir).deferral?.sinceMs).toBe(time.now());
+  });
+
+  it("an applied release releases a cloud drain after release-state.json was deleted", async () => {
     const dir = machine();
     const time = clock(A + DRAIN_AFTER_MS);
     const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
-    const fake = fakeEngine(dir, { read: offered(), busy: [1, 0, 0, 0], drain: cloud.call, composeUp: [false, false] });
-    expect(await runRunnerUpdate(fake.engine, { dir, drain: true, now: time.now, sleep: time.sleep })).toMatchObject({ outcome: "failed", exitCode: 1 });
-    expect(cloud.calls).not.toContain("release");
-    expect(readReleaseState(dir).drain).not.toBeNull();
+    const abort = new AbortController();
+    expect(await runRunnerUpdate(fakeEngine(dir, { read: offered(), phases: () => 2, drain: cloud.call }).engine,
+      { dir, drain: true, now: time.now, signal: abort.signal, sleep: async () => abort.abort() })).toMatchObject({ outcome: "draining_for_update" });
+    expect(cloud.drain).not.toBeNull();
+    rmSync(join(dir, RELEASE_STATE_FILE));
+    expect(readReleaseState(dir).drain).toBeNull();
+    cloud.calls.length = 0;
+    const idle = fakeEngine(dir, { read: offered(), phases: () => 0, drain: cloud.call });
+    expect(await runRunnerUpdate(idle.engine, { dir, drain: true, now: time.now, sleep: time.sleep })).toMatchObject({ outcome: "updated", generation: 106 });
+    expect(cloud.calls).toEqual(["GET", "release"]);
+    expect(cloud.drain).toBeNull();
+    expect(readReleaseState(dir).drain).toBeNull();
   });
 });
 
