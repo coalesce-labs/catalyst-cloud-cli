@@ -37,6 +37,13 @@ import {
 // back and the supervisor is recreated on it. That scope set is saved before the recreate and removed
 // once it qualifies or rolls back, so a run killed in between is finished by the next one.
 //
+// A busy host re-adopts its live sessions before it qualifies, which can take longer than four minutes
+// (CTC-8163). Each recreated supervisor, the new release's or the restored previous one's, gets four
+// minutes, extended to 150 seconds past each new step it logs: fleet tenure, then a saved scope
+// re-adopted, then that scope ready. No supervisor gets more than seven minutes. A restart, another
+// image or `host_not_ready` still ends the wait at the next poll. At the deadline each saved scope it
+// has not qualified is reported, with the gate condition its latest log line shows failing.
+//
 // A team can stop being delegated while an update is in flight (CTC-7569): no supervisor, new or old,
 // starts its scope again. The previous release, restored, is the control. When it misses exactly the
 // scopes the new supervisor missed and qualifies the rest, those scopes are dropped from the saved set
@@ -64,7 +71,12 @@ export const IN_FLIGHT_FILE = "fleet-update-in-flight.json";
  *  on every loop while a scope is ready, so a ready scope logs it many times in this window. */
 const QUALIFIED_LOOKBACK_MS = 5 * 60_000;
 const QUALIFY_MIN_MS = 90_000;
+/** How long a recreated supervisor that shows no progress has to qualify every saved scope. */
 const QUALIFY_DEADLINE_MS = 240_000;
+/** How long past each new step of progress a recreated supervisor has to qualify (CTC-8163). */
+const QUALIFY_PROGRESS_MS = 150_000;
+/** The most one recreated supervisor is given, however it progresses (CTC-8163). */
+const QUALIFY_CEILING_MS = 420_000;
 const QUALIFY_POLL_MS = 10_000;
 const CHILD_NAME_PREFIX = "catalyst-pa_";
 /** What a successful apply leaves for the check: the bytes it wrote and when the roll began. */
@@ -118,6 +130,9 @@ export interface FleetUpdateOptions {
   qualifyMinMs?: number;
   qualifyDeadlineMs?: number;
   signal?: AbortSignal;
+  /** Called at a qualification deadline, before any restore, with one line per saved scope the
+   *  recreated supervisor had not qualified (CTC-8163). The command writes them to stderr. */
+  onQualificationPending?: (line: string) => void;
 }
 
 /** The two image fields in a fleet `compose.json`, or null when the file is not a fleet layout. */
@@ -163,12 +178,111 @@ export function qualifiedScopes(text: string): Set<string> {
 /** A `host_not_ready` line for one of `scopes`, or one that names no scope. Other scopes may be
  *  unready for their own reasons (a team with no repository yet) and do not stop an update. */
 export function notReadyScope(text: string, scopes: ReadonlySet<string>): string | null {
+  return readSupervisorLog(text, scopes).notReady;
+}
+
+/** The four conditions of the supervisor's per-scope qualification gate, from its latest valid
+ *  `supervisor_scope_qualification_state` line for that scope (CTC-8163). */
+interface GateSnapshot {
+  resourcesReady: boolean;
+  scopeEligible: boolean;
+  readyUntilValid: boolean;
+  sessionsReadopted: boolean;
+}
+const GATE_CODES: readonly (readonly [keyof GateSnapshot, string])[] = [
+  ["resourcesReady", "resources_ready"],
+  ["scopeEligible", "scope_eligible"],
+  ["readyUntilValid", "ready_until"],
+  ["sessionsReadopted", "sessions_readopted"],
+];
+
+/** What qualify() reads from one read of a recreated supervisor's log, kept only for `scopes`. */
+interface SupervisorLog {
+  /** The first `host_not_ready` for one of `scopes`, "unscoped" for one naming no scope, or null. */
+  notReady: string | null;
+  qualified: Set<string>;
+  /** The supervisor logged `supervisor_fleet_tenure`. */
+  tenure: boolean;
+  readopted: Set<string>;
+  ready: Set<string>;
+  gates: Map<string, GateSnapshot>;
+}
+
+/** One pass over the log text for everything qualify() reads. Lines for other scopes, and lines that
+ *  are not JSON or lack a field, are skipped. */
+function readSupervisorLog(text: string, scopes: ReadonlySet<string>): SupervisorLog {
+  const log: SupervisorLog = { notReady: null, qualified: new Set(), tenure: false, readopted: new Set(), ready: new Set(), gates: new Map() };
   for (const event of logEvents(text)) {
-    if (event.event !== "host_not_ready") continue;
     const key = scopeKey(event);
-    if (key === null || scopes.has(key)) return key ?? "unscoped";
+    if (event.event === "host_not_ready" && log.notReady === null && (key === null || scopes.has(key))) log.notReady = key ?? "unscoped";
+    if (event.event === "supervisor_fleet_tenure") log.tenure = true;
+    if (key === null || !scopes.has(key)) continue;
+    if (event.event === "supervisor_scope_qualified") log.qualified.add(key);
+    else if (event.event === "supervisor_readopted") log.readopted.add(key);
+    else if (event.event === "host_ready") log.ready.add(key);
+    else if (event.event === "supervisor_scope_qualification_state") {
+      const { resourcesReady, scopeEligible, readyUntilValid, sessionsReadopted } = event;
+      if (typeof resourcesReady === "boolean" && typeof scopeEligible === "boolean" && typeof readyUntilValid === "boolean" && typeof sessionsReadopted === "boolean")
+        log.gates.set(key, { resourcesReady, scopeEligible, readyUntilValid, sessionsReadopted });
+    }
   }
-  return null;
+  return log;
+}
+
+/** A recreated supervisor's qualification deadline, and the steps of progress it has counted for that
+ *  container (CTC-8163). The sets only ever hold required scopes. */
+interface QualifyBudget {
+  deadline: number;
+  readonly ceiling: number;
+  tenure: boolean;
+  readonly readopted: Set<string>;
+  readonly ready: Set<string>;
+}
+
+/** Count the steps `log` shows that `budget` has not counted yet: fleet tenure, a scope re-adopted, and
+ *  a re-adopted scope ready. A scope ready before its re-adoption shows counts once that does. Any new
+ *  step moves the deadline to `QUALIFY_PROGRESS_MS` past `atMs`, never earlier and never past the ceiling. */
+function countProgress(budget: QualifyBudget, log: SupervisorLog, atMs: number): void {
+  let progressed = false;
+  if (log.tenure && !budget.tenure) {
+    budget.tenure = true;
+    progressed = true;
+  }
+  for (const scope of log.readopted) {
+    if (budget.readopted.has(scope)) continue;
+    budget.readopted.add(scope);
+    progressed = true;
+  }
+  for (const scope of log.ready) {
+    if (!budget.readopted.has(scope) || budget.ready.has(scope)) continue;
+    budget.ready.add(scope);
+    progressed = true;
+  }
+  if (progressed) budget.deadline = Math.min(budget.ceiling, Math.max(budget.deadline, atMs + QUALIFY_PROGRESS_MS));
+}
+
+/** The longest one recreated supervisor is given to qualify, however it progresses. */
+const qualifyCeilingMs = (options: FleetUpdateOptions): number => Math.max(QUALIFY_CEILING_MS, options.qualifyDeadlineMs ?? QUALIFY_DEADLINE_MS);
+
+/** A scope as printed: anything outside printable ASCII, and the backslash that starts an escape,
+ *  escaped as `\uXXXX`, and at most 120 characters. */
+const printableScope = (scope: string): string => {
+  const escaped = scope.replace(/[^\x21-\x5b\x5d-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return escaped.length > 120 ? `${escaped.slice(0, 120)}...` : escaped;
+};
+
+/** The gate conditions a missing scope's snapshot shows failing, sorted; `diagnostic_unavailable`
+ *  without one, and `qualification_event_missing` when every condition held. */
+function failedGates(snapshot: GateSnapshot | undefined): string[] {
+  if (snapshot === undefined) return ["diagnostic_unavailable"];
+  const failed = GATE_CODES.filter(([field]) => !snapshot[field]).map(([, code]) => code).sort();
+  return failed.length > 0 ? failed : ["qualification_event_missing"];
+}
+
+/** One line per scope in `missing`, sorted by scope. `gates` null: the log could not be read. */
+function qualificationPendingLines(roll: Roll, missing: ReadonlySet<string>, gates: ReadonlyMap<string, GateSnapshot> | null): string[] {
+  return [...missing].sort().map((scope) =>
+    `fleet qualification pending: roll=${roll} scope=${printableScope(scope)} failed=${failedGates(gates?.get(scope)).join(",")}`);
 }
 
 function readInFlight(dir: string): Set<string> | null {
@@ -449,10 +563,11 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
     // saved. Only when compose.json and the running supervisor are that previous release, up long enough
     // to have qualified every scope it serves, does its log trim the saved set: a saved scope it no
     // longer qualifies stopped being delegated. A `host_not_ready` for a saved scope is a scope still
-    // started, not one dropped. Anything less keeps the saved set whole.
+    // started, not one dropped. Anything less keeps the saved set whole. Long enough is the most any
+    // recreated supervisor is given, since this run cannot see how it progressed (CTC-8163).
     const previous = savedImages(join(dir, PREVIOUS_COMPOSE_FILE));
     const onPrevious = previous !== null && current.runner === previous.runner && current.supervisor === previous.supervisor && runs(previous);
-    if (live && onPrevious && now() - Date.parse(live.startedAt) >= (options.qualifyDeadlineMs ?? QUALIFY_DEADLINE_MS)) {
+    if (live && onPrevious && now() - Date.parse(live.startedAt) >= qualifyCeilingMs(options)) {
       const recent = await engine.logs(live.id, new Date(now() - QUALIFIED_LOOKBACK_MS).toISOString(), signal);
       const serving = recent === null || notReadyScope(recent, scopes) !== null ? new Set<string>() : qualifiedScopes(recent);
       const kept = [...scopes].filter((scope) => serving.has(scope));
@@ -513,10 +628,10 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
   if (changed.length > 0) writePrivateAtomic(join(dir, PREVIOUS_COMPOSE_FILE), composeText);
   saveInFlight(dir, scopes, now());
   /** Write `text` as compose.json, recreate the supervisor alone on it and qualify it against `required`. */
-  const roll = async (text: string, images: FleetImages, required: ReadonlySet<string>): Promise<Qualification> => {
+  const roll = async (which: Roll, text: string, images: FleetImages, required: ReadonlySet<string>): Promise<Qualification> => {
     writePrivateAtomic(composePath, text);
     if (!(await engine.recreate(dir, project, signal))) return { ok: false, reason: "recreate_failed" };
-    return qualify(engine, dir, project, images, required, options, now);
+    return qualify(engine, dir, project, images, required, options, now, which);
   };
   const succeed = async (droppedScopes: readonly string[]): Promise<UpdateResult> => {
     clearInFlight(dir);
@@ -541,11 +656,11 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
       : record("updated", `${detail};${disturbed < 0 ? "children_unreadable" : `children_changed:${disturbed}`}`, previous, 1);
   };
 
-  const candidate = await roll(candidateText, target, scopes);
+  const candidate = await roll("candidate", candidateText, target, scopes);
   if (candidate.ok) return succeed(dropped);
   if (rollbackText === null || rollbackImages === null)
     return done("failed", `new_supervisor_not_qualified_no_previous${droppedDetail(dropped)}`, { ...tagged, exitCode: 1 });
-  let restored = await roll(rollbackText, rollbackImages, scopes);
+  let restored = await roll("rollback", rollbackText, rollbackImages, scopes);
   // The previous release is the control (CTC-7569). Missing exactly the scopes the candidate missed while
   // qualifying the rest, it shows those scopes stopped being delegated, not that the candidate broke them:
   // the candidate is applied again without them, and recorded only once it qualifies what is left.
@@ -553,8 +668,8 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
   if (gone !== null) {
     const kept = new Set([...scopes].filter((scope) => !gone.has(scope)));
     saveInFlight(dir, kept, now());
-    if ((await roll(candidateText, target, kept)).ok) return succeed([...dropped, ...gone]);
-    restored = await roll(rollbackText, rollbackImages, kept);
+    if ((await roll("candidate", candidateText, target, kept)).ok) return succeed([...dropped, ...gone]);
+    restored = await roll("rollback", rollbackText, rollbackImages, kept);
   }
   // A rollback that did not qualify keeps the baseline for the next run.
   if (restored.ok) clearInFlight(dir);
@@ -670,8 +785,12 @@ type Qualification =
   | { ok: false; reason: "aborted" | "recreate_failed" | "restarted" | "wrong_image" | "host_not_ready" | "deadline" }
   | { ok: false; reason: "missing"; missing: ReadonlySet<string> };
 
+/** Which supervisor a recreate puts up: the release's, or the previous one restored. */
+type Roll = "candidate" | "rollback";
+
 /** The recreated supervisor runs `images`, stays up with no restart, logs no `host_not_ready` for a
- *  scope it must serve, and qualifies every one of `scopes`, held for the minimum window. */
+ *  scope it must serve, and qualifies every one of `scopes`, held for the minimum window. Its deadline
+ *  moves with the progress it logs (CTC-8163); the restart, image and `host_not_ready` exits come first. */
 async function qualify(
   engine: FleetUpdateEngine,
   dir: string,
@@ -680,30 +799,50 @@ async function qualify(
   scopes: ReadonlySet<string>,
   options: FleetUpdateOptions,
   now: () => number,
+  roll: Roll,
 ): Promise<Qualification> {
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const start = now();
-  const deadline = start + (options.qualifyDeadlineMs ?? QUALIFY_DEADLINE_MS);
+  const budget: QualifyBudget = {
+    deadline: start + (options.qualifyDeadlineMs ?? QUALIFY_DEADLINE_MS),
+    ceiling: start + qualifyCeilingMs(options),
+    tenure: false,
+    readopted: new Set(),
+    ready: new Set(),
+  };
   const minimum = start + (options.qualifyMinMs ?? QUALIFY_MIN_MS);
   let id: string | null = null;
   for (;;) {
     if (options.signal?.aborted) return { ok: false, reason: "aborted" };
     const live = await engine.supervisor(dir, project, options.signal);
-    // What this poll's log has not qualified yet; null when the supervisor or its log could not be read.
+    // What this poll's log has not qualified yet, and its gate lines; null when the supervisor or its
+    // log could not be read.
     let missing: Set<string> | null = null;
+    let gates: ReadonlyMap<string, GateSnapshot> | null = null;
     if (live) {
       id ??= live.id;
       if (live.id !== id || !live.running || live.restartCount !== 0) return { ok: false, reason: "restarted" };
       if (live.image !== images.supervisor || live.runnerImage !== images.runner) return { ok: false, reason: "wrong_image" };
       const text = await engine.logs(live.id, live.startedAt, options.signal);
       if (text !== null) {
-        if (notReadyScope(text, scopes) !== null) return { ok: false, reason: "host_not_ready" };
-        const seen = qualifiedScopes(text);
-        missing = new Set([...scopes].filter((scope) => !seen.has(scope)));
+        const log = readSupervisorLog(text, scopes);
+        if (log.notReady !== null) return { ok: false, reason: "host_not_ready" };
+        missing = new Set([...scopes].filter((scope) => !log.qualified.has(scope)));
         if (now() >= minimum && missing.size === 0) return { ok: true };
+        countProgress(budget, log, now());
+        gates = log.gates;
       }
     }
-    if (now() >= deadline) return missing !== null && missing.size > 0 ? { ok: false, reason: "missing", missing } : { ok: false, reason: "deadline" };
+    if (now() >= budget.deadline) {
+      for (const line of qualificationPendingLines(roll, missing ?? scopes, gates)) {
+        try {
+          options.onQualificationPending?.(line);
+        } catch {
+          // A line that could not be written never holds up the other lines or the restore.
+        }
+      }
+      return missing !== null && missing.size > 0 ? { ok: false, reason: "missing", missing } : { ok: false, reason: "deadline" };
+    }
     await sleep(QUALIFY_POLL_MS);
   }
 }
