@@ -1,5 +1,6 @@
 import { closeSync, existsSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { readManifest, type Ctx } from "./config.js";
 import { CliError } from "./errors.js";
 import { onboardStateRoot } from "./onboard.js";
@@ -37,6 +38,11 @@ import {
 // format that differs, or is unknown on either side, waits for an idle machine as above, because an
 // older supervisor that meets a newer journal refuses to start.
 //
+// A drain (CTC-7749): after a day of busy deferrals, an automatic check asks the cloud to stop
+// granting this host new work. It keeps the supervisor and every running phase alive while it
+// waits for local containers and cloud grants to reach zero, then applies and releases the drain.
+// The two-hour soft limit reports progress; it never ends a phase.
+//
 // Then it rewrites the three image lines in `.env`, keeps the previous file beside it, and runs
 // `docker compose up`. The release counts as applied only when the running containers are its
 // images and the supervisor logged `host_ready` since it started; a `.env` that already names the
@@ -51,7 +57,16 @@ const PENDING_REMOVAL_KEPT = 20;
 const READY_DEADLINE_MS = 5 * 60_000;
 const READY_POLL_MS = 5_000;
 const ATTEMPT_HOST_LABEL = "dev.catalystcloud.attempt.host-id";
+const ATTEMPT_ID_LABEL = "dev.catalystcloud.attempt.id";
 const DESIRED_RELEASE_PATH = "/api/v1/hosts/desired-release";
+const UPDATE_DRAIN_PATH = "/api/v1/hosts/update-drain";
+/** CTC-7749: a release that has waited this long for running phases drains the machine. */
+export const DRAIN_AFTER_MS = 24 * 3_600_000;
+/** A drain this old reports once and keeps waiting. It never stops a phase. */
+export const DRAIN_SOFT_LIMIT_MS = 2 * 3_600_000;
+const DRAIN_POLL_MS = 5_000;
+const DRAIN_PASS_EVERY_MS = 15 * 60_000;
+const DRAIN_READ_RETRY_MS = 60_000;
 
 export const RELEASE_COMPONENTS = ["runner", "supervisor", "watchdog"] as const;
 export type ReleaseComponent = (typeof RELEASE_COMPONENTS)[number];
@@ -82,12 +97,58 @@ export type DesiredReleaseRead =
   | { kind: "unreachable"; detail: string; hostId: string }
   | { kind: "no_credential" };
 
+export type DrainRequest =
+  | { action: "request"; requestId: string; expectedRevision: number; generation: number }
+  | { action: "release"; requestId: string; expectedRevision: number };
+export interface DrainStatus {
+  revision: number;
+  drain: { requestId: string; generation: number; requestedAtMs: number; admissionBlocked: boolean } | null;
+  /** Live cloud grants, counted before their containers start: never proof of idleness. */
+  liveGenerations: number;
+}
+
+/** Strictly parse the host-authenticated update-drain response. */
+export function parseDrainAnswer(read: DesiredReleaseRead): { status: DrainStatus } | { refused: string } {
+  if (read.kind === "no_credential") return { refused: "no_credential" };
+  if (read.kind === "unreachable") return { refused: "unreachable" };
+  if (read.status !== 200) {
+    const refusal = isRecord(read.body) ? read.body.refusal : null;
+    return { refused: typeof refusal === "string" && /^[a-z_]{1,40}$/.test(refusal) ? refusal : `http_${read.status}` };
+  }
+  const body = read.body;
+  if (!isRecord(body) || body.ok !== true || !Number.isSafeInteger(body.revision) || (body.revision as number) < 0 ||
+      !Number.isSafeInteger(body.liveGenerations) || (body.liveGenerations as number) < 0) return { refused: "response_invalid" };
+  const drain = body.drain;
+  if (drain !== null && (!isRecord(drain) || typeof drain.requestId !== "string" || !UUID.test(drain.requestId) ||
+      !posInt(drain.generation) || !posInt(drain.requestedAtMs) || drain.admissionBlocked !== true)) return { refused: "response_invalid" };
+  return { status: { revision: body.revision as number, liveGenerations: body.liveGenerations as number, drain: drain as DrainStatus["drain"] } };
+}
+
+/** The parsed answer, with the HTTP status when the cloud answered at all. */
+async function drainAnswer(engine: RunnerUpdateEngine, dir: string, request: DrainRequest | null, signal?: AbortSignal) {
+  try {
+    const read = await engine.updateDrain(dir, request, signal);
+    return { ...parseDrainAnswer(read), http: read.kind === "answered" ? read.status : null };
+  } catch { return { refused: "unreachable", http: null } as const; }
+}
+
+/** The busy-release clock begins at approval or the first busy look, whichever came first. */
+export function advanceDeferral(
+  previous: ReleaseState["deferral"],
+  release: Pick<DesiredRelease, "generation" | "approvedAtMs">,
+  nowMs: number,
+): NonNullable<ReleaseState["deferral"]> {
+  if (previous?.offered === release.generation) return previous;
+  return { sinceMs: previous?.sinceMs ?? Math.min(nowMs, release.approvedAtMs), offered: release.generation, offeredSinceMs: nowMs };
+}
+
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const posInt = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SHA40 = /^[0-9a-f]{40}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** A reference this machine may pull for `component`: its repository, at a digest, with no tag. */
 export function releaseReference(component: ReleaseComponent, value: unknown): string | null {
@@ -167,11 +228,14 @@ export interface ReleaseState {
   pendingRemoval: string[];
   /** The update window the schedule last settled (update-windows.ts); null before the first. */
   windowSettledMs: number | null;
-  last: { atMs: number; outcome: UpdateOutcome; detail: string; generation: number | null } | null;
+  /** The first busy look at a pending release, preserved across newer approvals. */
+  deferral: { sinceMs: number; offered: number; offeredSinceMs: number } | null;
+  drain: { requestId: string; generation: number; revision: number; acknowledgedAtMs: number | null; softLimitReported: boolean } | null;
+  last: { atMs: number; outcome: UpdateOutcome; detail: string; generation: number | null; offered?: number | null } | null;
 }
 
 export function readReleaseState(dir: string): ReleaseState {
-  const empty: ReleaseState = { version: 1, generation: null, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null, last: null };
+  const empty: ReleaseState = { version: 1, generation: null, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null, deferral: null, drain: null, last: null };
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(dir, RELEASE_STATE_FILE), "utf8"));
     if (!isRecord(parsed) || parsed.version !== 1) return empty;
@@ -188,7 +252,13 @@ export function readReleaseState(dir: string): ReleaseState {
         ? parsed.pendingRemoval.filter((ref): ref is string => typeof ref === "string").slice(0, PENDING_REMOVAL_KEPT)
         : [],
       windowSettledMs: posInt(parsed.windowSettledMs) ? parsed.windowSettledMs : null,
-      last: isRecord(parsed.last) ? (parsed.last as ReleaseState["last"]) : null,
+      deferral: isRecord(parsed.deferral) && posInt(parsed.deferral.sinceMs) && posInt(parsed.deferral.offered) && posInt(parsed.deferral.offeredSinceMs)
+        ? { sinceMs: parsed.deferral.sinceMs, offered: parsed.deferral.offered, offeredSinceMs: parsed.deferral.offeredSinceMs } : null,
+      drain: isRecord(parsed.drain) && typeof parsed.drain.requestId === "string" && UUID.test(parsed.drain.requestId) &&
+        posInt(parsed.drain.generation) && Number.isSafeInteger(parsed.drain.revision) && (parsed.drain.revision as number) >= 0 &&
+        (parsed.drain.acknowledgedAtMs === null || posInt(parsed.drain.acknowledgedAtMs)) && typeof parsed.drain.softLimitReported === "boolean"
+        ? parsed.drain as ReleaseState["drain"] : null,
+      last: isRecord(parsed.last) ? { ...parsed.last, offered: posInt(parsed.last.offered) ? parsed.last.offered : null } as ReleaseState["last"] : null,
     };
   } catch {
     return empty;
@@ -230,6 +300,9 @@ export type UpdateOutcome =
   | "updated"
   | "planned"
   | "deferred_busy"
+  | "draining_for_update"
+  | "drain_soft_limit"
+  | "drain_unavailable"
   | "waiting_window"
   | "retained"
   | "rolled_back"
@@ -240,6 +313,8 @@ export interface UpdateResult {
   detail: string;
   generation: number | null;
   releaseId?: string;
+  /** The generation the cloud offered, whenever a release was read. */
+  offeredGeneration?: number;
   /** Exit code: 0 for every outcome a later run can improve on its own, 1 when a person should look. */
   exitCode: number;
 }
@@ -257,8 +332,10 @@ export type CustodyAttestation = { authority: string } | { refused: string };
 /** Everything the update touches outside its own files. The docker one is below; tests use fakes. */
 export interface RunnerUpdateEngine {
   /** `report` is the previous run's outcome (`updateReport`), sent on the read so the cloud sees it. */
-  desiredRelease(dir: string, signal?: AbortSignal, report?: string): Promise<DesiredReleaseRead>;
-  /** Attempt containers for this host in any state, or null when Docker could not be read. */
+  /** `fresh` reads again even after a shared read answered, and that read answers later readers. */
+  desiredRelease(dir: string, signal?: AbortSignal, report?: string, fresh?: boolean): Promise<DesiredReleaseRead>;
+  updateDrain(dir: string, request: DrainRequest | null, signal?: AbortSignal): Promise<DesiredReleaseRead>;
+  /** Phase attempts with a container for this host, counted once per attempt id; null when unreadable. */
   attemptContainers(dir: string, hostId: string, signal?: AbortSignal): Promise<number | null>;
   /** Pull and verify each image natively for this engine. Null when ready, else why not. */
   prepare(images: string[], signal?: AbortSignal): Promise<string | null>;
@@ -286,11 +363,89 @@ export interface RunnerUpdateOptions {
   signal?: AbortSignal;
   /** The schedule's run: a newer release waits until a window opens that no run has settled yet. */
   window?: { lastOpenedMs: number; nextOpensMs: number };
+  /** The schedule may request a drain and wait for physical idleness. */
+  drain?: boolean;
+  /** Rechecked while draining so an owner's hold ends the wait. */
+  held?: () => string | null;
+  /** A waiting pass, for the schedule's log. */
+  onPass?: (result: UpdateResult) => void;
 }
 
 /** Outcomes that settle a window: nothing was pending, or the machine restarted onto (or tried) a
  *  release. A busy deferral or a passing refusal leaves the window open for the next check. */
 const SETTLES_WINDOW: ReadonlySet<UpdateOutcome> = new Set(["current", "recorded", "updated", "rolled_back", "failed"]);
+const REPORTED_AT_ONCE: ReadonlySet<UpdateOutcome> = new Set(["deferred_busy", "draining_for_update", "drain_soft_limit", "drain_unavailable"]);
+const WAITS: ReadonlySet<UpdateOutcome> = new Set(["draining_for_update", "drain_soft_limit"]);
+/** CTC-8076: Mac private thoughts storage guards running phases, not only this update. Its native
+ *  producer answers every phase storage request on the attested supervisor image and checks the engine
+ *  binding on each one, and the supervisor mounts that channel. A pass that could not attest storage
+ *  back onto the images the machine keeps is failed: it keeps any drain, so no new phase reaches
+ *  storage that refuses it, and it is reported at once so the owner hears of it. */
+export const custodyUnattested = (result: Pick<UpdateResult, "outcome" | "detail">): boolean =>
+  result.outcome === "failed" && result.detail.startsWith("custody_restore_failed:");
+
+const sleepDefault = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Release a known drain, re-reading after a revision conflict. A failed release remains recorded. */
+async function releaseDrain(engine: RunnerUpdateEngine, dir: string, state: ReleaseState, signal?: AbortSignal, sleep = sleepDefault): Promise<boolean> {
+  const local = state.drain;
+  if (local === null) return true;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const answer = parseDrainAnswer(await engine.updateDrain(dir, { action: "release", requestId: local.requestId, expectedRevision: local.revision }, signal));
+      if ("status" in answer && (answer.status.drain === null || answer.status.drain.requestId !== local.requestId)) return true;
+      const looked = parseDrainAnswer(await engine.updateDrain(dir, null, signal));
+      if ("status" in looked) {
+        if (looked.status.drain === null || looked.status.drain.requestId !== local.requestId) return true;
+        local.revision = looked.status.revision;
+      }
+    } catch { /* The next attempt may reach the cloud. */ }
+    if (attempt < 2) await sleep(DRAIN_POLL_MS);
+  }
+  return false;
+}
+
+/** End an update drain even when local state was lost. The lock prevents racing a waiting updater. */
+export async function releaseUpdateDrain(
+  engine: RunnerUpdateEngine, dir: string, { cloud, sleep = sleepDefault }: { cloud: boolean; sleep?: (ms: number) => Promise<void> },
+): Promise<"released" | "none" | "pending" | "failed"> {
+  let lock: string | null = null;
+  for (let elapsed = 0; elapsed <= (cloud ? 10_000 : 0); elapsed += DRAIN_POLL_MS) {
+    lock = takeLock(dir, Date.now());
+    if (lock !== null) break;
+    if (elapsed < 10_000 && cloud) await sleep(DRAIN_POLL_MS);
+  }
+  // A running update owns release-state.json and ends its own wait on the hold: never write over it.
+  if (lock === null) return "pending";
+  try {
+    const state = readReleaseState(dir);
+    if (!cloud && state.drain === null) {
+      if (state.deferral !== null) writeReleaseState(dir, { ...state, deferral: null });
+      return "none";
+    }
+    const looked = parseDrainAnswer(await engine.updateDrain(dir, null));
+    if ("refused" in looked) return "failed";
+    if (looked.status.drain === null) {
+      writeReleaseState(dir, { ...state, drain: null, deferral: null });
+      return "none";
+    }
+    const drain = looked.status.drain;
+    const adopted: ReleaseState = { ...state, drain: { requestId: drain.requestId, generation: drain.generation, revision: looked.status.revision,
+      acknowledgedAtMs: drain.requestedAtMs, softLimitReported: state.drain?.softLimitReported ?? false } };
+    writeReleaseState(dir, adopted);
+    if (!(await releaseDrain(engine, dir, adopted, undefined, sleep))) return "failed";
+    writeReleaseState(dir, { ...readReleaseState(dir), drain: null, deferral: null });
+    return "released";
+  } catch { return "failed";
+  } finally { releaseLock(dir, lock); }
+}
+
+/** The read-only check explains why a machine is currently fenced from new work. */
+export function drainLines(state: ReleaseState): string[] {
+  const drain = state.drain;
+  return drain?.acknowledgedAtMs === null || !drain ? [] :
+    [`Catalyst has sent this machine no new phases since ${new Date(drain.acknowledgedAtMs).toISOString()}, so it can move to generation ${drain.generation} once its running phases finish. To stop waiting and turn automatic updates off: catalyst runner auto-update off`];
+}
 
 /** One serialized update run. A second concurrent run returns `retained` with `update_running`. */
 export async function runRunnerUpdate(engine: RunnerUpdateEngine, options: RunnerUpdateOptions): Promise<UpdateResult> {
@@ -304,13 +459,59 @@ export async function runRunnerUpdate(engine: RunnerUpdateEngine, options: Runne
     return { outcome: "retained", detail: "update_running", generation: readReleaseState(dir).generation, exitCode: 0 };
   try {
     if (!options.check) await retryPendingRemoval(engine, dir, options.signal);
-    const result = await update(engine, options, now);
-    if (!options.check) {
-      const state = readReleaseState(dir);
+    for (let pass = 0;; pass++) {
+      let hostId = "";
+      let result = await update(engine, options, now, pass > 0, (id) => { hostId = id; });
+      if (options.check) return result;
+      let state = readReleaseState(dir);
+      let deferral = state.deferral;
+      if (["updated", "recorded", "current"].includes(result.outcome)) deferral = null;
+      else if (["rolled_back", "failed"].includes(result.outcome) && result.offeredGeneration !== undefined)
+        deferral = { sinceMs: now(), offered: result.offeredGeneration, offeredSinceMs: now() };
+      else if (state.drain && result.outcome === "retained")
+        deferral = result.offeredGeneration === undefined ? null : { sinceMs: now(), offered: result.offeredGeneration, offeredSinceMs: now() };
       const windowSettledMs = options.window && SETTLES_WINDOW.has(result.outcome) ? options.window.lastOpenedMs : state.windowSettledMs;
-      writeReleaseState(dir, { ...state, windowSettledMs, last: { atMs: now(), outcome: result.outcome, detail: result.detail, generation: result.generation } });
+      writeReleaseState(dir, { ...state, deferral, windowSettledMs, last: { atMs: now(), outcome: result.outcome, detail: result.detail, generation: result.generation, offered: result.offeredGeneration ?? null } });
+      state = readReleaseState(dir);
+      // CTC-8077: the schedule's applied release with no local drain record reads the cloud once, so
+      // a drain whose record was lost with release-state.json is still released.
+      if ((result.outcome === "recorded" || (result.outcome === "updated" && options.drain)) && state.drain === null) {
+        const looked = await drainAnswer(engine, dir, null, options.signal);
+        if ("status" in looked && looked.status.drain !== null) {
+          const active = looked.status.drain;
+          state = { ...state, drain: { requestId: active.requestId, generation: active.generation, revision: looked.status.revision,
+            acknowledgedAtMs: active.requestedAtMs, softLimitReported: false } };
+          writeReleaseState(dir, state);
+        }
+      }
+      if (state.drain !== null && ["updated", "recorded", "current", "rolled_back", "retained"].includes(result.outcome)) {
+        const released = await releaseDrain(engine, dir, state, options.signal, options.sleep);
+        if (released) writeReleaseState(dir, { ...readReleaseState(dir), drain: null });
+        else if (result.outcome === "updated") {
+          result = { ...result, detail: `${result.detail}:drain_release_pending` };
+          writeReleaseState(dir, { ...readReleaseState(dir), last: { atMs: now(), outcome: result.outcome, detail: result.detail,
+            generation: result.generation, offered: result.offeredGeneration ?? null } });
+        }
+      }
+      if (REPORTED_AT_ONCE.has(result.outcome) || custodyUnattested(result)) {
+        try { await engine.desiredRelease(dir, options.signal, updateReport(readReleaseState(dir), readManifest().version), true); }
+        catch { /* The next read carries the same report. */ }
+      }
+      if (!options.drain || !WAITS.has(result.outcome)) return result;
+      options.onPass?.(result);
+      const woke = await waitForIdle(engine, options, now, hostId, result);
+      if (woke === "aborted") return result;
+      if (woke === "held") {
+        const heldState = readReleaseState(dir);
+        if (heldState.drain !== null && await releaseDrain(engine, dir, heldState, options.signal, options.sleep))
+          writeReleaseState(dir, { ...heldState, drain: null, deferral: null });
+        const ended: UpdateResult = { outcome: "retained", detail: "owner_setting", generation: heldState.generation,
+          offeredGeneration: result.offeredGeneration, releaseId: result.releaseId, exitCode: 0 };
+        writeReleaseState(dir, { ...readReleaseState(dir), last: { atMs: now(), outcome: ended.outcome, detail: ended.detail,
+          generation: ended.generation, offered: ended.offeredGeneration ?? null } });
+        return ended;
+      }
     }
-    return result;
   } finally {
     if (lock !== null) releaseLock(dir, lock);
   }
@@ -352,32 +553,174 @@ export function updateReport(state: ReleaseState, cliVersion: string): string | 
     outcome: state.last.outcome,
     detail: state.last.detail.toLowerCase().replace(REPORT_DETAIL, "_").slice(0, 160),
     applied: state.generation,
-    offered: state.last.generation,
+    offered: state.last.offered ?? state.last.generation,
     atMs: state.last.atMs,
     cli: /^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(cliVersion) ? cliVersion : null,
   });
 }
 
-async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, now: () => number): Promise<UpdateResult> {
+function drainingResult(
+  dir: string, state: ReleaseState, atMs: number, phases: number | null, live?: number, suffix?: string,
+  tagged: Partial<UpdateResult> = {},
+): UpdateResult {
+  const drain = state.drain;
+  const drainingFor = Math.max(0, atMs - (drain?.acknowledgedAtMs ?? atMs));
+  const soft = drain?.acknowledgedAtMs != null && drainingFor >= DRAIN_SOFT_LIMIT_MS && !drain.softLimitReported;
+  if (soft && drain) writeReleaseState(dir, { ...state, drain: { ...drain, softLimitReported: true } });
+  const detail = waitDetail(phases, state.deferral, atMs, `draining_for_ms:${drainingFor}` +
+    (live !== undefined ? `,live_generations:${live}` : "") + (suffix ? `,${suffix}` : ""));
+  return { outcome: soft ? "drain_soft_limit" : "draining_for_update", detail, generation: state.generation,
+    offeredGeneration: state.deferral?.offered, exitCode: 0, ...tagged };
+}
+
+function waitDetail(phases: number | null, deferral: ReleaseState["deferral"], atMs: number, extra?: string): string {
+  const deferredFor = Math.max(0, atMs - (deferral?.offeredSinceMs ?? atMs));
+  return `phases_running:${phases ?? "unknown"},deferred_for_ms:${deferredFor}` + (extra ? `,${extra}` : "");
+}
+
+function deferBusy(
+  dir: string, state: ReleaseState, release: DesiredRelease, atMs: number, phases: number,
+  done: (outcome: UpdateOutcome, detail: string, extra?: Partial<UpdateResult>) => UpdateResult, tagged: Partial<UpdateResult>,
+): UpdateResult {
+  const deferral = advanceDeferral(state.deferral, release, atMs);
+  writeReleaseState(dir, { ...readReleaseState(dir), deferral });
+  return done("deferred_busy", waitDetail(phases, deferral, atMs), tagged);
+}
+
+async function waitForIdle(
+  engine: RunnerUpdateEngine, options: RunnerUpdateOptions, now: () => number, hostId: string, result: UpdateResult,
+): Promise<"idle" | "aborted" | "held" | "gone"> {
+  const sleep = options.sleep ?? sleepDefault;
+  const retry = result.detail.includes(",read:");
+  const passAt = now() + (retry ? DRAIN_READ_RETRY_MS : DRAIN_PASS_EVERY_MS);
+  for (;;) {
+    if (options.signal?.aborted) return "aborted";
+    if (options.held?.() === "owner_setting") return "held";
+    if (now() >= passAt) return "idle";
+    const phases = await engine.attemptContainers(options.dir, hostId, options.signal);
+    if (phases === 0) {
+      const looked = await drainAnswer(engine, options.dir, null, options.signal);
+      if ("status" in looked) {
+        const ours = readReleaseState(options.dir).drain;
+        if (looked.status.drain?.requestId !== ours?.requestId) {
+          const state = readReleaseState(options.dir);
+          writeReleaseState(options.dir, { ...state, drain: null, deferral: state.deferral === null ? null : { ...state.deferral, sinceMs: now(), offeredSinceMs: now() } });
+          return "gone";
+        }
+        // After a failed read, an idle machine still waits for the retry time before reading again.
+        if (looked.status.liveGenerations === 0 && !retry) return "idle";
+      }
+    }
+    await sleep(DRAIN_POLL_MS);
+  }
+}
+
+/** The non-in-place path checks local phases and the cloud fence before any supervisor stop. */
+async function drainedLook({ engine, options, state, release, target, hostId, now, done, tagged }: {
+  engine: RunnerUpdateEngine; options: RunnerUpdateOptions; state: ReleaseState; release: DesiredRelease;
+  target: Images; hostId: string; now: () => number;
+  done: (outcome: UpdateOutcome, detail: string, extra?: Partial<UpdateResult>) => UpdateResult;
+  tagged: Partial<UpdateResult>;
+}): Promise<UpdateResult | null> {
+  const { dir, signal } = options;
+  const busy = await engine.attemptContainers(dir, hostId, signal);
+  if (state.drain?.acknowledgedAtMs != null) {
+    if (busy !== 0) return drainingResult(dir, state, now(), busy, undefined, undefined, tagged);
+    const looked = await drainAnswer(engine, dir, null, signal);
+    if ("refused" in looked) return drainingResult(dir, state, now(), 0, undefined, `read:${looked.refused}`, tagged);
+    if (looked.status.drain?.requestId === state.drain.requestId && looked.status.liveGenerations > 0)
+      return drainingResult(dir, state, now(), 0, looked.status.liveGenerations, undefined, tagged);
+    if (looked.status.drain === null || looked.status.drain.requestId !== state.drain.requestId) {
+      writeReleaseState(dir, { ...state, drain: null, deferral: { sinceMs: now(), offered: release.generation, offeredSinceMs: now() } });
+      return done("deferred_busy", "phases_running:0,deferred_for_ms:0", tagged);
+    }
+  } else if (busy === null) return done("retained", "docker_unavailable", tagged);
+  else if (busy > 0) {
+    const deferral = advanceDeferral(state.deferral, release, now());
+    if (!options.check) writeReleaseState(dir, { ...state, deferral });
+    const detail = waitDetail(busy, deferral, now());
+    if (!options.drain || now() - deferral.sinceMs < DRAIN_AFTER_MS || options.check)
+      return done("deferred_busy", detail, tagged);
+    const unprepared = await engine.prepare(RELEASE_COMPONENTS.map((c) => target[c]), signal);
+    if (unprepared !== null) return done("retained", unprepared, tagged);
+    const looked = await drainAnswer(engine, dir, null, signal);
+    if ("refused" in looked) return done("drain_unavailable", `${detail},drain:${looked.refused}`, tagged);
+    let drain = looked.status.drain;
+    let revision = looked.status.revision;
+    const requestId = state.drain?.requestId ?? randomUUID();
+    if (drain === null) {
+      const pending: NonNullable<ReleaseState["drain"]> = { requestId, generation: release.generation, revision, acknowledgedAtMs: null, softLimitReported: false };
+      writeReleaseState(dir, { ...readReleaseState(dir), drain: pending });
+      const requested = await drainAnswer(engine, dir, { action: "request", requestId, expectedRevision: revision, generation: release.generation }, signal);
+      if ("refused" in requested) {
+        const conflict = requested.refused === "update_drain_conflict" ? await drainAnswer(engine, dir, null, signal) : null;
+        if (conflict && "status" in conflict && conflict.status.drain !== null) {
+          drain = conflict.status.drain;
+          revision = conflict.status.revision;
+        } else {
+          // Only a 4xx answer shows the cloud did not record the request. No answer, any 5xx (such as
+          // 503 update_drain_unavailable) or a malformed 200 may follow a commit: keep the pending id
+          // so a later check adopts or releases it.
+          if (requested.http !== null && requested.http >= 400 && requested.http < 500)
+            writeReleaseState(dir, { ...readReleaseState(dir), drain: null });
+          return done("drain_unavailable", `${detail},drain:${requested.refused}`, tagged);
+        }
+      } else {
+        drain = requested.status.drain;
+        revision = requested.status.revision;
+      }
+    }
+    if (drain === null) return done("drain_unavailable", `${detail},drain:response_invalid`, tagged);
+    const heldDrain: NonNullable<ReleaseState["drain"]> = { requestId: drain.requestId, generation: drain.generation, revision,
+      acknowledgedAtMs: drain.requestedAtMs, softLimitReported: false };
+    writeReleaseState(dir, { ...readReleaseState(dir), drain: heldDrain });
+    return drainingResult(dir, readReleaseState(dir), now(), busy, looked.status.liveGenerations, undefined, tagged);
+  }
+  return null;
+}
+
+async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, now: () => number, fresh = false, onHostId?: (id: string) => void): Promise<UpdateResult> {
   const { dir, signal } = options;
   const envPath = join(dir, ".env");
-  const state = readReleaseState(dir);
+  let state = readReleaseState(dir);
   const done = (outcome: UpdateOutcome, detail: string, extra: Partial<UpdateResult> = {}): UpdateResult =>
     ({ outcome, detail, generation: state.generation, exitCode: 0, ...extra });
 
-  const read = await engine.desiredRelease(dir, signal, options.check ? undefined : updateReport(state, readManifest().version));
+  const read = await engine.desiredRelease(dir, signal, options.check ? undefined : updateReport(state, readManifest().version), fresh);
+  const hostId = read.kind === "no_credential" ? "" : read.hostId;
+  onHostId?.(hostId);
   const decision = decideRelease(state.generation, read);
-  if (decision.action === "retain")
+  const offered = read.kind === "answered" && read.status === 200 && isRecord(read.body) && read.body.ok === true
+    ? parseDesiredRelease(read.body.release) : null;
+  if (decision.action === "retain") {
+    if (!options.check && state.drain?.acknowledgedAtMs != null && decision.reason !== "not_newer")
+      return drainingResult(dir, state, now(), null, undefined, `read:${decision.reason}`);
     return decision.reason === "not_newer"
-      ? done("current", "not_newer")
+      ? done("current", "not_newer", offered ? { releaseId: offered.releaseId, offeredGeneration: offered.generation } : {})
       : done("retained", decision.reason, { exitCode: decision.reason === "credential_refused" || decision.reason === "no_credential" ? 1 : 0 });
+  }
   const { release } = decision;
-  const tagged = { releaseId: release.releaseId };
+  const tagged = { releaseId: release.releaseId, offeredGeneration: release.generation };
+  if (!options.check && state.drain?.acknowledgedAtMs === null) {
+    const looked = await drainAnswer(engine, dir, null, signal);
+    if ("refused" in looked)
+      return done("drain_unavailable", waitDetail(null, state.deferral, now(), `drain:${looked.refused}`), tagged);
+    if ("status" in looked && looked.status.drain !== null) {
+      const active = looked.status.drain;
+      state = { ...state, drain: { requestId: active.requestId, generation: active.generation, revision: looked.status.revision,
+        acknowledgedAtMs: active.requestedAtMs, softLimitReported: state.drain.softLimitReported } };
+      writeReleaseState(dir, state);
+    }
+  }
+  if (!options.check && state.drain !== null && state.deferral?.offered !== release.generation) {
+    state = { ...state, deferral: advanceDeferral(state.deferral, release, now()) };
+    writeReleaseState(dir, state);
+  }
   // A newer release on the schedule waits for a window no run has settled. A machine that has
   // settled none yet (its first run on this CLI) takes it now, and drift on the applied generation
   // is put right at once, as before.
   const { window } = options;
-  if (window && !options.check && decision.action === "update" && state.windowSettledMs !== null && window.lastOpenedMs <= state.windowSettledMs)
+  if (window && state.drain?.acknowledgedAtMs == null && !options.check && decision.action === "update" && state.windowSettledMs !== null && window.lastOpenedMs <= state.windowSettledMs)
     return done("waiting_window", `next_window:${new Date(window.nextOpensMs).toISOString()}`, tagged);
   const target = Object.fromEntries(RELEASE_COMPONENTS.map((c) => [c, release.images[c].reference])) as Images;
   const envText = readFileSync(envPath, "utf8");
@@ -394,7 +737,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
       // place instead of waiting for one more applied generation.
       if (!options.check && state.journal === null && release.journalFormat !== null)
         writeReleaseState(dir, { ...state, journal: { format: release.journalFormat, supervisor: target.supervisor } });
-      return done("current", "not_newer");
+      return done("current", "not_newer", tagged);
     }
   }
   const record = (outcome: UpdateOutcome, detail: string, previous: Images | null, unremoved: string[] = []): UpdateResult => {
@@ -422,14 +765,12 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   }
   const rollbackImages = rollbackText === null ? null : imagesOf(parseEnvText(rollbackText));
   // In place only when the supervisor a failure goes back to reads the release's journal format.
-  const inPlace = release.journalFormat !== null && state.journal !== null && rollbackImages !== null
+  const inPlace = state.drain === null && release.journalFormat !== null && state.journal !== null && rollbackImages !== null
     && state.journal.format === release.journalFormat && state.journal.supervisor === rollbackImages.supervisor;
 
-  const hostId = read.kind === "answered" ? read.hostId : "";
   if (!inPlace) {
-    const busy = await engine.attemptContainers(dir, hostId, signal);
-    if (busy === null) return done("retained", "docker_unavailable");
-    if (busy > 0) return done("deferred_busy", `attempt_containers:${busy}`, tagged);
+    const looked = await drainedLook({ engine, options, state, release, target, hostId, now, done, tagged });
+    if (looked !== null) return looked;
   }
 
   const unprepared = await engine.prepare(RELEASE_COMPONENTS.map((c) => target[c]), signal);
@@ -459,18 +800,20 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
 
   // The boundary between phases: stop the supervisor so it admits nothing, then look again. A phase
   // that started since the first look keeps running, the supervisor comes back, and the update waits.
+  const unattested = (refused: string) => done("failed", `custody_restore_failed:${refused}`, { ...tagged, exitCode: 1 });
   if (!(await engine.stopSupervisor(dir, signal))) {
     await engine.composeUp(dir, signal);
-    await restoreCustody(rollbackImages ?? current);
-    return done("retained", "supervisor_stop_failed", tagged);
+    const restoreRefused = await restoreCustody(rollbackImages ?? current);
+    return restoreRefused === null ? done("retained", "supervisor_stop_failed", tagged) : unattested(restoreRefused);
   }
   const busyAfterStop = inPlace ? 0 : await engine.attemptContainers(dir, hostId, signal);
   if (busyAfterStop !== 0) {
     await engine.composeUp(dir, signal);
-    await restoreCustody(rollbackImages ?? current);
-    return busyAfterStop === null
+    const restoreRefused = await restoreCustody(rollbackImages ?? current);
+    if (restoreRefused !== null) return unattested(restoreRefused);
+    return state.drain?.acknowledgedAtMs != null ? drainingResult(dir, readReleaseState(dir), now(), busyAfterStop, undefined, undefined, tagged) : busyAfterStop === null
       ? done("retained", "docker_unavailable", tagged)
-      : done("deferred_busy", `attempt_containers:${busyAfterStop}`, tagged);
+      : deferBusy(dir, state, release, now(), busyAfterStop, done, tagged);
   }
 
   // From here the machine changes. The previous file is the rollback.
@@ -586,7 +929,50 @@ export const DESIRED_RELEASE_SCRIPT = `(async () => {
   }
 })();`;
 
+/** Sibling of the desired-release script: the host bearer and POST body stay inside Docker. */
+export const UPDATE_DRAIN_SCRIPT = `(async () => {
+  const out = (v) => process.stdout.write(JSON.stringify(v));
+  let state;
+  try { state = JSON.parse(require("node:fs").readFileSync(process.env.CATALYST_HOST_CREDENTIAL_FILE, "utf8")); }
+  catch { return out({ kind: "no_credential" }); }
+  const e = state && state.enrollment;
+  const base = process.env.CATALYST_MIRROR_URL;
+  if (!state || state.version !== 1 || typeof state.secret !== "string" || !e ||
+      typeof e.tenant !== "string" || typeof e.hostId !== "string" || !base) return out({ kind: "no_credential" });
+  const tenant = Buffer.from(e.tenant, "utf8").toString("base64url");
+  const body = process.env.CATALYST_UPDATE_DRAIN_BODY || "";
+  if (body.length > 512) return out({ kind: "unreachable", detail: "body_too_large", hostId: e.hostId });
+  try {
+    const response = await fetch(new URL(${JSON.stringify(UPDATE_DRAIN_PATH)}, base).href, {
+      method: body ? "POST" : "GET", redirect: "error", signal: AbortSignal.timeout(15000),
+      headers: { authorization: "Bearer ctc_host_" + tenant + "." + e.hostId + "." + state.secret,
+        accept: "application/json", ...(body ? { "content-type": "application/json" } : {}) },
+      ...(body ? { body } : {}),
+    });
+    let responseBody = null;
+    try { responseBody = await response.json(); } catch {}
+    out({ kind: "answered", status: response.status, body: responseBody, hostId: e.hostId });
+  } catch (error) {
+    out({ kind: "unreachable", detail: String((error && error.name) || "fetch failed"), hostId: e.hostId });
+  }
+})();`;
+
 export const HOST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/** The one JSON line the one-off supervisor returns for either host-authenticated route. */
+function hostAnswer(read: { code: number; stdout: string }): DesiredReleaseRead {
+  if (read.code !== 0) return { kind: "no_credential" };
+  try {
+    const parsed: unknown = JSON.parse(read.stdout);
+    if (!isRecord(parsed)) return { kind: "no_credential" };
+    const hostId = typeof parsed.hostId === "string" && HOST_ID.test(parsed.hostId) ? parsed.hostId : null;
+    if (parsed.kind === "answered" && hostId && typeof parsed.status === "number")
+      return { kind: "answered", status: parsed.status, body: parsed.body ?? null, hostId };
+    if (parsed.kind === "unreachable" && hostId)
+      return { kind: "unreachable", detail: String(parsed.detail ?? "fetch failed").slice(0, 80), hostId };
+    return { kind: "no_credential" };
+  } catch { return { kind: "no_credential" }; }
+}
 
 /** The real engine: the docker CLI and the setup engine's own pull, custody and Compose steps. */
 export function dockerRunnerUpdateEngine(
@@ -610,24 +996,23 @@ export function dockerRunnerUpdateEngine(
       const reportEnv = report ? ["-e", `CATALYST_UPDATE_REPORT=${report}`] : [];
       const read = await docker([...compose, "run", "--rm", "-T", "--no-deps", ...reportEnv, "--entrypoint", "bun", "supervisor", "-e", DESIRED_RELEASE_SCRIPT],
         { cwd: dir, signal, timeoutMs: 120_000 });
-      if (read.code !== 0) return { kind: "no_credential" };
-      try {
-        const parsed: unknown = JSON.parse(read.stdout);
-        if (!isRecord(parsed)) return { kind: "no_credential" };
-        const hostId = typeof parsed.hostId === "string" && HOST_ID.test(parsed.hostId) ? parsed.hostId : null;
-        if (parsed.kind === "answered" && hostId && typeof parsed.status === "number")
-          return { kind: "answered", status: parsed.status, body: parsed.body ?? null, hostId };
-        if (parsed.kind === "unreachable" && hostId)
-          return { kind: "unreachable", detail: String(parsed.detail ?? "fetch failed").slice(0, 80), hostId };
-        return { kind: "no_credential" };
-      } catch {
-        return { kind: "no_credential" };
-      }
+      return hostAnswer(read);
+    },
+    async updateDrain(dir, request, signal) {
+      const compose = runnerComposeArgs(dir);
+      if (!compose) return { kind: "no_credential" };
+      const body = request === null ? [] : ["-e", `CATALYST_UPDATE_DRAIN_BODY=${JSON.stringify(request)}`];
+      const read = await docker([...compose, "run", "--rm", "-T", "--no-deps", ...body, "--entrypoint", "bun", "supervisor", "-e", UPDATE_DRAIN_SCRIPT],
+        { cwd: dir, signal, timeoutMs: 120_000 });
+      return hostAnswer(read);
     },
     async attemptContainers(_dir, hostId, signal) {
       if (!HOST_ID.test(hostId)) return null;
-      const listed = await docker(["ps", "--all", "--quiet", "--filter", `label=${ATTEMPT_HOST_LABEL}=${hostId}`], { signal });
-      return listed.code === 0 ? listed.stdout.split("\n").filter((line) => line.trim() !== "").length : null;
+      const listed = await docker(["ps", "--all", "--filter", `label=${ATTEMPT_HOST_LABEL}=${hostId}`, "--format", `{{.ID}}\t{{.Label "${ATTEMPT_ID_LABEL}"}}`], { signal });
+      return listed.code === 0 ? new Set(listed.stdout.split("\n").filter(Boolean).map((line) => {
+        const [id, attempt] = line.trim().split("\t");
+        return attempt || id;
+      })).size : null;
     },
     async prepare(images, signal) {
       const info = await setup.info(signal);
@@ -710,6 +1095,9 @@ const OUTCOME_TEXT: Record<UpdateOutcome, string> = {
   updated: "The runner moved to the approved release.",
   planned: "Checked the approved release; nothing was changed.",
   deferred_busy: "A phase is running here, so the update waits for the next check.",
+  draining_for_update: "Phases are running here, so Catalyst sends this machine no new ones until they finish. Then it moves to the approved release.",
+  drain_soft_limit: "Phases have run here for over 2 hours since Catalyst stopped sending new ones. They keep running, and the update still waits for them.",
+  drain_unavailable: "A phase is running here and Catalyst could not be asked to stop sending new ones, so the update waits for the next check.",
   waiting_window: "An approved release waits for this machine's next update window.",
   retained: "Kept the current images.",
   rolled_back: "The new release was rolled back, so the previous images were restored.",
@@ -728,12 +1116,18 @@ export function lastProblemLines(state: ReleaseState): string[] {
   const last = lastProblem(state);
   if (last === null) return [];
   const what = last.outcome === "rolled_back" ? "was rolled back" : "failed";
-  return [`The last update, at ${new Date(last.atMs).toISOString()}, ${what} (${last.detail}; offered generation ${last.generation ?? "none"}).`];
+  return [`The last update, at ${new Date(last.atMs).toISOString()}, ${what} (${last.detail}; offered generation ${last.offered ?? last.generation ?? "none"}).`,
+    ...(custodyUnattested(last) ? [CUSTODY_UNATTESTED_LINE] : [])];
 }
+
+/** The owner's line for a pass that left private thoughts storage unattested (CTC-8076). */
+export const CUSTODY_UNATTESTED_LINE = "Private thoughts storage on this Mac is not attested to the images it runs, so phases that use it are refused. " +
+  "If Catalyst had stopped sending this machine new phases for an update, it still sends none. To repair storage: catalyst onboard --runner";
 
 export function updateResultLines(result: UpdateResult): string[] {
   return [
     OUTCOME_TEXT[result.outcome],
     `Release: ${result.releaseId ?? "none"}, generation ${result.generation ?? "none"} (${result.detail}).`,
+    ...(custodyUnattested(result) ? [CUSTODY_UNATTESTED_LINE] : []),
   ];
 }

@@ -54,6 +54,16 @@ describe("desiredRelease reads the container's one JSON line and nothing else", 
     expect(without!.filter((a) => a.startsWith("CATALYST_UPDATE_REPORT="))).toEqual([]);
   });
 
+  it("a fresh read uses the same one-off supervisor command", async () => {
+    const answer = { code: 0, stdout: JSON.stringify({ kind: "answered", status: 200, body: { ok: true }, hostId: HOST }) };
+    const { exec, calls } = scripted(() => answer);
+    const engine = dockerRunnerUpdateEngine({ exec, env: {} });
+    const dir = install();
+    await engine.desiredRelease(dir, undefined, undefined, true);
+    await engine.desiredRelease(dir);
+    expect(calls[0]).toEqual(calls[1]);
+  });
+
   it("an unreachable read keeps a short detail", async () => {
     const { result } = await read({ code: 0, stdout: JSON.stringify({ kind: "unreachable", detail: "x".repeat(200), hostId: HOST }) });
     expect(result).toEqual({ kind: "unreachable", detail: "x".repeat(80), hostId: HOST });
@@ -70,11 +80,46 @@ describe("desiredRelease reads the container's one JSON line and nothing else", 
   });
 });
 
+describe("updateDrain runs one supervisor container with the body as one environment value", () => {
+  const response = { code: 0, stdout: JSON.stringify({ kind: "answered", status: 200, body: { ok: true }, hostId: HOST }) };
+  it("GET has no request environment variable", async () => {
+    const { exec, calls } = scripted(() => response);
+    expect(await dockerRunnerUpdateEngine({ exec, env: {} }).updateDrain(install(), null)).toMatchObject({ kind: "answered", status: 200 });
+    expect(calls[0]).toEqual(expect.arrayContaining(["run", "--rm", "-T", "--no-deps", "--entrypoint", "bun", "supervisor", "-e"]));
+    expect(calls[0]?.some((arg) => arg.startsWith("CATALYST_UPDATE_DRAIN_BODY="))).toBe(false);
+  });
+
+  it("POST passes the exact request JSON before the supervisor name", async () => {
+    const { exec, calls } = scripted(() => response);
+    const request = { action: "request" as const, requestId: "d6b01f48-9f7e-4d13-8c4d-e99b8efcb360", expectedRevision: 0, generation: 106 };
+    await dockerRunnerUpdateEngine({ exec, env: {} }).updateDrain(install(), request);
+    const args = calls[0]!;
+    expect(args).toContain(`CATALYST_UPDATE_DRAIN_BODY=${JSON.stringify(request)}`);
+    expect(args.indexOf(`CATALYST_UPDATE_DRAIN_BODY=${JSON.stringify(request)}`)).toBeLessThan(args.indexOf("supervisor"));
+  });
+
+  it.each([
+    ["container failure", { code: 1, stdout: "" }],
+    ["non-JSON", { code: 0, stdout: "not json" }],
+    ["malformed host id", { code: 0, stdout: JSON.stringify({ kind: "answered", status: 200, body: null, hostId: "bad host" }) }],
+    ["unknown kind", { code: 0, stdout: JSON.stringify({ kind: "else" }) }],
+  ])("%s returns no_credential", async (_label, answer) => {
+    const { exec } = scripted(() => answer);
+    expect(await dockerRunnerUpdateEngine({ exec, env: {} }).updateDrain(install(), null)).toEqual({ kind: "no_credential" });
+  });
+});
+
 describe("attemptContainers counts this host's phase containers", () => {
   it("counts listed ids, filtered by this host's label", async () => {
-    const { exec, calls } = scripted((args) => (has(args, "ps", "--all", "--quiet") ? { code: 0, stdout: "abc\ndef\n\n" } : undefined));
+    const { exec, calls } = scripted((args) => (has(args, "ps", "--all") ? { code: 0, stdout: "abc\ndef\n\n" } : undefined));
     expect(await dockerRunnerUpdateEngine({ exec, env: {} }).attemptContainers(install(), HOST)).toBe(2);
     expect(calls[0]).toContain(`label=dev.catalystcloud.attempt.host-id=${HOST}`);
+    expect(calls[0]).toContain("--format");
+  });
+
+  it("counts each phase attempt once even with more than one container", async () => {
+    const { exec } = scripted((args) => (has(args, "ps", "--all") ? { code: 0, stdout: "abc\tatt-1\ndef\tatt-1\nghi\t\n" } : undefined));
+    expect(await dockerRunnerUpdateEngine({ exec, env: {} }).attemptContainers(install(), HOST)).toBe(2);
   });
 
   it("an unreadable listing or a malformed host id is null, never zero", async () => {
@@ -221,5 +266,13 @@ describe("helpers", () => {
       .toEqual(["The runner moved to the approved release.", "Release: hr-x, generation 2 (updated:runner)."]);
     expect(updateResultLines({ outcome: "retained", detail: "release_unavailable", generation: null, exitCode: 0 })[1])
       .toBe("Release: none, generation none (release_unavailable).");
+  });
+
+  it.each([
+    ["draining_for_update", "Phases are running here, so Catalyst sends this machine no new ones until they finish. Then it moves to the approved release."],
+    ["drain_soft_limit", "Phases have run here for over 2 hours since Catalyst stopped sending new ones. They keep running, and the update still waits for them."],
+    ["drain_unavailable", "A phase is running here and Catalyst could not be asked to stop sending new ones, so the update waits for the next check."],
+  ] as const)("%s has the planned operator-facing text", (outcome, line) => {
+    expect(updateResultLines({ outcome, detail: "phases_running:2", generation: 102, offeredGeneration: 106, exitCode: 0 })[0]).toBe(line);
   });
 });

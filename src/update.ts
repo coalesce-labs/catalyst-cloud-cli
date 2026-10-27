@@ -174,13 +174,16 @@ export function readEffectivePolicy(ctx: Ctx): UpdatePolicy {
  *  (CTC-6999: the report was dropped here, and no scheduled run ever sent one). */
 export function sharedReleaseRead(engine: RunnerUpdateEngine): RunnerUpdateEngine & { read(dir: string, report?: string): Promise<DesiredReleaseRead> } {
   const reads = new Map<string, Promise<DesiredReleaseRead>>();
-  const read = (dir: string, signal?: AbortSignal, report?: string) => {
-    let pending = reads.get(dir);
-    if (!pending) {
-      pending = engine.desiredRelease(dir, signal, report);
-      reads.set(dir, pending);
-    }
-    return pending;
+  const read = (dir: string, signal?: AbortSignal, report?: string, fresh?: boolean): Promise<DesiredReleaseRead> => {
+    const previous = reads.get(dir);
+    if (previous && !fresh) return previous;
+    const next = engine.desiredRelease(dir, signal, report, fresh);
+    // A report read must reach the cloud now. If that extra read fails, keep the approval the
+    // images already used so the remaining components still move from the same valid snapshot.
+    reads.set(dir, previous && fresh
+      ? next.then((answer) => decideRelease(null, answer).action === "retain" ? previous : answer, () => previous)
+      : next);
+    return next;
   };
   return { ...engine, desiredRelease: read, read: (dir, report) => read(dir, undefined, report) };
 }
@@ -351,7 +354,7 @@ function applyImageResult(rows: ComponentReport[], result: UpdateResult): void {
       row.reason = result.outcome;
       row.installed = row.approved;
       row.installedReference = row.approvedReference ?? row.installedReference ?? null;
-    } else if (result.outcome === "deferred_busy" || result.outcome === "waiting_window" || result.outcome === "retained") {
+    } else if (result.outcome === "deferred_busy" || result.outcome === "draining_for_update" || result.outcome === "drain_soft_limit" || result.outcome === "drain_unavailable" || result.outcome === "waiting_window" || result.outcome === "retained") {
       if (row.status === "update_available") {
         row.status = "pending";
         row.reason = result.detail;
@@ -422,7 +425,6 @@ export async function runUpdate(ctx: Ctx, options: UpdateOptions): Promise<Updat
     const held = RELEASE_COMPONENTS.filter((id) => !effectivePolicy(current, id).enabled);
     if (held.length === 0) {
       imageResult = await runRunnerUpdate(engine, { dir: options.imagesDir });
-      applyImageResult(imageList, imageResult);
     } else {
       // The image engine moves all three together; one held image holds its peers until it is lifted.
       for (const row of imageList)
@@ -432,6 +434,7 @@ export async function runUpdate(ctx: Ctx, options: UpdateOptions): Promise<Updat
         }
     }
   }
+  if (options.mode === "apply" && imageResult !== null) applyImageResult(imageList, imageResult);
   if (options.mode === "apply" && release !== null && crossTrain === null) {
     // Re-read the owner's settings just before the CLI and replica move: a hold set during the read wins.
     const current = readEffectivePolicy(ctx);
@@ -695,4 +698,3 @@ export function policyLines(policy: UpdatePolicy): string[] {
   lines.push(windows ? `Runner releases apply at ${windows.times.join(", ")} (${windows.timeZone ?? "this machine's time zone"}; owner)` : "Runner releases apply at the next check, with no set times (default)");
   return lines;
 }
-

@@ -5,8 +5,9 @@ import { describe, expect, it } from "vitest";
 import { main } from "../src/cli";
 import type { SchedulerRun } from "../src/runner-auto-update";
 import type { RunnerUpdateEngine } from "../src/runner-update";
-import { effectivePolicy, readUpdatePolicy } from "../src/update-policy";
+import { effectivePolicy, readUpdatePolicy, setComponentPolicy } from "../src/update-policy";
 import { makeCtx, tempHome } from "./helpers";
+import { answered, countingEngine, hostRelease, ref, runnerInstall } from "./update-fixtures";
 
 // `catalyst runner update` and `catalyst runner auto-update` through the real dispatcher, with the
 // Docker engine and the scheduler injected, so the command's own output and exit codes are checked.
@@ -22,10 +23,36 @@ function install(): string {
 function engine(status: number, body: unknown = { ok: false, refusal: "release_unavailable" }): RunnerUpdateEngine {
   const unused = async (): Promise<never> => { throw new Error("not reached for a retain"); };
   return {
-    desiredRelease: async () => ({ kind: "answered", status, body, hostId: "host_abc" }),
+    desiredRelease: async () => ({ kind: "answered", status, body, hostId: "host_abc" }), updateDrain: unused,
     attemptContainers: unused, prepare: unused, custody: unused, services: unused,
     stopSupervisor: unused, composeUp: unused, supervisorReadySinceStart: unused, removeImages: unused,
   };
+}
+
+const savedDrain = {
+  requestId: "d6b01f48-9f7e-4d13-8c4d-e99b8efcb360", generation: 106, revision: 1,
+  acknowledgedAtMs: 1_793_156_409_402, softLimitReported: false,
+};
+
+function drainEngine({ active = true, fail = false }: { active?: boolean; fail?: boolean } = {}) {
+  const requests: string[] = [];
+  const base = engine(503);
+  const drain = { requestId: savedDrain.requestId, generation: 106, requestedAtMs: 1_793_156_409_000, admissionBlocked: true };
+  const updateDrain: RunnerUpdateEngine["updateDrain"] = async (_dir, request) => {
+    requests.push(request?.action ?? "get");
+    if (fail) return { kind: "answered", status: 503, body: { ok: false, refusal: "update_drain_unavailable" }, hostId: "host_abc" };
+    if (request?.action === "release") active = false;
+    return { kind: "answered", status: 200, body: { ok: true, revision: active ? 1 : 2, drain: active ? drain : null, liveGenerations: 0 }, hostId: "host_abc" };
+  };
+  return { engine: { ...base, updateDrain }, requests };
+}
+
+function writeDrain(dir: string): void {
+  writeFileSync(join(dir, "release-state.json"), JSON.stringify({
+    version: 1, generation: 102, releaseId: "hr-102", appliedAtMs: 1,
+    previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
+    drain: savedDrain, deferral: { sinceMs: 1_793_070_000_000, offered: 106, offeredSinceMs: 1_793_070_004_112 }, last: null,
+  }));
 }
 
 describe("catalyst runner update", () => {
@@ -65,12 +92,53 @@ describe("catalyst runner update", () => {
     write(bad, "rolled_back");
     const ctx = makeCtx(tempHome());
     await main(["runner", "update", "--check", "--json", "--dir", bad], ctx, { runner: { engine: engine(503) } });
-    expect(JSON.parse(ctx.out[0]!).lastProblem).toEqual({ atMs: 1_800_000_000_000, outcome: "rolled_back", detail: "supervisor_not_ready", generation: 106 });
+    expect(JSON.parse(ctx.out[0]!).lastProblem).toMatchObject({ atMs: 1_800_000_000_000, outcome: "rolled_back", detail: "supervisor_not_ready", generation: 106 });
     const good = install();
     write(good, "updated");
     const clean = makeCtx(tempHome());
     await main(["runner", "update", "--check", "--json", "--dir", good], clean, { runner: { engine: engine(503) } });
     expect(JSON.parse(clean.out[0]!).lastProblem).toBeNull();
+  });
+
+  it("--check names an acknowledged drain, and --check --json carries the drain and deferral without changing them", async () => {
+    const dir = install();
+    writeDrain(dir);
+    const before = readFileSync(join(dir, "release-state.json"), "utf8");
+    const plain = makeCtx(tempHome());
+    expect(await main(["runner", "update", "--check", "--dir", dir], plain, { runner: { engine: engine(503) } })).toBe(0);
+    expect(plain.out.some((line) => line.includes("no new phases since") && line.includes("generation 106"))).toBe(true);
+    const json = makeCtx(tempHome());
+    expect(await main(["runner", "update", "--check", "--json", "--dir", dir], json, { runner: { engine: engine(503) } })).toBe(0);
+    expect(JSON.parse(json.out[0]!)).toMatchObject({
+      drain: { generation: 106, acknowledgedAtMs: savedDrain.acknowledgedAtMs },
+      deferral: { offered: 106, offeredSinceMs: 1_793_070_004_112 },
+    });
+    expect(readFileSync(join(dir, "release-state.json"), "utf8")).toBe(before);
+    const empty = makeCtx(tempHome());
+    await main(["runner", "update", "--check", "--json", "--dir", install()], empty, { runner: { engine: engine(503) } });
+    expect(JSON.parse(empty.out[0]!).drain).toBeNull();
+  });
+
+  it("an owner's image hold releases an existing drain before the automatic retained result", async () => {
+    const home = tempHome();
+    const dir = install();
+    writeDrain(dir);
+    setComponentPolicy(home, "runner", false);
+    const fake = drainEngine();
+    const ctx = makeCtx(home, { now: () => new Date("2026-10-28T03:00:00.000Z") });
+    expect(await main(["runner", "update", "--auto", "--dir", dir], ctx, { runner: { engine: fake.engine } })).toBe(0);
+    expect(fake.requests).toContain("release");
+    expect(ctx.out[0]).toBe("2026-10-28T03:00:00.000Z retained owner_setting generation=102");
+    const noRecord = drainEngine();
+    const noDrain = install();
+    writeFileSync(join(noDrain, "release-state.json"), JSON.stringify({
+      version: 1, generation: 102, releaseId: "hr-102", appliedAtMs: 1, previous: null,
+      journal: null, pendingRemoval: [], windowSettledMs: null, drain: null,
+      deferral: { sinceMs: 1_793_070_000_000, offered: 106, offeredSinceMs: 1_793_070_004_112 }, last: null,
+    }));
+    await main(["runner", "update", "--auto", "--dir", noDrain], makeCtx(home), { runner: { engine: noRecord.engine } });
+    expect(noRecord.requests).toEqual([]);
+    expect(JSON.parse(readFileSync(join(noDrain, "release-state.json"), "utf8")).deferral).toBeNull();
   });
 
   it("--json prints the result object, and a revoked machine exits 1", async () => {
@@ -84,6 +152,58 @@ describe("catalyst runner update", () => {
     const ctx = makeCtx(tempHome(), { now: () => new Date("2026-10-17T13:30:00.000Z") });
     expect(await main(["runner", "update", "--auto", "--dir", install()], ctx, { runner: { engine: engine(503) } })).toBe(0);
     expect(ctx.out).toEqual(["2026-10-17T13:30:00.000Z retained release_unavailable generation=none"]);
+  });
+
+  it("--auto requests a drain after a day of busy deferrals, prints the waiting pass, then the final update", async () => {
+    const dir = runnerInstall(["7", "8", "9"], 102);
+    const approved = hostRelease({ generation: 106 });
+    const base = countingEngine(answered(approved), { supervisor: ref("supervisor", "8"), watchdog: ref("watchdog", "9") });
+    let active = false;
+    let count = 0;
+    let revision = 0;
+    const requests: string[] = [];
+    const fake: RunnerUpdateEngine = {
+      ...base,
+      attemptContainers: async () => (count++ === 0 ? 1 : 0),
+      updateDrain: async (_dir, request) => {
+        requests.push(request?.action ?? "get");
+        if (request?.action === "request") { active = true; revision++; }
+        if (request?.action === "release") { active = false; revision++; }
+        return { kind: "answered", status: 200, body: {
+          ok: true, revision, liveGenerations: 0,
+          drain: active ? { requestId: savedDrain.requestId, generation: 106, requestedAtMs: 1_793_156_409_000, admissionBlocked: true } : null,
+        }, hostId: "host_abc" };
+      },
+    };
+    // A real clock survived the prior checks; the next automatic look has reached 24 hours.
+    writeFileSync(join(dir, "release-state.json"), JSON.stringify({
+      version: 1, generation: 102, releaseId: "hr-102", appliedAtMs: 1, previous: null,
+      journal: null, pendingRemoval: [], windowSettledMs: null, last: null,
+      deferral: { sinceMs: Date.now() - 25 * 3_600_000, offered: 106, offeredSinceMs: Date.now() - 25 * 3_600_000 },
+    }));
+    const ctx = makeCtx(tempHome());
+    expect(await main(["runner", "update", "--auto", "--dir", dir], ctx, { runner: { engine: fake } })).toBe(0);
+    expect(requests).toContain("request");
+    expect(requests).toContain("release");
+    expect(ctx.out.some((line) => line.includes("draining_for_update"))).toBe(true);
+    expect(ctx.out.some((line) => line.includes("updated") && line.includes("generation=106"))).toBe(true);
+  });
+
+  it("a person's update never requests a drain while phases run", async () => {
+    const dir = runnerInstall(["7", "8", "9"], 102);
+    const base = countingEngine(answered(hostRelease({ generation: 106 })));
+    const requests: string[] = [];
+    const fake: RunnerUpdateEngine = {
+      ...base, attemptContainers: async () => 1,
+      updateDrain: async (_dir, request) => {
+        requests.push(request?.action ?? "get");
+        return { kind: "answered", status: 200, body: { ok: true, revision: 0, drain: null, liveGenerations: 1 }, hostId: "host_abc" };
+      },
+    };
+    const ctx = makeCtx(tempHome());
+    expect(await main(["runner", "update", "--dir", dir], ctx, { runner: { engine: fake } })).toBe(0);
+    expect(requests).not.toContain("request");
+    expect(ctx.out[0]).toContain("waits for the next check");
   });
 
   it("the schedule's run sends the previous run's outcome on its one release read, and --check sends none (CTC-6999)", async () => {
@@ -208,6 +328,34 @@ describe("catalyst runner auto-update", () => {
     expect(calls).toContain("systemctl --user disable --now catalyst-runner-update.timer");
   });
 
+  it("off reads and releases a cloud drain even when release-state.json was lost", async () => {
+    const dir = install();
+    const fake = drainEngine();
+    const ctx = makeCtx(tempHome());
+    const run: SchedulerRun = (cmd) => ({ status: 0, stdout: cmd === "loginctl" ? "Linger=no\n" : "", stderr: "" });
+    expect(await main(["runner", "auto-update", "off", "--dir", dir, "--json"], ctx,
+      { runner: { scheduler: scheduler("linux", run), engine: fake.engine } })).toBe(0);
+    expect(JSON.parse(ctx.out[0]!)).toMatchObject({ state: "off", updateDrain: "released" });
+    expect(fake.requests).toContain("get");
+    expect(fake.requests).toContain("release");
+    const plain = makeCtx(tempHome());
+    const another = drainEngine();
+    expect(await main(["runner", "auto-update", "off", "--dir", dir], plain,
+      { runner: { scheduler: scheduler("linux", run), engine: another.engine } })).toBe(0);
+    expect(plain.out[1]).toContain("can send this machine new phases again");
+  });
+
+  it("off reports that a failed drain release can be retried", async () => {
+    const dir = install();
+    const fake = drainEngine({ fail: true });
+    const ctx = makeCtx(tempHome());
+    const run: SchedulerRun = () => ({ status: 0, stdout: "", stderr: "" });
+    expect(await main(["runner", "auto-update", "off", "--dir", dir], ctx,
+      { runner: { scheduler: scheduler("linux", run), engine: fake.engine } })).toBe(0);
+    expect(ctx.out[1]).toContain("Run catalyst runner auto-update off again to retry");
+    expect(fake.requests).toContain("get");
+  });
+
   it("an unknown mode is a usage error", async () => {
     const ctx = makeCtx(tempHome());
     const run: SchedulerRun = () => ({ status: 0, stdout: "", stderr: "" });
@@ -277,7 +425,7 @@ describe("catalyst runner update under another node than its custody's", () => {
   /** An engine any image work would fail on: a re-run never reaches it in this process. */
   const untouched = (): RunnerUpdateEngine => {
     const no = async (): Promise<never> => { throw new Error("this process must not update"); };
-    return { desiredRelease: no, attemptContainers: no, prepare: no, custody: no, services: no, stopSupervisor: no, composeUp: no, supervisorReadySinceStart: no, removeImages: no };
+    return { desiredRelease: no, updateDrain: no, attemptContainers: no, prepare: no, custody: no, services: no, stopSupervisor: no, composeUp: no, supervisorReadySinceStart: no, removeImages: no };
   };
   const rerunner = () => {
     const calls: { command: string; args: readonly string[]; env: NodeJS.ProcessEnv }[] = [];
