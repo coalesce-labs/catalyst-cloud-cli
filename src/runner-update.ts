@@ -642,7 +642,8 @@ async function drainedLook({ engine, options, state, release, target, hostId, no
           drain = conflict.status.drain;
           revision = conflict.status.revision;
         } else {
-          if (requested.refused !== "unreachable") writeReleaseState(dir, { ...readReleaseState(dir), drain: null });
+          if (!["unreachable", "no_credential", "response_invalid"].includes(requested.refused))
+            writeReleaseState(dir, { ...readReleaseState(dir), drain: null });
           return done("drain_unavailable", `${detail},drain:${requested.refused}`, tagged);
         }
       } else {

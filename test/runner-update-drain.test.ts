@@ -170,6 +170,29 @@ describe("CTC-7749: a busy machine drains and takes an approved release", () => 
     expect(readReleaseState(dir).drain?.requestId).toBe(cloud.drain?.requestId);
   });
 
+  it.each(["no_credential", "response_invalid"] as const)("a committed request with %s keeps its pending id until an idle check releases the drain", async (lostAnswer) => {
+    const dir = machine();
+    const time = clock(A + DRAIN_AFTER_MS);
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
+    const drain = async (request: Parameters<typeof cloud.call>[0]) => {
+      const answer = await cloud.call(request);
+      if (request?.action !== "request") return answer;
+      return lostAnswer === "no_credential"
+        ? { kind: "no_credential" as const }
+        : { kind: "answered" as const, status: 200, body: { ok: true }, hostId: "host_abc" };
+    };
+    const busy = fakeEngine(dir, { read: offered(), phases: () => 1, drain });
+    expect(await runRunnerUpdate(busy.engine, { dir, drain: true, now: time.now, sleep: time.sleep }))
+      .toMatchObject({ outcome: "drain_unavailable" });
+    expect(readReleaseState(dir).drain).toMatchObject({ requestId: cloud.drain?.requestId, acknowledgedAtMs: null });
+    const idle = fakeEngine(dir, { read: offered(), phases: () => 0, drain });
+    expect(await runRunnerUpdate(idle.engine, { dir, drain: true, now: time.now, sleep: time.sleep }))
+      .toMatchObject({ outcome: "updated", generation: 106 });
+    expect(cloud.calls).toEqual(["GET", "request:106", "GET", "GET", "release"]);
+    expect(cloud.drain).toBeNull();
+    expect(readReleaseState(dir).drain).toBeNull();
+  });
+
   it("an active cloud drain is adopted without another request", async () => {
     const dir = machine();
     const time = clock(A + DRAIN_AFTER_MS);
