@@ -9,7 +9,7 @@ import { approvalCachePathFor } from "../src/approved-release";
 import { onboardStatePath } from "../src/onboard";
 import { pendingRestartPathFor } from "../src/replica";
 import { readReleaseState, type RunnerUpdateEngine } from "../src/runner-update";
-import { runUpdate, updateReportJson, updateReportLines, type UpdateOptions } from "../src/update";
+import { runUpdate, sharedReleaseRead, updateReportJson, updateReportLines, type UpdateOptions } from "../src/update";
 import { setComponentPolicy, setProjectSdkPolicy, updatePolicyPathFor } from "../src/update-policy";
 import { makeCtx, seedReplica, seedWriterState, tempHome } from "./helpers";
 import {
@@ -36,6 +36,36 @@ import {
 const noDocker = (): RunnerUpdateEngine => {
   throw new Error("a machine with no runner installation must not reach Docker");
 };
+
+describe("shared desired-release reads after a same-run report", () => {
+  it("a successful fresh read reaches the engine and answers later shared readers", async () => {
+    const first = answered(hostRelease({ components: approved() }));
+    const second = answered(hostRelease({ components: approved() }));
+    const reports: Array<string | undefined> = [];
+    let reads = 0;
+    const engine: RunnerUpdateEngine = { ...countingEngine(first), desiredRelease: async (_dir, _signal, report) => {
+      reports.push(report);
+      return ++reads === 1 ? first : second;
+    } };
+    const shared = sharedReleaseRead(engine);
+    expect(await shared.desiredRelease("/runner")).toBe(first);
+    expect(await shared.desiredRelease("/runner", undefined, "r2", true)).toBe(second);
+    expect(await shared.desiredRelease("/runner")).toBe(second);
+    expect(reports).toEqual([undefined, "r2"]);
+  });
+
+  it("a failed telemetry read keeps the first approved release for later components", async () => {
+    const first = answered(hostRelease({ components: approved() }));
+    const failed = { kind: "unreachable" as const, detail: "timeout", hostId: "host_abc" };
+    let reads = 0;
+    const engine: RunnerUpdateEngine = { ...countingEngine(first), desiredRelease: async () => ++reads === 1 ? first : failed };
+    const shared = sharedReleaseRead(engine);
+    expect(await shared.desiredRelease("/runner")).toBe(first);
+    expect(await shared.desiredRelease("/runner", undefined, "report", true)).toBe(failed);
+    expect(await shared.desiredRelease("/runner")).toBe(first);
+    expect(reads).toBe(2);
+  });
+});
 
 function hostCase(over: { components?: unknown } = {}) {
   const home = tempHome();
@@ -145,6 +175,20 @@ describe("the release check lists every component against the approved release",
 });
 
 describe("one applying release check moves the CLI, the Cloud pack and then the replica on that CLI", () => {
+  it.each(["draining_for_update", "drain_soft_limit", "drain_unavailable"] as const)(
+    "maps a %s image result to pending rows with its detail",
+    async (outcome) => {
+      const { ctx, options } = hostCase();
+      const detail = "phases_running:2,deferred_for_ms:86400000";
+      const report = await runUpdate(ctx, options("apply", {
+        imageResult: { outcome, detail, generation: 88, exitCode: 0 },
+      }));
+      expect(report.components.slice(0, 3).map((row) => [row.status, row.reason])).toEqual([
+        ["pending", detail], ["pending", detail], ["pending", detail],
+      ]);
+    },
+  );
+
   it("POSITIVE CONTROL: the images, the CLI, the Cloud pack and a running replica all reach the approved release", async () => {
     const { home, ctx, options, engine, cliCalls, replicaCalls, packCalls } = hostCase();
     signIn(home);
@@ -462,4 +506,3 @@ describe("a runner that cannot read its release (review fix)", () => {
     expect(updateReportLines(report)[0]).toBe("Approved release unavailable: this machine's runner could not read it; check that Docker is running.");
   });
 });
-

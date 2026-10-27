@@ -6,10 +6,13 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   decideRelease,
+  advanceDeferral,
+  parseDrainAnswer,
   parseDesiredRelease,
   PREVIOUS_ENV_FILE,
   readReleaseState,
   RELEASE_STATE_FILE,
+  writeReleaseState,
   rewriteEnvText,
   runRunnerUpdate,
   updateReport,
@@ -32,38 +35,132 @@ import {
   type SchedulerRun,
 } from "../src/runner-auto-update";
 import { canonicalDarwinThoughtsJson } from "../vendor/self-host/darwin-thoughts-custody/verifier.mjs";
+import { answered, fakeEngine, fastClock, hex, imagesIn, install, OLD, ORIGINAL_ENV, ref, release, REPO, sha, TARGET, type Images } from "./runner-update-fixtures";
 
-const hex = (c: string) => c.repeat(64);
-const sha = (c: string) => c.repeat(40);
-const REPO = {
-  runner: "ghcr.io/coalesce-labs/catalyst-runner",
-  supervisor: "ghcr.io/coalesce-labs/catalyst-supervisor",
-  watchdog: "ghcr.io/coalesce-labs/catalyst-deadline-watchdog",
-} as const;
-const ref = (component: ReleaseComponent, c: string) => `${REPO[component]}@sha256:${hex(c)}`;
-
-function release(over: { generation?: number; digits?: [string, string, string]; mutate?: (r: Record<string, unknown>) => void } = {}) {
-  const [r, s, w] = over.digits ?? ["1", "2", "3"];
-  const image = (component: ReleaseComponent, c: string, src: string) => ({
-    reference: ref(component, c),
-    digest: `sha256:${hex(c)}`,
-    tag: `${REPO[component]}:${sha(src)}${component === "runner" ? "-multiarch" : ""}`,
-    sourceSha: sha(src),
-  });
-  const body: Record<string, unknown> = {
-    version: 1,
-    releaseId: `hr-${hex(r).slice(0, 16)}-${hex(s).slice(0, 16)}-${hex(w).slice(0, 16)}`,
-    generation: over.generation ?? 1,
-    approvedAtMs: 1_800_000_000_000,
-    runner: image("runner", r, "a"),
-    supervisor: image("supervisor", s, "b"),
-    watchdog: image("watchdog", w, "b"),
-  };
-  over.mutate?.(body);
-  return body;
+function onGeneration(dir: string, generation: number) {
+  writeReleaseState(dir, { ...readReleaseState(dir), generation });
 }
-const answered = (body: unknown, status = 200): DesiredReleaseRead =>
-  ({ kind: "answered", status, body: status === 200 ? { ok: true, release: body } : body, hostId: "host_abc" });
+
+describe("CTC-7749: a busy deferral reports both generations, its phase count and how long it has waited", () => {
+  it("reports 106 offered to a machine on 102 during the busy run", async () => {
+    const dir = install();
+    onGeneration(dir, 102);
+    const now = 1_800_000_000_000;
+    const first = fakeEngine(dir, { read: answered(release({ generation: 106 })), busy: [2] });
+    const result = await runRunnerUpdate(first.engine, { dir, now: () => now });
+    expect(result).toMatchObject({ outcome: "deferred_busy", detail: "phases_running:2,deferred_for_ms:0", generation: 102, offeredGeneration: 106 });
+    expect(first.reports).toHaveLength(2);
+    expect(first.reports[0]).toBeUndefined();
+    expect(JSON.parse(first.reports[1]!)).toMatchObject({ v: 1, outcome: "deferred_busy", detail: "phases_running:2,deferred_for_ms:0", applied: 102, offered: 106 });
+    expect(readReleaseState(dir).deferral).toEqual({ sinceMs: now, offered: 106, offeredSinceMs: now });
+
+    const second = fakeEngine(dir, { read: answered(release({ generation: 106 })), busy: [2] });
+    const later = await runRunnerUpdate(second.engine, { dir, now: () => now + 900_000 });
+    expect(later.detail).toBe("phases_running:2,deferred_for_ms:900000");
+    expect(JSON.parse(second.reports[0]!)).toMatchObject({ outcome: "deferred_busy", offered: 106 });
+    expect(JSON.parse(second.reports[1]!)).toMatchObject({ outcome: "deferred_busy", detail: later.detail, offered: 106 });
+    expect(readReleaseState(dir).deferral?.sinceMs).toBe(now);
+  });
+
+  it("keeps the backlog clock across approvals and resets the offered clock", () => {
+    const previous = { sinceMs: 100, offered: 106, offeredSinceMs: 200 };
+    expect(advanceDeferral(previous, { generation: 106, approvedAtMs: 50 }, 400)).toEqual(previous);
+    expect(advanceDeferral(previous, { generation: 107, approvedAtMs: 350 }, 400)).toEqual({ sinceMs: 100, offered: 107, offeredSinceMs: 400 });
+    expect(advanceDeferral(null, { generation: 106, approvedAtMs: 50 }, 400)).toEqual({ sinceMs: 50, offered: 106, offeredSinceMs: 400 });
+  });
+
+  it("a look does not persist or report a deferral", async () => {
+    const dir = install();
+    onGeneration(dir, 102);
+    const fake = fakeEngine(dir, { read: answered(release({ generation: 106 })), busy: [2] });
+    expect(await runRunnerUpdate(fake.engine, { dir, check: true, now: () => 1_800_000_000_000 })).toMatchObject({ outcome: "planned" });
+    expect(fake.reports).toEqual([undefined]);
+    expect(readReleaseState(dir).deferral).toBeNull();
+  });
+
+  it("a malformed persisted clock or offered generation is discarded", () => {
+    const dir = install();
+    writeFileSync(join(dir, RELEASE_STATE_FILE), JSON.stringify({ version: 1, generation: 102, deferral: { sinceMs: 1.5, offered: "106", offeredSinceMs: 2 }, last: { atMs: 3, outcome: "deferred_busy", detail: "x", generation: 102, offered: "106" } }));
+    expect(readReleaseState(dir)).toMatchObject({ deferral: null, last: { offered: null } });
+  });
+
+  it("applying and verifying clear the clock; a retained prepare error preserves it", async () => {
+    const dir = install();
+    onGeneration(dir, 102);
+    const time = 1_800_000_000_000;
+    await runRunnerUpdate(fakeEngine(dir, { read: answered(release({ generation: 106 })), busy: [2] }).engine, { dir, now: () => time });
+    expect(readReleaseState(dir).deferral).not.toBeNull();
+    const refused = await runRunnerUpdate(fakeEngine(dir, { read: answered(release({ generation: 106 })), busy: [0], prepare: "runner_image_emulated" }).engine,
+      { dir, now: () => time + 1_000 });
+    expect(refused).toMatchObject({ outcome: "retained", detail: "runner_image_emulated" });
+    expect(readReleaseState(dir).deferral?.sinceMs).toBe(time);
+    expect(await runRunnerUpdate(fakeEngine(dir, { read: answered(release({ generation: 106 })), busy: [0, 0] }).engine,
+      { dir, now: () => time + 2_000 })).toMatchObject({ outcome: "updated", generation: 106 });
+    expect(readReleaseState(dir).deferral).toBeNull();
+    writeReleaseState(dir, { ...readReleaseState(dir), deferral: { sinceMs: time, offered: 106, offeredSinceMs: time } });
+    expect(await runRunnerUpdate(fakeEngine(dir, { read: answered(release({ generation: 106 })) }).engine,
+      { dir, now: () => time + 3_000 })).toMatchObject({ outcome: "current" });
+    expect(readReleaseState(dir).deferral).toBeNull();
+  });
+
+  it("a rollback restarts the clock at this attempt rather than draining immediately again", async () => {
+    const dir = install();
+    onGeneration(dir, 102);
+    const time = 1_800_000_000_000;
+    await runRunnerUpdate(fakeEngine(dir, { read: answered(release({ generation: 106 })), busy: [2] }).engine, { dir, now: () => time });
+    let retryAt = time + 900_000;
+    const rolled = await runRunnerUpdate(fakeEngine(dir, { read: answered(release({ generation: 106 })), busy: [0, 0],
+      ready: (image) => image === OLD.supervisor }).engine, { dir, now: () => retryAt, sleep: async (ms) => { retryAt += ms; }, readyDeadlineMs: 1 });
+    expect(rolled.outcome).toBe("rolled_back");
+    expect(readReleaseState(dir).deferral?.sinceMs).toBe(retryAt);
+  });
+
+  it("the report and last problem use the offered generation", () => {
+    const dir = install();
+    const state = { ...readReleaseState(dir), generation: 102, last: { atMs: 1_800_000_000_000, outcome: "failed" as const, detail: "x", generation: 102, offered: 106 } };
+    expect(JSON.parse(updateReport(state, "0.1.0")!)).toMatchObject({ applied: 102, offered: 106 });
+    expect(lastProblemLines(state)[0]).toContain("offered generation 106");
+  });
+});
+
+describe("parseDrainAnswer (CTC-7749)", () => {
+  const id = "d6b01f48-9f7e-4d13-8c4d-e99b8efcb360";
+  const active = { requestId: id, generation: 106, requestedAtMs: 1_800_000_000_000, admissionBlocked: true };
+  const answer = (body: unknown, status = 200): DesiredReleaseRead => ({ kind: "answered", status, body, hostId: "host_abc" });
+
+  it.each([
+    { ok: true, revision: 0, drain: null, liveGenerations: 2 },
+    { ok: true, revision: 1, drain: active, liveGenerations: 2 },
+    { ok: true, revision: 2, drain: null, liveGenerations: 0 },
+  ])("parses a valid cloud drain status", (body) => {
+    expect(parseDrainAnswer(answer(body))).toEqual({ status: { revision: body.revision, drain: body.drain, liveGenerations: body.liveGenerations } });
+  });
+
+  it.each(["update_drain_conflict", "update_drain_invalid", "update_drain_unavailable", "managed_host_unsupported", "host_revoked"])("keeps the fixed refusal %s", (refusal) => {
+    expect(parseDrainAnswer(answer({ ok: false, refusal }, 409))).toEqual({ refused: refusal });
+  });
+
+  it("handles an absent route and absent credential", () => {
+    expect(parseDrainAnswer(answer("not JSON", 404))).toEqual({ refused: "http_404" });
+    expect(parseDrainAnswer({ kind: "unreachable", detail: "TimeoutError", hostId: "host_abc" })).toEqual({ refused: "unreachable" });
+    expect(parseDrainAnswer({ kind: "no_credential" })).toEqual({ refused: "no_credential" });
+  });
+
+  it.each([
+    { ok: false, revision: 1, drain: null, liveGenerations: 0 },
+    { ok: true, revision: -1, drain: null, liveGenerations: 0 },
+    { ok: true, revision: 1.5, drain: null, liveGenerations: 0 },
+    { ok: true, revision: 1, drain: null },
+    { ok: true, revision: 1, drain: { ...active, generation: "106" }, liveGenerations: 0 },
+    { ok: true, revision: 1, drain: { ...active, admissionBlocked: "true" }, liveGenerations: 0 },
+    { ok: true, revision: 1, drain: { ...active, requestId: "x".repeat(60) }, liveGenerations: 0 },
+  ])("rejects an invalid status", (body) => {
+    expect(parseDrainAnswer(answer(body))).toEqual({ refused: "response_invalid" });
+  });
+  it("never returns a malformed refusal", () => {
+    expect(parseDrainAnswer(answer({ refusal: "bad reason" }, 409))).toEqual({ refused: "http_409" });
+  });
+});
 
 describe("parse and decide: only a valid, strictly newer approved release moves a machine", () => {
   it("POSITIVE CONTROL: a well-formed release parses and a first one is an update", () => {
@@ -106,87 +203,6 @@ describe("rewriteEnvText changes only the three image lines", () => {
       .toBe("# header\nCATALYST_SLOTS=1\nCATALYST_RUNNER_IMAGE=new\nCATALYST_SUPERVISOR_IMAGE=new2\nCATALYST_WATCHDOG_IMAGE=w\n");
   });
 });
-
-const ORIGINAL_ENV = [
-  "# setup wrote this",
-  "CATALYST_HOST_FREE_FLOOR_GIB=25",
-  `CATALYST_SUPERVISOR_IMAGE=${ref("supervisor", "a")}`,
-  `CATALYST_WATCHDOG_IMAGE=${ref("watchdog", "b")}`,
-  `CATALYST_RUNNER_IMAGE=${ref("runner", "c")}`,
-  "",
-].join("\n");
-
-function install(env = ORIGINAL_ENV): string {
-  const dir = mkdtempSync(join(tmpdir(), "runner-update-"));
-  writeFileSync(join(dir, ".env"), env, { mode: 0o600 });
-  writeFileSync(join(dir, "compose.yaml"), "name: catalyst-host\n");
-  return dir;
-}
-
-type Images = Record<ReleaseComponent, string>;
-const imagesIn = (text: string): Images => {
-  const get = (key: string) => new RegExp(`^${key}=(.*)$`, "m").exec(text)?.[1] ?? "";
-  return { runner: get("CATALYST_RUNNER_IMAGE"), supervisor: get("CATALYST_SUPERVISOR_IMAGE"), watchdog: get("CATALYST_WATCHDOG_IMAGE") };
-};
-const TARGET: Images = { runner: ref("runner", "1"), supervisor: ref("supervisor", "2"), watchdog: ref("watchdog", "3") };
-const OLD: Images = { runner: ref("runner", "c"), supervisor: ref("supervisor", "a"), watchdog: ref("watchdog", "b") };
-
-interface FakeOptions {
-  read?: DesiredReleaseRead;
-  /** Attempt counts, one per look (the first look, then the look after the supervisor stops). */
-  busy?: (number | null)[];
-  prepare?: string | null;
-  composeUp?: boolean[];
-  /** Whether a supervisor on this image reports host_ready. Default: always. */
-  ready?: (supervisorImage: string) => boolean;
-  /** The authority custody returns for these images, or `{ refused }`. Default: the installed one, unchanged. */
-  custody?: (images: Images) => string | { refused: string };
-  /** What is running before the update. Default: what `.env` names. */
-  live?: Images;
-  stop?: boolean;
-  /** Images Docker refuses to remove, for example because a running phase still uses them. */
-  inUse?: (image: string) => boolean;
-}
-/** A machine: what runs is what `.env` named at the last successful compose up. */
-function fakeEngine(dir: string, options: FakeOptions = {}) {
-  const calls: string[] = [];
-  const reports: Array<string | undefined> = [];
-  let live: Images = options.live ?? imagesIn(readFileSync(join(dir, ".env"), "utf8"));
-  let stopped = false;
-  let ups = 0;
-  let looks = 0;
-  const engine: RunnerUpdateEngine = {
-    async desiredRelease(_d, _signal, report) { calls.push("read"); reports.push(report); return options.read ?? answered(release()); },
-    async attemptContainers(_d, hostId) { calls.push(`attempts:${hostId}`); return options.busy ? (options.busy[looks++] ?? 0) : 0; },
-    async prepare(images) { calls.push(`prepare:${images.length}`); return options.prepare ?? null; },
-    async custody(_d, images) {
-      calls.push(`custody:${images.supervisor}`);
-      const answer = options.custody ? options.custody(images) : "AUTH";
-      return typeof answer === "string" ? { authority: answer } : answer;
-    },
-    async services() {
-      return {
-        supervisor: { image: live.supervisor, running: !stopped, startedAtMs: 1 },
-        watchdog: { image: live.watchdog, running: true, startedAtMs: 1 },
-      };
-    },
-    async stopSupervisor() { calls.push("stop"); if (options.stop === false) return false; stopped = true; return true; },
-    async composeUp() {
-      calls.push("up");
-      if (!(options.composeUp?.[ups++] ?? true)) return false;
-      live = imagesIn(readFileSync(join(dir, ".env"), "utf8"));
-      stopped = false;
-      return true;
-    },
-    async supervisorReadySinceStart() { return options.ready ? options.ready(live.supervisor) : true; },
-    async removeImages(images) { calls.push(`rm:${images.join(",")}`); return images.filter((image) => options.inUse?.(image) ?? false); },
-  };
-  return { engine, calls, reports, live: () => live };
-}
-const fastClock = () => {
-  let t = 1_000_000;
-  return { now: () => t, sleep: async (ms: number) => { t += ms; } };
-};
 
 describe("runRunnerUpdate", () => {
   let dir: string;
@@ -267,8 +283,8 @@ describe("runRunnerUpdate", () => {
 
   it("a phase that started while images were pulled: the supervisor comes back on its old images and the update waits", async () => {
     const { engine, calls, live } = fakeEngine(dir, { busy: [0, 1] });
-    expect(await runRunnerUpdate(engine, { dir, ...fastClock() })).toMatchObject({ outcome: "deferred_busy", detail: "attempt_containers:1" });
-    expect(calls.slice(-3)).toEqual(["stop", "attempts:host_abc", "up"]);
+    expect(await runRunnerUpdate(engine, { dir, ...fastClock() })).toMatchObject({ outcome: "deferred_busy", detail: "phases_running:1,deferred_for_ms:0" });
+    expect(calls.slice(-4)).toEqual(["stop", "attempts:host_abc", "up", "read"]);
     expect(live()).toEqual(OLD);
     expect(readFileSync(join(dir, ".env"), "utf8")).toBe(ORIGINAL_ENV);
   });
@@ -312,7 +328,7 @@ describe("runRunnerUpdate", () => {
     const same = install(ORIGINAL_ENV.replace(OLD.supervisor, TARGET.supervisor).replace(OLD.watchdog, TARGET.watchdog).replace(OLD.runner, TARGET.runner));
     const { engine, calls } = fakeEngine(same);
     expect(await runRunnerUpdate(engine, { dir: same, ...fastClock() })).toMatchObject({ outcome: "recorded", generation: 1 });
-    expect(calls).toEqual(["read"]);
+    expect(calls).toEqual(["read", "GET"]);
   });
 
   describe("an earlier run that stopped after writing .env is reconciled, never trusted", () => {
@@ -616,7 +632,7 @@ describe("an update in place, decided by the supervisor's journal format", () =>
   ])("NEGATIVE: %s waits for an idle machine", async (_label, before, after) => {
     const d = await applied(before);
     const { engine, calls } = fakeEngine(d, { read: next(after), busy: [1] });
-    expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "deferred_busy", detail: "attempt_containers:1" });
+    expect(await runRunnerUpdate(engine, { dir: d, ...fastClock() })).toMatchObject({ outcome: "deferred_busy", detail: "phases_running:1,deferred_for_ms:0" });
     expect(calls).not.toContain("stop");
   });
 
@@ -830,6 +846,7 @@ describe("the update schedule", () => {
 describe("lastProblemLines (CTC-6709)", () => {
   const state = (last: { outcome: UpdateOutcome; detail: string; generation: number | null } | null): ReleaseState =>
     ({ version: 1, generation: 105, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
+      deferral: null, drain: null,
       last: last === null ? null : { atMs: Date.UTC(2026, 9, 24, 4, 30), ...last } });
 
   it("POSITIVE CONTROL: a rolled-back update is named with its time, reason and offered generation", () => {
@@ -842,7 +859,7 @@ describe("lastProblemLines (CTC-6709)", () => {
       .toEqual(["The last update, at 2026-10-24T04:30:00.000Z, failed (compose_up_failed; offered generation none)."]);
   });
 
-  it.each([["updated"], ["current"], ["deferred_busy"], ["waiting_window"], ["retained"]] as const)(
+  it.each([["updated"], ["current"], ["deferred_busy"], ["draining_for_update"], ["drain_soft_limit"], ["drain_unavailable"], ["waiting_window"], ["retained"]] as const)(
     "NEGATIVE: a last run that %s is no problem to name",
     (outcome) => {
       expect(lastProblem(state({ outcome, detail: "x", generation: 106 }))).toBeNull();
@@ -858,6 +875,7 @@ describe("lastProblemLines (CTC-6709)", () => {
 describe("updateReport (CTC-6924)", () => {
   const state = (last: { outcome: UpdateOutcome; detail: string; generation: number | null } | null, generation: number | null = 105): ReleaseState =>
     ({ version: 1, generation, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
+      deferral: null, drain: null,
       last: last === null ? null : { atMs: 1_800_000_000_000, ...last } });
 
   it("before any run there is nothing to report", () => {
