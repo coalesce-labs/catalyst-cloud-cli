@@ -878,6 +878,15 @@ describe("CTC-2158: CI derives its Node matrix and exercises bun in both directi
     expect(ci).not.toMatch(/node-version:\s*22\b/);
   });
 
+  // CTC-8223: an ordinary pull request checks one major; main and the merge queue check them all.
+  test("ci.yml asks for the one pull-request major only on a pull request that is not a merge-queue head", () => {
+    expect(ci).toContain(
+      "ONE_MAJOR: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'mergify/merge-queue/') }}",
+    );
+    expect(ci).toContain('if [ "$ONE_MAJOR" = "true" ]; then flag="--pull-request"; fi');
+    expect(ci).toContain('node scripts/node-support-matrix.mjs --json $flag');
+  });
+
   test("ci.yml runs the built CLI under a real bun, in both directions", () => {
     expect(ci).toMatch(/bun-version:\s*1\.3\.14/); // the version that must FAIL FRIENDLY
     expect(ci).toMatch(/bun-version:\s*(\$\{\{\s*matrix\.bun\s*\}\}|latest)/); // the version that must LOAD THE SDK
