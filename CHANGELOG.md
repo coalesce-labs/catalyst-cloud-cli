@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.42
+
+A busy machine now takes a waiting release after one day. Before, a busy machine could keep putting off a release that cannot take over from running work in place. Now the next check asks Catalyst to send the machine no new work, waits for the running work to finish, then moves to the release and takes work again. `catalyst runner update --check` says when a machine is waiting like this, and `catalyst runner auto-update off` ends the wait. If the update cannot restore the machine's private thoughts storage, the machine keeps taking no new work, and `catalyst runner update` tells you what to do. This release also makes updates on Catalyst's own machines more reliable.
+
 ## 0.16.41
 
 A runner's automatic update schedule now applies a newly approved runner release at its next check, instead of waiting for one of four set times of day. An owner who wants set times can still choose them with `catalyst update policy windows <HH:MM,...>`, and `catalyst update policy windows default` goes back to applying at the next check. `catalyst runner update` still applies a release at once, and `catalyst update policy` shows which setting is in effect.
