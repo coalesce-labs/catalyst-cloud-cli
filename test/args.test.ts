@@ -41,6 +41,20 @@ describe("parseArgs", () => {
 });
 
 describe("every verb's --help", () => {
+  test("all rendered argument help and usage use workspace wording", () => {
+    const verbs = new Set([...Object.keys(VERB_USAGE), ...Object.keys(FLAG_TABLES)]);
+    expect(verbs.size).toBeGreaterThan(0);
+    for (const verb of verbs) {
+      expect(verbHelp(verb), `${verb} help and usage`).not.toMatch(/\btenants?\b/i);
+    }
+  });
+  test("AI account help keeps the coding-account flag name", () => {
+    expect(verbHelp("onboard")).toContain("verify this AI account identifier");
+    expect(verbHelp("onboard")).toContain("--coding-account");
+    expect(verbHelp("codex-env")).toContain("workspace's AI accounts");
+    expect(verbHelp("codex-env")).not.toContain("coding accounts");
+    expect(verbHelp("ask")).toContain("workspace's only repository");
+  });
   for (const verb of Object.keys(VERB_USAGE)) {
     test(`${verb} --help exits 0 and mentions every flag in its table`, async () => {
       const ctx = makeCtx(tempHome());

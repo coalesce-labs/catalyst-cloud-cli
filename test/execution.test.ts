@@ -434,6 +434,20 @@ describe("running / queue / accounts", () => {
     expect(json.accounts.every((a) => typeof a.displayName === "string" && a.displayName !== "")).toBe(true);
     expect(await main(["accounts"], makeCtx(tempHome()))).toBe(2);
   });
+  test("an empty AI account list names the app page without changing the API response", async () => {
+    server.codingAccounts = [];
+    try {
+      expect(await main(["accounts"], ctx)).toBe(0);
+      expect(ctx.out.join("\n")).toContain("No AI accounts are enrolled in this workspace.");
+      expect(ctx.out.join("\n")).toContain("/settings/coding-accounts");
+      expect(ctx.out.join("\n")).not.toContain("No coding accounts");
+      const json = makeCtx(home);
+      expect(await main(["accounts", "--json"], json)).toBe(0);
+      expect(JSON.parse(json.out.join("\n")).accounts).toEqual([]);
+    } finally {
+      server.codingAccounts = undefined;
+    }
+  });
   // CTC-6204: a customer's agents kept trying to revive three revoked accounts the list showed as
   // "expired or revoked — replace its credential". Removed accounts are history: hidden by default.
   test("accounts hides removed accounts unless --all, and never offers them a credential", async () => {
@@ -477,7 +491,7 @@ describe("running / queue / accounts", () => {
       const none = makeCtx(home);
       expect(await main(["accounts"], none)).toBe(0);
       expect(none.out.join("\n")).toContain("No AI account in this workspace can take work.");
-      expect(none.out.join("\n")).not.toContain("No coding accounts are enrolled");
+      expect(none.out.join("\n")).not.toContain("No AI accounts are enrolled");
     } finally {
       server.codingAccounts = undefined;
     }
