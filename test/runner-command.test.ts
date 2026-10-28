@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { main } from "../src/cli";
 import type { SchedulerRun } from "../src/runner-auto-update";
 import type { RunnerUpdateEngine } from "../src/runner-update";
@@ -156,6 +156,13 @@ describe("catalyst runner update", () => {
   });
 
   it("--auto requests a drain after a day of busy deferrals, prints the waiting pass, then the final update", async () => {
+    // The fake drain below was requested at a fixed instant, so the update's clock is pinned one second
+    // after it. On the real clock the drain aged past DRAIN_SOFT_LIMIT_MS and reported drain_soft_limit (CTC-8259).
+    const pinnedMs = 1_793_156_410_000;
+    vi.useFakeTimers({ toFake: ["Date"], now: pinnedMs });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
     const dir = runnerInstall(["7", "8", "9"], 102);
     const approved = hostRelease({ generation: 106 });
     const base = countingEngine(answered(approved), { supervisor: ref("supervisor", "8"), watchdog: ref("watchdog", "9") });
@@ -176,11 +183,11 @@ describe("catalyst runner update", () => {
         }, hostId: "host_abc" };
       },
     };
-    // A real clock survived the prior checks; the next automatic look has reached 24 hours.
+    // The prior checks deferred for 25 hours, so the next automatic look has passed the 24-hour mark.
     writeFileSync(join(dir, "release-state.json"), JSON.stringify({
       version: 1, generation: 102, releaseId: "hr-102", appliedAtMs: 1, previous: null,
       journal: null, pendingRemoval: [], windowSettledMs: null, last: null,
-      deferral: { sinceMs: Date.now() - 25 * 3_600_000, offered: 106, offeredSinceMs: Date.now() - 25 * 3_600_000 },
+      deferral: { sinceMs: pinnedMs - 25 * 3_600_000, offered: 106, offeredSinceMs: pinnedMs - 25 * 3_600_000 },
     }));
     const ctx = makeCtx(tempHome());
     expect(await main(["runner", "update", "--auto", "--dir", dir], ctx, { runner: { engine: fake } })).toBe(0);
