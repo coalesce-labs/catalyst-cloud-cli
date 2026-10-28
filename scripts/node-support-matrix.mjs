@@ -32,15 +32,20 @@ export function classify(entry, now) {
 }
 
 /**
- * Derive { majors, degraded?, warning? } from `engines.node`, the live schedule, and `now`.
- * `schedule` is the parsed `nodejs/Release` schedule.json body, or `null` on a fetch failure — a
- * null schedule degrades LOUDLY to the `engines` floor major alone rather than failing every PR.
+ * Derive { majors, pullRequest, degraded?, warning? } from `engines.node`, the live schedule, and
+ * `now`. `schedule` is the parsed `nodejs/Release` schedule.json body, or `null` on a fetch failure —
+ * a null schedule degrades LOUDLY to the `engines` floor major alone rather than failing every PR.
+ *
+ * CTC-8223: `pullRequest` is the one major an ordinary pull request checks: the Active LTS major in
+ * `majors`, or the newest one when none is in Active LTS. Main and the merge queue still check all
+ * of `majors`, so a break on another supported major is caught before it merges.
  */
 export function deriveMatrix({ engines, schedule, now }) {
   const floorMajor = parseMajor(engines);
   if (!schedule) {
     return {
       majors: [String(floorMajor)],
+      pullRequest: [String(floorMajor)],
       degraded: true,
       warning: `could not fetch the Node release schedule (${SCHEDULE_URL}); falling back to the engines.node floor (${floorMajor}) alone`,
     };
@@ -66,7 +71,12 @@ export function deriveMatrix({ engines, schedule, now }) {
     .sort((a, b) => a - b)
     .map(String);
 
-  return { majors };
+  const activeLts = majors.filter((major) => classified[Number(major)] === "active-lts");
+  const pullRequest = [activeLts[activeLts.length - 1] ?? majors[majors.length - 1]].filter(
+    (major) => major !== undefined,
+  );
+
+  return { majors, pullRequest };
 }
 
 export function formatForGithub(majors) {
@@ -110,9 +120,10 @@ async function main() {
   if (args.includes("--explain")) {
     console.error(`engines.node: ${engines}`);
     console.error(`majors: ${result.majors.join(", ")}`);
+    console.error(`pull request: ${result.pullRequest.join(", ")}`);
     process.exit(0);
   }
-  console.log(formatForGithub(result.majors));
+  console.log(formatForGithub(args.includes("--pull-request") ? result.pullRequest : result.majors));
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

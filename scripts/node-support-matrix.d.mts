@@ -9,6 +9,8 @@ export type MajorPhase = "current" | "active-lts" | "maintenance" | "eol" | "unr
 
 export interface MatrixResult {
   majors: string[];
+  /** CTC-8223: the one major an ordinary pull request checks. */
+  pullRequest: string[];
   degraded?: boolean;
   warning?: string;
 }
