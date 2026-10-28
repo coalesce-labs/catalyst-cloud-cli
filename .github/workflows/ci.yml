@@ -27,8 +27,17 @@ jobs:
 
       # CTC-2158 / Ryan 2026-09-17: "current plus active LTS, matrix derived from engines". The list
       # is DERIVED here, never hand-written — raising engines.node is the only edit that changes it.
+      # CTC-8223: an ordinary pull request checks one major, the Active LTS one (`--pull-request`).
+      # A push to main and a merge-queue head (mergify/merge-queue/) still check every major, so a
+      # break on another supported major is caught before it merges. Mergify gates on `check`,
+      # which needs whichever matrix jobs ran, so no required status waits for a job that never runs.
       - id: derive
-        run: echo "node=$(node scripts/node-support-matrix.mjs --json)" >> "$GITHUB_OUTPUT"
+        env:
+          ONE_MAJOR: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'mergify/merge-queue/') }}
+        run: |
+          flag=""
+          if [ "$ONE_MAJOR" = "true" ]; then flag="--pull-request"; fi
+          echo "node=$(node scripts/node-support-matrix.mjs --json $flag)" >> "$GITHUB_OUTPUT"
 
   check-node:
     name: check (node ${{ matrix.node }})

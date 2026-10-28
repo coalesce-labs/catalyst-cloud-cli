@@ -65,6 +65,29 @@ describe("deriveMatrix", () => {
   });
 });
 
+// CTC-8223: an ordinary pull request checks the Active LTS major only; main and the merge queue
+// keep the whole matrix.
+describe("the pull request major", () => {
+  test("is the Active LTS major, read from the same schedule", () => {
+    expect(deriveMatrix({ engines: ">=22.15", schedule: SCHEDULE, now: NOW }).pullRequest).toEqual(["24"]);
+  });
+
+  test("moves to the next major the day it enters Active LTS, with no edit", () => {
+    const later = deriveMatrix({ engines: ">=22.15", schedule: SCHEDULE, now: "2026-10-28" });
+    expect(later.majors).toEqual(["22", "24", "26"]);
+    expect(later.pullRequest).toEqual(["26"]);
+  });
+
+  test("is the newest supported major when no supported major is in Active LTS", () => {
+    const currentOnly = { v26: SCHEDULE.v26 };
+    expect(deriveMatrix({ engines: ">=26", schedule: currentOnly, now: NOW }).pullRequest).toEqual(["26"]);
+  });
+
+  test("is the engines floor when the schedule cannot be read", () => {
+    expect(deriveMatrix({ engines: ">=22.15", schedule: null, now: NOW }).pullRequest).toEqual(["22"]);
+  });
+});
+
 test("the emitted value is a GitHub-matrix-shaped JSON array on one line", () => {
   expect(formatForGithub(["22", "24", "26"])).toBe('["22","24","26"]');
 });
