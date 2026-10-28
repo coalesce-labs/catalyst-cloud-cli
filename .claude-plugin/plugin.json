@@ -1,7 +1,7 @@
 {
   "name": "catalyst",
   "description": "Run your Catalyst Cloud account from your agent: what is happening, what needs you, and what to do about it.",
-  "version": "0.16.41",
+  "version": "0.16.42",
   "author": {
     "name": "Coalesce Labs"
   },
