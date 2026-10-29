@@ -11,7 +11,12 @@ import { apiClient, type ApiClient } from "./transport.js";
 import { fetchAllPages } from "./pagination.js";
 import { fetchWorkflowStates, postAgent, resolveIssue } from "./write.js";
 
-export async function cmdAsk(args: ParsedArgs, ctx: Ctx): Promise<number> {
+export interface AskDeps {
+  /** Injected by the tests: the wait between accept attempts (no real waiting under test). */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export async function cmdAsk(args: ParsedArgs, ctx: Ctx, deps: AskDeps = {}): Promise<number> {
   const [sub, ...rest] = positionals(args);
   if (!sub) throw new UsageError("ask needs a subcommand: raise | accept | answer | proxy | disown | list");
   if (sub === "raise" && !flagBool(args, "nothing-to-block") && flagList(args, "blocks").length === 0) {
@@ -31,7 +36,7 @@ export async function cmdAsk(args: ParsedArgs, ctx: Ctx): Promise<number> {
     case "raise":
       return raise(args, ctx, doc, api);
     case "accept":
-      return accept(args, ctx, doc, api, rest);
+      return accept(args, ctx, doc, api, rest, deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))));
     case "answer":
       return answerByProxy(args, ctx, doc, api, proxyBody!);
     case "list":
@@ -119,19 +124,55 @@ function askGates(args: ParsedArgs, options: string[], doc: TenantContract): Ask
   return { repo, pr: pr.length === 1 ? pr[0]! : pr, labels: labels.length ? (labels as AskGates["labels"]) : ["hold"], releasedBy: released };
 }
 
-async function accept(args: ParsedArgs, ctx: Ctx, doc: TenantContract, api: ApiClient, rest: string[]): Promise<number> {
+/** The most `ask accept` waits, in total, for an answer comment the cloud has not copied yet. */
+export const ASK_ACCEPT_RETRY_BUDGET_MS = 30_000;
+
+interface AcceptReply {
+  outcome?: string;
+  reason?: string;
+  retryable?: boolean;
+  retryAfterSeconds?: number;
+}
+
+async function accept(
+  args: ParsedArgs,
+  ctx: Ctx,
+  doc: TenantContract,
+  api: ApiClient,
+  rest: string[],
+  sleep: (ms: number) => Promise<void>,
+): Promise<number> {
   const askTicket = rest[0];
   const answer = flagString(args, "answer");
   const role = flagString(args, "role");
   if (!askTicket || !answer || !role) throw new UsageError("ask accept needs <askTicket> --answer <commentId> --role <role>");
   const ask = await resolveIssue(api, askTicket);
-  const result = await postAgent<Record<string, unknown>>(api, doc, "ask-accept", {
-    askIssueId: ask.id,
-    answerCommentId: answer,
-    acceptedByRole: role,
-  });
-  ctx.stdout(args.json ? JSON.stringify(result) : `ask ${ask.identifier}: answer ${answer} recorded by ${role}`);
-  return 0;
+  const body = { askIssueId: ask.id, answerCommentId: answer, acceptedByRole: role };
+  // An answer posted seconds ago may not have reached the cloud yet. The cloud refuses that one case
+  // as retryable and says how long to wait; every other refusal is final and is not retried.
+  let waited = 0;
+  for (;;) {
+    const result = await postAgent<AcceptReply>(api, doc, "ask-accept", body, { accept: [409] });
+    if (result.outcome !== "refused") {
+      ctx.stdout(args.json ? JSON.stringify(result) : `ask ${ask.identifier}: answer ${answer} recorded by ${role}`);
+      return 0;
+    }
+    const waitMs = Math.max(1, result.retryAfterSeconds ?? 10) * 1000;
+    if (result.retryable === true && waited + waitMs <= ASK_ACCEPT_RETRY_BUDGET_MS) {
+      await sleep(waitMs);
+      waited += waitMs;
+      continue;
+    }
+    const reason = result.reason ?? "refused";
+    throw new CliError(
+      result.retryable === true
+        ? `ask ${ask.identifier}: answer ${answer} has not reached the cloud yet (${reason}) after ${waited / 1000}s of retries; run the same command again in ${result.retryAfterSeconds ?? 10}s`
+        : `ask ${ask.identifier}: accept refused (${reason})`,
+      result.retryable === true ? "ask-accept-retry" : "ask-accept-refused",
+      2,
+      409,
+    );
+  }
 }
 
 /** The cloud's bounds on an answer by proxy, checked here first so a refusal never costs a write. */

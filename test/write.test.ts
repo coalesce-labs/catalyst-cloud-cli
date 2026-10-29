@@ -314,6 +314,40 @@ describe("ask", () => {
     expect(ctx.out.join("\n")).toContain("answer c-42 recorded by steward");
     expect(await main(["ask", "accept", "ENG-7"], makeCtx(home))).toBe(1);
   });
+  // CTC-8452 — an accept seconds after the answer was refused as not mirrored, and worked 20 s later.
+  const notMirrored = { outcome: "refused", reason: "answer-comment-not-mirrored", retryable: true, retryAfterSeconds: 10 };
+  const recorded = { outcome: "recorded", askIdentifier: "ENG-7", decisionSummary: "Free-form answer in thread" };
+  function replies(...bodies: { status: number; body: unknown }[]) {
+    let i = 0;
+    return (name: string) => (name === "ask-accept" ? bodies[Math.min(i++, bodies.length - 1)] : undefined);
+  }
+  test("accept waits the cloud's hint and retries an answer it has not mirrored yet", async () => {
+    server.agentWriteReply = replies({ status: 409, body: notMirrored }, { status: 409, body: notMirrored }, { status: 200, body: recorded });
+    const waits: number[] = [];
+    const code = await main(["ask", "accept", "ENG-7", "--answer", "c-42", "--role", "steward"], ctx, { sleep: async (ms) => void waits.push(ms) });
+    expect(code).toBe(0);
+    expect(waits).toEqual([10_000, 10_000]);
+    expect(server.writes.filter((w) => w.path.endsWith("/ask-accept"))).toHaveLength(3);
+    expect(ctx.out.join("\n")).toContain("answer c-42 recorded by steward");
+  });
+  test("accept stops after 30 seconds of retries and says to run it again", async () => {
+    server.agentWriteReply = replies({ status: 409, body: notMirrored });
+    const waits: number[] = [];
+    const code = await main(["ask", "accept", "ENG-7", "--answer", "c-42", "--role", "steward"], ctx, { sleep: async (ms) => void waits.push(ms) });
+    expect(code).toBe(2);
+    expect(waits).toEqual([10_000, 10_000, 10_000]);
+    expect(server.writes.filter((w) => w.path.endsWith("/ask-accept"))).toHaveLength(4);
+    expect(ctx.err.join("\n")).toMatch(/has not reached the cloud yet \(answer-comment-not-mirrored\) after 30s of retries; run the same command again in 10s/);
+  });
+  test("accept never retries a final refusal", async () => {
+    server.agentWriteReply = replies({ status: 409, body: { outcome: "refused", reason: "not-assignee" } });
+    const waits: number[] = [];
+    const code = await main(["ask", "accept", "ENG-7", "--answer", "c-42", "--role", "steward"], ctx, { sleep: async (ms) => void waits.push(ms) });
+    expect(code).toBe(2);
+    expect(waits).toEqual([]);
+    expect(server.writes.filter((w) => w.path.endsWith("/ask-accept"))).toHaveLength(1);
+    expect(ctx.err.join("\n")).toMatch(/accept refused \(not-assignee\)/);
+  });
   test("list with the cloud account's shared key is every open ask, ranked, and says it names no person", async () => {
     expect(await main(["ask", "list", "--json"], ctx)).toBe(0);
     const { scope, asks } = JSON.parse(ctx.out.join("\n")) as { scope: { kind: string }; asks: { identifier: string; blocks: string[]; score: number }[] };
