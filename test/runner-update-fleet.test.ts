@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { main } from "../src/cli";
+import { readManifest } from "../src/config";
 import { readReleaseState, writeReleaseState, type ReleaseComponent } from "../src/runner-update";
 import {
   credentialMount,
@@ -113,6 +114,7 @@ function fake(dir: string, options: FakeOptions = {}) {
   const calls = {
     recreate: 0, removed: [] as string[], prepared: [] as string[][],
     armed: [] as { dir: string; delayMs: number }[], logSince: [] as string[],
+    reports: [] as (string | undefined)[],
     /** Per recreate: the supervisor image it ran, and the scopes the in-flight file required then. */
     recreatedOn: [] as string[], inFlight: [] as (string[] | null)[],
   };
@@ -128,7 +130,10 @@ function fake(dir: string, options: FakeOptions = {}) {
   let logText = options.before ?? SERVING;
   let childEpoch = 0;
   const engine: FleetUpdateEngine = {
-    desiredRelease: async () => ({ kind: "answered", status: 200, body: { ok: true, release: desired }, hostId: "host_root" }),
+    desiredRelease: async (_dir, _compose, _signal, report) => {
+      calls.reports.push(report);
+      return { kind: "answered", status: 200, body: { ok: true, release: desired }, hostId: "host_root" };
+    },
     supervisor: async () => live,
     logs: async (_id, since) => {
       calls.logSince.push(since);
@@ -179,6 +184,104 @@ function clock() {
   let t = Date.parse("2026-10-22T20:00:00Z");
   return { now: () => t, sleep: async (ms: number) => void (t += ms) };
 }
+
+describe("fleet update reports (CTC-8152)", () => {
+  it("reports the previous update of generation 173 on the next read", async () => {
+    const { dir } = install();
+    const { engine, calls } = fake(dir, { read: release(173) });
+    const time = clock();
+    expect(await runFleetUpdate(engine, { dir, ...time })).toMatchObject({ outcome: "updated", generation: 173 });
+    expect(calls.reports).toEqual([undefined]);
+    const previous = readReleaseState(dir).last;
+    expect(previous).toMatchObject({ outcome: "updated", detail: "updated:runner,supervisor", atMs: time.now() });
+
+    expect(await runFleetUpdate(engine, { dir, ...time })).toMatchObject({ outcome: "current", generation: 173 });
+    expect(calls.reports).toHaveLength(2);
+    const report = calls.reports[1];
+    if (typeof report !== "string") throw new Error("the next read did not carry the previous update report");
+    expect(JSON.parse(report)).toEqual({
+      v: 1, outcome: "updated", detail: "updated:runner,supervisor", applied: 173, offered: 173,
+      atMs: previous?.atMs, cli: readManifest().version,
+    });
+  });
+
+  it("a first run sends no report and still processes the desired release", async () => {
+    const { dir } = install(NEW);
+    const { engine, calls } = fake(dir, { read: release(173) });
+    expect(readReleaseState(dir).last).toBeNull();
+    expect(await runFleetUpdate(engine, { dir, ...clock() })).toMatchObject({ outcome: "recorded", generation: 173 });
+    expect(calls.reports).toEqual([undefined]);
+    expect(readReleaseState(dir)).toMatchObject({ generation: 173, last: { outcome: "recorded" } });
+    expect(calls.recreate).toBe(0);
+  });
+
+  it("--check after a recorded run sends no report and preserves the last result", async () => {
+    const { dir } = install();
+    const { engine, calls, approve } = fake(dir, { read: release(173) });
+    const time = clock();
+    await runFleetUpdate(engine, { dir, ...time });
+    const before = readReleaseState(dir);
+    approve(release(174, ["4", "5", "6"]));
+    expect(await runFleetUpdate(engine, { dir, check: true, ...time })).toMatchObject({ outcome: "planned" });
+    expect(calls.reports).toEqual([undefined, undefined]);
+    expect(readReleaseState(dir)).toEqual(before);
+    expect(calls.recreate).toBe(1);
+  });
+
+  it.each(["retained", "failed"] as const)("reports a previous %s result with its applied generation and sanitized detail", async (outcome) => {
+    const { dir } = install(NEW);
+    const atMs = 1_800_000_000_000;
+    writeReleaseState(dir, {
+      ...readReleaseState(dir), generation: 173,
+      last: { outcome, detail: "Image_unverified:ghcr.io/Runner@sha256:AB;retry=1", generation: 173, atMs },
+    });
+    const { engine, calls } = fake(dir, { read: release(173) });
+    expect(await runFleetUpdate(engine, { dir, ...clock() })).toMatchObject({ outcome: "current", generation: 173 });
+    expect(calls.reports).toHaveLength(1);
+    const report = calls.reports[0];
+    if (typeof report !== "string") throw new Error("the read did not carry the previous update report");
+    expect(JSON.parse(report)).toEqual({
+      v: 1, outcome, detail: "image_unverified:ghcr.io_runner_sha256:ab_retry_1",
+      applied: 173, offered: 173, atMs, cli: readManifest().version,
+    });
+  });
+
+  it.each([undefined, JSON.stringify({ v: 1, outcome: "updated", applied: 173, cli: readManifest().version })])(
+    "Docker forwards the exact optional report %s before the entrypoint with only the credential mounted",
+    async (report) => {
+      const calls: string[][] = [];
+      const environments: NodeJS.ProcessEnv[] = [];
+      const answer = { kind: "answered", status: 200, body: { ok: true, release: release(173) }, hostId: "host_root" };
+      const engine = dockerFleetUpdateEngine({
+        env: { PATH: "/usr/bin", CATALYST_UPDATE_REPORT: "stale", CATALYST_KEY: "secret", DOCKER_SOCKET_PATH: "/var/run/docker.sock" },
+        exec: async (args, options) => {
+          calls.push(args);
+          environments.push(options.env);
+          return { code: 0, stdout: JSON.stringify(answer) };
+        },
+      });
+      expect(await engine.desiredRelease("/srv/fleet", composeFile(), undefined, report)).toEqual(answer);
+      expect(calls).toHaveLength(1);
+      const args = calls[0];
+      if (!args) throw new Error("Docker was not called");
+      const reportValues = args.filter((arg) => arg.startsWith("CATALYST_UPDATE_REPORT="));
+      expect(reportValues).toEqual(report === undefined ? [] : [`CATALYST_UPDATE_REPORT=${report}`]);
+      if (report !== undefined) {
+        const index = args.indexOf(`CATALYST_UPDATE_REPORT=${report}`);
+        expect(args.slice(index - 1, index + 1)).toEqual(["--env", `CATALYST_UPDATE_REPORT=${report}`]);
+        expect(index).toBeGreaterThan(args.indexOf("CATALYST_MIRROR_URL=https://mirror.example"));
+        expect(index).toBeLessThan(args.indexOf("--entrypoint"));
+      }
+      expect(args.filter((arg) => arg === "--mount")).toHaveLength(1);
+      expect(args.slice(args.indexOf("--mount"), args.indexOf("--mount") + 2))
+        .toEqual(["--mount", "type=volume,src=catalyst-host-credential,dst=/run/catalyst/root-credential,readonly"]);
+      expect(args).toEqual(expect.arrayContaining(["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"]));
+      expect(args.join(" ")).not.toContain("docker.sock");
+      expect(args.join(" ")).not.toContain("/etc/catalyst/fleet");
+      expect(environments).toEqual([{ PATH: "/usr/bin" }]);
+    },
+  );
+});
 
 describe("fleet update: one release for the whole fleet, the supervisor recreated alone", () => {
   it("POSITIVE CONTROL: a newer release rewrites only the two image fields, re-qualifies every scope and records the generation", async () => {
