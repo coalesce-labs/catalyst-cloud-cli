@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.43
+
+`catalyst ask accept` now waits for an answer that has not reached Catalyst yet, instead of failing. If you accept an ask a few seconds after answering it, Catalyst may not have your answer comment yet. The command used to stop with a refusal, and the same command worked when you ran it again. Now it waits as long as Catalyst asks and tries again, for up to 30 seconds. If the answer still has not arrived, it says so and tells you when to run the same command again. A refusal that will not change on retry is reported at once, with its reason.
+
 ## 0.16.42
 
 A busy machine now takes a waiting release after one day. Before, a busy machine could keep putting off a release that cannot take over from running work in place. Now the next check asks Catalyst to send the machine no new work, waits for the running work to finish, then moves to the release and takes work again. `catalyst runner update --check` says when a machine is waiting like this, and `catalyst runner auto-update off` ends the wait. If the update cannot restore the machine's private thoughts storage, the machine keeps taking no new work, and `catalyst runner update` tells you what to do. This release also makes updates on Catalyst's own machines more reliable.
