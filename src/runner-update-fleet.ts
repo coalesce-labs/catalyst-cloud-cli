@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { readManifest } from "./config.js";
 import { dockerRunnerEngine, prepareRunnerImages, spawnDocker, type RunnerEngine, type RunnerExec } from "./onboard-runner.js";
 import { defaultRun, type SchedulerRun } from "./runner-auto-update.js";
 import {
@@ -11,6 +12,7 @@ import {
   readReleaseState,
   releaseLock,
   takeLock,
+  updateReport,
   writePrivateAtomic,
   writeReleaseState,
   type DesiredReleaseRead,
@@ -104,7 +106,8 @@ export interface FleetSupervisor {
 
 /** Everything the fleet update touches outside its own files. The docker one is below; tests use fakes. */
 export interface FleetUpdateEngine {
-  desiredRelease(dir: string, compose: Record<string, unknown>, signal?: AbortSignal): Promise<DesiredReleaseRead>;
+  /** `report` carries the previous run's outcome on the release read. */
+  desiredRelease(dir: string, compose: Record<string, unknown>, signal?: AbortSignal, report?: string): Promise<DesiredReleaseRead>;
   /** The project's supervisor container, null when there is none, undefined when Docker could not be read. */
   supervisor(dir: string, project: string, signal?: AbortSignal): Promise<FleetSupervisor | null | undefined>;
   /** The container's log since an RFC 3339 time or a Docker duration, or null when it could not be read. */
@@ -522,7 +525,7 @@ async function update(engine: FleetUpdateEngine, options: FleetUpdateOptions, no
   if (!isRecord(compose) || current === null || !/^[a-z0-9][a-z0-9_-]*$/.test(project))
     return done("failed", "fleet_compose_unrecognized", { exitCode: 1 });
 
-  const read = await engine.desiredRelease(dir, compose, signal);
+  const read = await engine.desiredRelease(dir, compose, signal, options.check ? undefined : updateReport(state, readManifest().version));
   const decision = decideRelease(state.generation, read);
   if (decision.action === "retain")
     return decision.reason === "not_newer"
@@ -912,8 +915,8 @@ export function dockerFleetUpdateEngine(
     ["compose", "--project-name", project, "--file", file];
   return {
     // Not `compose run`: that would mount the Docker socket and every scope's state. This container
-    // gets the credential alone, read-only, and the two variables the script reads.
-    async desiredRelease(_dir, file, signal) {
+    // gets the credential alone, read-only, the script's configuration and an optional update report.
+    async desiredRelease(_dir, file, signal, report) {
       const service = isRecord(file.services) && isRecord(file.services.supervisor) ? file.services.supervisor : null;
       const environment = service && isRecord(service.environment) ? service.environment : null;
       const credential = environment?.CATALYST_HOST_CREDENTIAL_FILE;
@@ -923,9 +926,10 @@ export function dockerFleetUpdateEngine(
       const mount = credentialMount(file, service, credential);
       if (!mount) return { kind: "no_credential" };
       const user = typeof service.user === "string" && /^[0-9]+(:[0-9]+)?$/.test(service.user) ? ["--user", service.user] : [];
+      const reportEnv = report ? ["--env", `CATALYST_UPDATE_REPORT=${report}`] : [];
       const read = await docker(["run", "--rm", "--network", "bridge", "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", ...user, "--mount", mount,
-        "--env", `CATALYST_HOST_CREDENTIAL_FILE=${credential}`, "--env", `CATALYST_MIRROR_URL=${mirror}`,
+        "--env", `CATALYST_HOST_CREDENTIAL_FILE=${credential}`, "--env", `CATALYST_MIRROR_URL=${mirror}`, ...reportEnv,
         "--entrypoint", "bun", service.image, "-e", DESIRED_RELEASE_SCRIPT], { signal, timeoutMs: 120_000 });
       if (read.code !== 0) return { kind: "no_credential" };
       try {
