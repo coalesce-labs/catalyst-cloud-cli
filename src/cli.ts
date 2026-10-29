@@ -749,7 +749,7 @@ export async function main(
       case "write":
         return await cmdWrite(args, ctx, deps.write);
       case "ask":
-        return await cmdAsk(args, ctx);
+        return await cmdAsk(args, ctx, { sleep: deps.sleep });
       case "ready":
         return await cmdReady(args, ctx, {
           skillNames: CUSTOMER_SKILLS,
