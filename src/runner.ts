@@ -72,6 +72,8 @@ const spawnCommand: RunnerCommand = (file, args, options = {}) =>
         code: error ? (typeof error.code === "number" ? error.code : 127) : 0,
         stdout: String(stdout), stderr: String(stderr),
       }));
+    // As in spawnDocker: a broken pipe is not the verdict, the exit code is.
+    child.stdin?.on("error", () => {});
     child.stdin?.end(options.input ?? "");
   });
 
