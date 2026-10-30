@@ -84,12 +84,13 @@ describe("the built CLI against a docker that exits without reading its input", 
     expect(state.last).toMatchObject({ outcome: "retained", detail: "no_credential" });
     expect(existsSync(join(dir, "update.lock")), "the lock is released").toBe(false);
 
-    // The next run's release read carries the recorded outcome to the cloud.
-    const argv = join(mkdtempSync(join(tmpdir(), "docker-argv-")), "argv");
-    const second = await runCli(["runner", "update", "--auto", "--dir", dir], stubDocker(`printf '%s\\n' "$@" >> '${argv}'\nexit 1`), home);
+    // The next run's release read carries the recorded outcome to the cloud. The stub appends its
+    // arguments to a file beside itself, so no path is quoted into the script.
+    const recording = stubDocker(`printf '%s\\n' "$@" >> "$(dirname "$0")/argv"\nexit 1`);
+    const second = await runCli(["runner", "update", "--auto", "--dir", dir], recording, home);
     expect(second.stderr).not.toMatch(/EPIPE/);
     expect(second.stdout.trim()).toMatch(AUTO_LINE);
-    const report = readFileSync(argv, "utf8").split("\n").find((arg) => arg.startsWith("CATALYST_UPDATE_REPORT="));
+    const report = readFileSync(join(recording, "argv"), "utf8").split("\n").find((arg) => arg.startsWith("CATALYST_UPDATE_REPORT="));
     expect(report).toBeDefined();
     expect(report).toContain('"outcome":"retained"');
   });
