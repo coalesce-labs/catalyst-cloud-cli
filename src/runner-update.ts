@@ -276,6 +276,24 @@ export function writeReleaseState(dir: string, state: ReleaseState): void {
   writePrivateAtomic(join(dir, RELEASE_STATE_FILE), `${JSON.stringify(state, null, 2)}\n`);
 }
 
+const NODE_LOG_SETTING = /^\s*CATALYST_NODE_LOG_SHIPPING\s*:/m;
+const NODE_LOG_LINE = "      CATALYST_NODE_LOG_SHIPPING: ${CATALYST_NODE_LOG_SHIPPING-on}\n";
+const NODE_LOG_LINE_FOLLOWS = /^ {6}CATALYST_GIT_CLONE_TIMEOUT_MS: \$\{CATALYST_GIT_CLONE_TIMEOUT_MS:-\}\n/m;
+export const NODE_LOG_NOTICE =
+  "This machine now sends the logs of the containers Catalyst started on it, with secrets removed first, and its CPU, memory and free disk numbers to Catalyst. To stop it, set CATALYST_NODE_LOG_SHIPPING=off in this runner's .env and run docker compose up -d.";
+
+/** CTC-8674: an update replaces image references and nothing else, so a machine set up earlier has no
+ *  log setting in its Compose file and ships nothing. This adds the one line, exactly as setup writes
+ *  it. Null when there is nothing to add: the setting is already there, or the file is not one we
+ *  recognise. `.env` is never touched here, so a value the owner set there always wins. */
+export function withNodeLogSetting(composeText: string): string | null {
+  if (NODE_LOG_SETTING.test(composeText)) return null;
+  const follows = NODE_LOG_LINE_FOLLOWS.exec(composeText);
+  if (follows === null) return null;
+  const at = follows.index + follows[0].length;
+  return `${composeText.slice(0, at)}${NODE_LOG_LINE}${composeText.slice(at)}`;
+}
+
 /** `.env` with each `KEY=` line for `values` replaced in place (or appended), every other line kept. */
 export function rewriteEnvText(text: string, values: Readonly<Record<string, string>>): string {
   const pending = new Map(Object.entries(values));
@@ -315,6 +333,8 @@ export interface UpdateResult {
   releaseId?: string;
   /** The generation the cloud offered, whenever a release was read. */
   offeredGeneration?: number;
+  /** What this update changed that the owner should read, printed with the result. */
+  notices?: string[];
   /** Exit code: 0 for every outcome a later run can improve on its own, 1 when a person should look. */
   exitCode: number;
 }
@@ -683,8 +703,9 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   const { dir, signal } = options;
   const envPath = join(dir, ".env");
   let state = readReleaseState(dir);
+  const notices: string[] = [];
   const done = (outcome: UpdateOutcome, detail: string, extra: Partial<UpdateResult> = {}): UpdateResult =>
-    ({ outcome, detail, generation: state.generation, exitCode: 0, ...extra });
+    ({ outcome, detail, generation: state.generation, exitCode: 0, ...extra, ...(notices.length > 0 ? { notices } : {}) });
 
   const read = await engine.desiredRelease(dir, signal, options.check ? undefined : updateReport(state, readManifest().version), fresh);
   const hostId = read.kind === "no_credential" ? "" : read.hostId;
@@ -818,6 +839,16 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
 
   // From here the machine changes. The previous file is the rollback.
   if (changed.length > 0) writePrivateAtomic(join(dir, PREVIOUS_ENV_FILE), envText);
+  const composePath = join(dir, "compose.yaml");
+  try {
+    const withSetting = withNodeLogSetting(readFileSync(composePath, "utf8"));
+    if (withSetting !== null) {
+      writePrivateAtomic(composePath, withSetting);
+      notices.push(NODE_LOG_NOTICE);
+    }
+  } catch {
+    // The setting is not worth a failed update: with no line the machine ships nothing, and the next one tries again.
+  }
   writePrivateAtomic(envPath, rewriteEnvText(envText,
     Object.fromEntries(RELEASE_COMPONENTS.map((c) => [RELEASE_ENV_KEYS[c], target[c]]))));
   if ((await engine.composeUp(dir, signal)) && (await waitReady(engine, dir, target, options, now))) {
@@ -1129,5 +1160,6 @@ export function updateResultLines(result: UpdateResult): string[] {
     OUTCOME_TEXT[result.outcome],
     `Release: ${result.releaseId ?? "none"}, generation ${result.generation ?? "none"} (${result.detail}).`,
     ...(custodyUnattested(result) ? [CUSTODY_UNATTESTED_LINE] : []),
+    ...(result.notices ?? []),
   ];
 }

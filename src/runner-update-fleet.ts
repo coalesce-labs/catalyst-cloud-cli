@@ -26,7 +26,8 @@ import {
 // machine reads the same release. The fleet differs from a single-team runner in three ways:
 //
 //   - the images live in `compose.json`, not `.env`: `services.supervisor.image` and its
-//     `environment.CATALYST_RUNNER_IMAGE`. Only those two fields change;
+//     `environment.CATALYST_RUNNER_IMAGE`. Only those two fields change, plus the log setting
+//     when the file has none;
 //   - phase containers are never waited out. The supervisor is recreated alone and re-adopts the
 //     running ones, which keep the image they were granted. So there is no idle gate;
 //   - the deadline watchdog is a separate Compose project and is left alone. The release's watchdog
@@ -146,11 +147,13 @@ export function fleetImages(compose: unknown): FleetImages | null {
   return typeof runner === "string" ? { supervisor: supervisor.image, runner } : null;
 }
 
-/** `compose` with only the two image fields replaced. */
+/** `compose` with the two image fields replaced, and the log setting added when it has none
+ *  (CTC-8674). A value the owner set is kept, whatever it is. */
 export function withFleetImages(compose: Record<string, unknown>, images: FleetImages): Record<string, unknown> {
   const next = structuredClone(compose) as { services: { supervisor: { image: string; environment: Record<string, unknown> } } };
   next.services.supervisor.image = images.supervisor;
   next.services.supervisor.environment.CATALYST_RUNNER_IMAGE = images.runner;
+  next.services.supervisor.environment.CATALYST_NODE_LOG_SHIPPING ??= "on";
   return next;
 }
 
