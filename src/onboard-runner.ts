@@ -224,6 +224,9 @@ export const spawnDocker: RunnerExec = (args, options) =>
     });
     child.on("error", reject);
     child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    // Listen before writing (src/watch.ts:96-121): a docker that exits before reading its stdin
+    // raises EPIPE here, and the exit code from `close` is still the verdict.
+    child.stdin.on("error", () => {});
     child.stdin.end(options.input ?? "");
   });
 
