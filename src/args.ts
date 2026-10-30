@@ -156,7 +156,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
     "coding-account": {
       value: true,
-      help: "verify this coding-account slot (catalyst accounts lists them; or CATALYST_ONBOARD_CODING_ACCOUNT)",
+      help: "verify this AI account identifier (catalyst accounts lists them; or CATALYST_ONBOARD_CODING_ACCOUNT)",
     },
   },
   status: {},
@@ -266,7 +266,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
   queue: {
     team: {
       value: true,
-      help: "team key (default: every team the tenant contract names)",
+      help: "team key (default: every team the workspace contract names)",
     },
   },
   watch: {
@@ -375,11 +375,11 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
     "gates-repo": {
       value: true,
-      help: "raise: the --gates-pr repository as owner/name (default: the account's only repository)",
+      help: "raise: the --gates-pr repository as owner/name (default: the workspace's only repository)",
     },
     anyone: {
       value: false,
-      help: "list: every open ask in the tenant, not only the ones assigned to you",
+      help: "list: every open ask in the workspace, not only the ones assigned to you",
     },
     "ask-key": { value: true, help: "raise: idempotency key" },
     answer: { value: true, help: "accept: the answering comment id" },
@@ -464,7 +464,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
   var: {
     repo: {
       value: true,
-      help: "repository scope (owner/name); omit for tenant scope",
+      help: "repository scope (owner/name); omit for workspace scope",
     },
     names: {
       value: true,
@@ -585,7 +585,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
   "codex-env": {
     print: {
       value: false,
-      help: "print the OTEL_RESOURCE_ATTRIBUTES value a Codex launch should carry: the attributes already set, plus the coding account's slot and this machine's short name",
+      help: "print the OTEL_RESOURCE_ATTRIBUTES value a Codex launch should carry: the attributes already set, plus the AI account identifier and this computer's short name",
     },
     apply: {
       value: false,
@@ -593,7 +593,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
     refresh: {
       value: false,
-      help: "fetch this workspace's coding accounts now and update the cache --print and --apply read",
+      help: "fetch this workspace's AI accounts now and update the cache --print and --apply read",
     },
     "codex-home": { value: true, help: "print: the Codex home to read (default: $CODEX_HOME, else ~/.codex)" },
   },
@@ -703,7 +703,7 @@ export const VERB_USAGE: Record<string, string> = {
   lease:
     "lease <take <ticket> --agent <seat> [--ttl <minutes>] | renew <ticket> (--commit <sha>|--artifact <path or id>|--finding <id>|--pr <number>) [--note <text>] [--agent <seat>] [--generation <n>] | release <ticket> [--agent <seat>] [--generation <n>] | show <ticket>> [--json]   (a seat's ticket lease: take, renew with new progress, release, read; needs login)",
   "codex-env":
-    "codex-env --print [--codex-home <dir>] | --apply | --refresh [--json]   (the telemetry attributes naming the coding account and machine a Codex launch runs as; only --refresh waits on the network)",
+    "codex-env --print [--codex-home <dir>] | --apply | --refresh [--json]   (the telemetry attributes naming the AI account and computer a Codex launch runs as; only --refresh waits on the network)",
   work: "work available [--team K] [--json]   (per team: tickets nobody holds, with the last holder and progress, and open pull requests no live lease covers, drafts included)",
   repo: "repo <status|pause <owner/name> --reason <text>|resume <owner/name> [--reason <text>]|agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]> [--json]   (status: visible workspace repositories; agents-block/agent-setup: local checkout)",
   legacy: "legacy [--remove [--data] [--yes]] [--json]",

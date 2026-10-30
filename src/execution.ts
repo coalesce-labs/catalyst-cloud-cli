@@ -37,7 +37,7 @@ export const EXCLUSION_REASONS: Record<string, string> = {
   runner_image_breaker: "fleet-wide: the live runner image is failing every phase at startup; dispatch resumes when the pin moves",
   no_branch_to_remediate: "a remediate round is queued on a ticket with no recorded branch",
   retry_backoff: "the failed phase is retrying in place and waiting out its backoff",
-  routing_unavailable: "the unit was claimed and refused at kickoff (no route, no eligible coding-account slot, or the provider is unavailable)",
+  routing_unavailable: "the unit was claimed and refused at kickoff (no route, no eligible AI account, or the provider is unavailable)",
   repo_paused: "an operator paused the repository",
   remediate_parked: "the remediate phase is parked, so the failing phase has nowhere to be repaired; `catalyst release <ticket>` releases the park once its cause is fixed",
   phase_parked: "the offered phase is parked after repeated failures or the repair-round cap; `catalyst release <ticket>` releases it once its cause is fixed",
@@ -445,7 +445,7 @@ export async function cmdAccounts(args: ParsedArgs, ctx: Ctx): Promise<number> {
   const res = await api.getJson<{ accounts?: CodingAccount[] } | CodingAccount[]>("/api/v1/coding-accounts", {
     accept: [404],
   });
-  if (res.status === 404) throw needsNewerCloud("coding-account status", cfg);
+  if (res.status === 404) throw needsNewerCloud("AI account status", cfg);
   const accounts = Array.isArray(res.body) ? res.body : (res.body?.accounts ?? []);
   // CTC-6204: removed accounts are history, so they are left out unless --all asks for them. Listed,
   // they read as accounts to repair, and agents kept trying to revive them.
@@ -459,7 +459,7 @@ export async function cmdAccounts(args: ParsedArgs, ctx: Ctx): Promise<number> {
   const addAt = `${normalizeBaseUrl(cfg.baseUrl)}/settings/coding-accounts`;
   const hiddenLine = `${hidden} removed account${hidden === 1 ? " is" : "s are"} kept for history and take no work; catalyst accounts --all lists ${hidden === 1 ? "it" : "them"}.`;
   if (accounts.length === 0) {
-    ctx.stdout(`No coding accounts are enrolled in this workspace. A workspace owner or admin adds one at ${addAt}; there is no command for that yet.`);
+    ctx.stdout(`No AI accounts are enrolled in this workspace. A workspace owner or admin adds one at ${addAt}; there is no command for that yet.`);
     return 0;
   }
   if (shown.length === 0) {

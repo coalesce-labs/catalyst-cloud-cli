@@ -47,6 +47,8 @@ describe("the table itself", () => {
     expect(CAPABILITIES.find((c) => c.verb === "onboard")?.bootstrapHandoff).toBe(true);
     // CTC-4633: the installer forwards --headless only to a CLI that says it takes it.
     expect(CAPABILITIES.find((c) => c.verb === "onboard")?.headless).toBe(true);
+    expect(CAPABILITIES.find((c) => c.verb === "accounts")?.does).toBe("read the workspace's AI accounts and which can take work");
+    expect(CAPABILITIES.find((c) => c.verb === "codex-env")?.does).toContain("AI account and the computer");
     expect(CAPABILITIES.find((c) => c.verb === "setup")).toMatchObject({
       engineProtocol: 1,
       bootstrapHandoffVersion: 2,
