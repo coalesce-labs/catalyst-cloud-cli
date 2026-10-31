@@ -53,8 +53,8 @@ describe("releaseNotes", () => {
   });
 
   test("accepts CRLF line endings", () => {
-    expect(releaseNotes(CHANGELOG.replace(/\n/g, "\r\n"), "0.16.43")).toBe(
-      "Only paragraph of 0.16.43.",
+    expect(releaseNotes(CHANGELOG.replace(/\n/g, "\r\n"), "0.16.44")).toBe(
+      "First paragraph of 0.16.44.\n\nSecond paragraph of 0.16.44.",
     );
   });
 
