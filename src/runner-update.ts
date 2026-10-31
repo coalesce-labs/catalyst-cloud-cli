@@ -813,7 +813,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     const journal = release.journalFormat === null ? null : { format: release.journalFormat, supervisor: target.supervisor };
     const pendingRemoval = [...new Set([...state.pendingRemoval, ...unremoved])].slice(-PENDING_REMOVAL_KEPT);
     writeReleaseState(dir, { ...state, generation: release.generation, releaseId: release.releaseId, appliedAtMs: now(), previous, kept: null, journal, pendingRemoval });
-    return { outcome, detail, generation: release.generation, exitCode: 0, ...tagged };
+    return { outcome, detail, generation: release.generation, exitCode: 0, ...tagged, ...(notices.length > 0 ? { notices } : {}) };
   };
 
   if (options.check)

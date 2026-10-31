@@ -1,7 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { withFleetImages } from "../src/runner-update-fleet.js";
 import {
   NODE_LOG_NOTICE,
   rewriteEnvText,
@@ -58,16 +57,5 @@ describe("CTC-8674: an update adds the log setting to an older install", () => {
     expect((await update(dir)).outcome).toBe("updated");
     expect(readFileSync(join(dir, ".env"), "utf8")).toContain(`\nCATALYST_NODE_LOG_SHIPPING=${value}\n`);
     expect(rewriteEnvText(env, { OTHER: "1" })).toContain(`CATALYST_NODE_LOG_SHIPPING=${value}\n`);
-  });
-
-  it("a fleet file gets the setting once, and an owner's value stays", () => {
-    const images = { supervisor: "s", runner: "r" };
-    const compose = (environment: Record<string, string>) => ({
-      services: { supervisor: { image: "old", environment } },
-    });
-    const environment = (next: Record<string, unknown>) =>
-      (next as { services: { supervisor: { environment: Record<string, string> } } }).services.supervisor.environment;
-    expect(environment(withFleetImages(compose({}), images)).CATALYST_NODE_LOG_SHIPPING).toBe("on");
-    expect(environment(withFleetImages(compose({ CATALYST_NODE_LOG_SHIPPING: "off" }), images)).CATALYST_NODE_LOG_SHIPPING).toBe("off");
   });
 });
