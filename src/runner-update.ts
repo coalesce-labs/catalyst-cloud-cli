@@ -1,4 +1,4 @@
-import { closeSync, existsSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readManifest, type Ctx } from "./config.js";
@@ -282,8 +282,35 @@ export function writePrivateAtomic(path: string, text: string): void {
   renameSync(temp, path);
 }
 
+/** Write a file by rename with the mode it already has, so an edit keeps what setup chose. */
+function writeKeepingMode(path: string, text: string): void {
+  const mode = statSync(path).mode & 0o777;
+  const temp = `${path}.${process.pid}.tmp`;
+  writeFileSync(temp, text, { mode });
+  chmodSync(temp, mode);
+  renameSync(temp, path);
+}
+
 export function writeReleaseState(dir: string, state: ReleaseState): void {
   writePrivateAtomic(join(dir, RELEASE_STATE_FILE), `${JSON.stringify(state, null, 2)}\n`);
+}
+
+const NODE_LOG_SETTING = /^\s*CATALYST_NODE_LOG_SHIPPING\s*:/m;
+const NODE_LOG_LINE = "      CATALYST_NODE_LOG_SHIPPING: ${CATALYST_NODE_LOG_SHIPPING-on}\n";
+const NODE_LOG_LINE_FOLLOWS = /^ {6}CATALYST_GIT_CLONE_TIMEOUT_MS: \$\{CATALYST_GIT_CLONE_TIMEOUT_MS:-\}\n/m;
+export const NODE_LOG_NOTICE =
+  "Catalyst's own service containers on this machine now send their logs to Catalyst, with secrets removed first. To stop it, set CATALYST_NODE_LOG_SHIPPING=off in this runner's .env and run docker compose up -d.";
+
+/** CTC-8674: an update replaces image references and nothing else, so a machine set up earlier has no
+ *  log setting in its Compose file and ships nothing. This adds the one line, exactly as setup writes
+ *  it. Null when there is nothing to add: the setting is already there, or the file is not one we
+ *  recognise. `.env` is never touched here, so a value the owner set there always wins. */
+export function withNodeLogSetting(composeText: string): string | null {
+  if (NODE_LOG_SETTING.test(composeText)) return null;
+  const follows = NODE_LOG_LINE_FOLLOWS.exec(composeText);
+  if (follows === null) return null;
+  const at = follows.index + follows[0].length;
+  return `${composeText.slice(0, at)}${NODE_LOG_LINE}${composeText.slice(at)}`;
 }
 
 /** `.env` with each `KEY=` line for `values` replaced in place (or appended), every other line kept. */
@@ -325,6 +352,8 @@ export interface UpdateResult {
   releaseId?: string;
   /** The generation the cloud offered, whenever a release was read. */
   offeredGeneration?: number;
+  /** What this update changed that the owner should read, printed with the result. */
+  notices?: string[];
   /** Exit code: 0 for every outcome a later run can improve on its own, 1 when a person should look. */
   exitCode: number;
 }
@@ -727,6 +756,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   const { dir, signal } = options;
   const envPath = join(dir, ".env");
   let state = readReleaseState(dir);
+  const notices: string[] = [];
   const done = (outcome: UpdateOutcome, detail: string, extra: Partial<UpdateResult> = {}): UpdateResult =>
     ({ outcome, detail, generation: state.generation, exitCode: 0, ...extra });
 
@@ -792,7 +822,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     const journal = release.journalFormat === null ? null : { format: release.journalFormat, supervisor: target.supervisor };
     const pendingRemoval = [...new Set([...state.pendingRemoval, ...unremoved])].slice(-PENDING_REMOVAL_KEPT);
     writeReleaseState(dir, { ...state, generation: release.generation, releaseId: release.releaseId, appliedAtMs: now(), previous, kept: null, journal, pendingRemoval });
-    return { outcome, detail, generation: release.generation, exitCode: 0, ...tagged };
+    return { outcome, detail, generation: release.generation, exitCode: 0, ...tagged, ...(notices.length > 0 ? { notices } : {}) };
   };
 
   if (options.check)
@@ -883,6 +913,30 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
 
   // From here the machine changes. The previous file is the rollback.
   if (changed.length > 0 && state.kept === null) writePrivateAtomic(join(dir, PREVIOUS_ENV_FILE), envText);
+  // The log setting goes in with the release and comes out with it: a rollback puts the file back as
+  // it was, so the run whose release stays adds the line and says so.
+  const composePath = join(dir, "compose.yaml");
+  let composeBefore: string | null = null;
+  try {
+    const text = readFileSync(composePath, "utf8");
+    const withSetting = withNodeLogSetting(text);
+    if (withSetting !== null) {
+      writeKeepingMode(composePath, withSetting);
+      composeBefore = text;
+    }
+  } catch {
+    // The setting is not worth a failed update: with no line the machine ships nothing, and the next one tries again.
+  }
+  /** True when the line could not be taken out, so the rollback runs with it and must say so. */
+  const undoSetting = (): boolean => {
+    if (composeBefore === null) return false;
+    try {
+      writeKeepingMode(composePath, composeBefore);
+      return false;
+    } catch {
+      return true;
+    }
+  };
   writePrivateAtomic(envPath, rewriteEnvText(envText,
     Object.fromEntries(RELEASE_COMPONENTS.map((c) => [RELEASE_ENV_KEYS[c], target[c]]))));
   if ((await engine.composeUp(dir, signal)) && (await waitReady(engine, dir, target, options, now))) {
@@ -896,14 +950,18 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
       .filter((ref) => ref !== "" && !RELEASE_COMPONENTS.some((c) => target[c] === ref));
     const unremoved = replaced.length > 0 ? await engine.removeImages(replaced, signal) : [];
     const applied = changed.length > 0 ? `updated:${changed.join(",")}` : "reconciled";
+    if (composeBefore !== null) notices.push(NODE_LOG_NOTICE);
     return record("updated", inPlace ? `${applied}:in_place` : applied, proven ?? (changed.length > 0 ? current : state.previous), unremoved);
   }
 
   // CTC-8745: not recorded as applied, and the previous images stay, until it comes up ready.
-  if (!waitOver && (await inPreparationStop(engine, dir, target, signal))) return keepWaiting();
+  // The new supervisor is up with the line, so a release kept waiting keeps it and says so.
+  if (!waitOver && (await inPreparationStop(engine, dir, target, signal)))
+    return composeBefore === null ? keepWaiting() : { ...keepWaiting(), notices: [NODE_LOG_NOTICE] };
   if (rollbackText === null || rollbackImages === null)
-    return done("failed", "new_supervisor_not_ready_no_previous", { ...tagged, exitCode: 1 });
+    return done("failed", "new_supervisor_not_ready_no_previous", { ...tagged, exitCode: 1, ...(composeBefore === null ? {} : { notices: [NODE_LOG_NOTICE] }) });
   writePrivateAtomic(envPath, rollbackText);
+  const settingStays = undoSetting();
   const custodyRefused = await restoreCustody(rollbackImages);
   // CTC-8745: a stop the release did not cause holds the release it went back to as well. That is a
   // rollback that worked, not a failed one.
@@ -912,7 +970,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   writeReleaseState(dir, { ...state, kept: null });
   return done(restored && custodyRefused === null ? "rolled_back" : "failed",
     !restored ? "rollback_not_ready" : custodyRefused === null ? "new_supervisor_not_ready" : `custody_restore_failed:${custodyRefused}`,
-    { ...tagged, exitCode: 1 });
+    { ...tagged, exitCode: 1, ...(settingStays ? { notices: [NODE_LOG_NOTICE] } : {}) });
 }
 
 /** CTC-8745: puts back the proven release a kept one replaced, with no release read. The phase
@@ -1252,5 +1310,6 @@ export function updateResultLines(result: UpdateResult): string[] {
       : OUTCOME_TEXT[result.outcome],
     `Release: ${result.releaseId ?? "none"}, generation ${result.generation ?? "none"} (${result.detail}).`,
     ...(custodyUnattested(result) ? [CUSTODY_UNATTESTED_LINE] : []),
+    ...(result.notices ?? []),
   ];
 }
