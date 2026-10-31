@@ -122,6 +122,9 @@ describe("the workflows", () => {
     expect(backfill).not.toMatch(/npm publish|NPM_PUBLISH_TOKEN|bun install/);
     expect(backfill).toMatch(/dry_run:[\s\S]*?default: true/);
     expect(backfill).toContain("TAGS: ${{ inputs.tags }}");
-    expect(backfill).not.toMatch(/run:[^\n]*\$\{\{ inputs\./);
+    // An input expanded inside a script is a shell injection; only env lines may read inputs.
+    const inputLines = backfill.split("\n").filter((line) => line.includes("${{ inputs."));
+    expect(inputLines.length).toBeGreaterThan(0);
+    for (const line of inputLines) expect(line).toMatch(/^\s+[A-Z_]+: \$\{\{ inputs\.[a-z_]+ \}\}$/);
   });
 });
