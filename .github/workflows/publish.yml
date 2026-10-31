@@ -164,8 +164,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
 
   # CTC-9044 — every CLI release gets a GitHub Release, as the SDK's and catalyst-cloud's do, with
-  # that version's CHANGELOG.md section as its notes. Its own job, so contents: write is held only by
-  # a checkout and the script, never by the steps that install and run third-party code above. A tag
+  # that version's CHANGELOG.md section as its notes. It is its own job so that only a checkout and the script can write to the repository,
+  # never the steps above that install and run third-party code. A tag
   # that already has a Release is left alone, so re-running a release finishes it.
   github-release:
     needs: publish

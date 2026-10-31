@@ -37,8 +37,8 @@ jobs:
           set -euo pipefail
           args=()
           [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
-          read -r -a tags <<< "$TAGS"
-          node scripts/github-release.mjs "${tags[@]}" "${args[@]}"
+          read -r -a release_tags <<< "$TAGS"
+          node scripts/github-release.mjs "${release_tags[@]}" "${args[@]}"
         env:
           GH_TOKEN: ${{ github.token }}
           TAGS: ${{ inputs.tags }}
