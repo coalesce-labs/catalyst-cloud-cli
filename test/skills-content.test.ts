@@ -1033,6 +1033,34 @@ describe("CTC-2158: CI derives its Node matrix and exercises bun in both directi
   });
 });
 
+// CTC-6602 — pull request CI enforces the same coverage floor the publish workflow does.
+describe("CTC-6602: pull request CI runs the publish workflow's coverage floor", () => {
+  const ci = readFileSync(
+    join(pkgRoot, ".github", "workflows", "ci.yml"),
+    "utf8",
+  );
+  const publish = readFileSync(
+    join(pkgRoot, ".github", "workflows", "publish.yml"),
+    "utf8",
+  );
+  // The `check (node N)` job, which the aggregate `check` Mergify gates on needs.
+  const checkNode = ci.slice(
+    ci.indexOf("\n  check-node:"),
+    ci.indexOf("\n  evals:"),
+  );
+
+  test("the check-node job runs the same coverage command publish.yml does", () => {
+    expect(publish).toContain("bun run test:coverage");
+    expect(checkNode).toContain("bun run test:coverage");
+    expect(checkNode).not.toMatch(/^\s*run: bun run test\s*$/m);
+  });
+
+  test("a threshold failure is re-emitted as an annotation naming the coverage line", () => {
+    expect(checkNode).toContain("does not meet .*threshold");
+    expect(checkNode).toContain("::error title=Coverage below the publish floor::");
+  });
+});
+
 // A customer's agent read `gitAutomation: "off"` as the reason nothing started. No Catalyst code reads
 // that field; an unmapped team is the cause, and it never clears on the next pass.
 describe("the dispatch gate is the stage mapping, not git automation", () => {
