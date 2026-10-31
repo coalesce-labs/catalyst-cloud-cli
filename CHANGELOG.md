@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.44
+
+`catalyst runner update` now adds the log setting to a self-hosted machine that was set up before it existed. If the machine's `compose.yaml` has no `CATALYST_NODE_LOG_SHIPPING` line, the update adds the line a new setup writes and prints a notice saying so. With that line, Catalyst's own service containers on the machine send their logs to Catalyst, with secrets removed first, once Catalyst turns log collection on for your workspace. To keep it off, set `CATALYST_NODE_LOG_SHIPPING=off` in the runner's `.env` and run `docker compose up -d`; a value you set there always wins. An update that rolls back leaves `compose.yaml` as it was, and a file that already names the setting, or that the update does not recognise, is left alone.
+
 ## 0.16.43
 
 `catalyst ask accept` now waits for an answer that has not reached Catalyst yet, instead of failing. If you accept an ask a few seconds after answering it, Catalyst may not have your answer comment yet. The command used to stop with a refusal, and the same command worked when you ran it again. Now it waits as long as Catalyst asks and tries again, for up to 30 seconds. If the answer still has not arrived, it says so and tells you when to run the same command again. A refusal that will not change on retry is reported at once, with its reason.
