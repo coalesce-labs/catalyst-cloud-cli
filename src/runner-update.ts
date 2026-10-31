@@ -1,4 +1,4 @@
-import { closeSync, existsSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readManifest, type Ctx } from "./config.js";
@@ -279,6 +279,15 @@ export function readReleaseState(dir: string): ReleaseState {
 export function writePrivateAtomic(path: string, text: string): void {
   const temp = `${path}.${process.pid}.tmp`;
   writeFileSync(temp, text, { mode: 0o600 });
+  renameSync(temp, path);
+}
+
+/** Write a file by rename with the mode it already has, so an edit keeps what setup chose. */
+function writeKeepingMode(path: string, text: string): void {
+  const mode = statSync(path).mode & 0o777;
+  const temp = `${path}.${process.pid}.tmp`;
+  writeFileSync(temp, text, { mode });
+  chmodSync(temp, mode);
   renameSync(temp, path);
 }
 
@@ -749,7 +758,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   let state = readReleaseState(dir);
   const notices: string[] = [];
   const done = (outcome: UpdateOutcome, detail: string, extra: Partial<UpdateResult> = {}): UpdateResult =>
-    ({ outcome, detail, generation: state.generation, exitCode: 0, ...extra, ...(notices.length > 0 ? { notices } : {}) });
+    ({ outcome, detail, generation: state.generation, exitCode: 0, ...extra });
 
   const read = await engine.desiredRelease(dir, signal, options.check ? undefined : updateReport(state, readManifest().version), fresh);
   const hostId = read.kind === "no_credential" ? "" : read.hostId;
@@ -904,16 +913,30 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
 
   // From here the machine changes. The previous file is the rollback.
   if (changed.length > 0 && state.kept === null) writePrivateAtomic(join(dir, PREVIOUS_ENV_FILE), envText);
+  // The log setting goes in with the release and comes out with it: a rollback puts the file back as
+  // it was, so the run whose release stays adds the line and says so.
   const composePath = join(dir, "compose.yaml");
+  let composeBefore: string | null = null;
   try {
-    const withSetting = withNodeLogSetting(readFileSync(composePath, "utf8"));
+    const text = readFileSync(composePath, "utf8");
+    const withSetting = withNodeLogSetting(text);
     if (withSetting !== null) {
-      writePrivateAtomic(composePath, withSetting);
-      notices.push(NODE_LOG_NOTICE);
+      writeKeepingMode(composePath, withSetting);
+      composeBefore = text;
     }
   } catch {
     // The setting is not worth a failed update: with no line the machine ships nothing, and the next one tries again.
   }
+  /** True when the line could not be taken out, so the rollback runs with it and must say so. */
+  const undoSetting = (): boolean => {
+    if (composeBefore === null) return false;
+    try {
+      writeKeepingMode(composePath, composeBefore);
+      return false;
+    } catch {
+      return true;
+    }
+  };
   writePrivateAtomic(envPath, rewriteEnvText(envText,
     Object.fromEntries(RELEASE_COMPONENTS.map((c) => [RELEASE_ENV_KEYS[c], target[c]]))));
   if ((await engine.composeUp(dir, signal)) && (await waitReady(engine, dir, target, options, now))) {
@@ -927,14 +950,18 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
       .filter((ref) => ref !== "" && !RELEASE_COMPONENTS.some((c) => target[c] === ref));
     const unremoved = replaced.length > 0 ? await engine.removeImages(replaced, signal) : [];
     const applied = changed.length > 0 ? `updated:${changed.join(",")}` : "reconciled";
+    if (composeBefore !== null) notices.push(NODE_LOG_NOTICE);
     return record("updated", inPlace ? `${applied}:in_place` : applied, proven ?? (changed.length > 0 ? current : state.previous), unremoved);
   }
 
   // CTC-8745: not recorded as applied, and the previous images stay, until it comes up ready.
-  if (!waitOver && (await inPreparationStop(engine, dir, target, signal))) return keepWaiting();
+  // The new supervisor is up with the line, so a release kept waiting keeps it and says so.
+  if (!waitOver && (await inPreparationStop(engine, dir, target, signal)))
+    return composeBefore === null ? keepWaiting() : { ...keepWaiting(), notices: [NODE_LOG_NOTICE] };
   if (rollbackText === null || rollbackImages === null)
-    return done("failed", "new_supervisor_not_ready_no_previous", { ...tagged, exitCode: 1 });
+    return done("failed", "new_supervisor_not_ready_no_previous", { ...tagged, exitCode: 1, ...(composeBefore === null ? {} : { notices: [NODE_LOG_NOTICE] }) });
   writePrivateAtomic(envPath, rollbackText);
+  const settingStays = undoSetting();
   const custodyRefused = await restoreCustody(rollbackImages);
   // CTC-8745: a stop the release did not cause holds the release it went back to as well. That is a
   // rollback that worked, not a failed one.
@@ -943,7 +970,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   writeReleaseState(dir, { ...state, kept: null });
   return done(restored && custodyRefused === null ? "rolled_back" : "failed",
     !restored ? "rollback_not_ready" : custodyRefused === null ? "new_supervisor_not_ready" : `custody_restore_failed:${custodyRefused}`,
-    { ...tagged, exitCode: 1 });
+    { ...tagged, exitCode: 1, ...(settingStays ? { notices: [NODE_LOG_NOTICE] } : {}) });
 }
 
 /** CTC-8745: puts back the proven release a kept one replaced, with no release read. The phase
