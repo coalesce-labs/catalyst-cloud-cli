@@ -56,6 +56,11 @@ const LOCK_FILE = "update.lock";
 const PENDING_REMOVAL_KEPT = 20;
 const READY_DEADLINE_MS = 5 * 60_000;
 const READY_POLL_MS = 5_000;
+/** CTC-8745: the supervisor is up and its one unmet prerequisite is its own preparation stop. */
+const WAITING_PREPARATION_STOP = "waiting_preparation_stop";
+/** How long a release is kept through a preparation stop. Stops that end by a quiet period lift at 30
+ *  minutes; a workspace stop can hold forever, and the release can be what holds it. */
+const PREPARATION_STOP_WAIT_MS = 45 * 60_000;
 const ATTEMPT_HOST_LABEL = "dev.catalystcloud.attempt.host-id";
 const ATTEMPT_ID_LABEL = "dev.catalystcloud.attempt.id";
 const DESIRED_RELEASE_PATH = "/api/v1/hosts/desired-release";
@@ -232,10 +237,13 @@ export interface ReleaseState {
   deferral: { sinceMs: number; offered: number; offeredSinceMs: number } | null;
   drain: { requestId: string; generation: number; revision: number; acknowledgedAtMs: number | null; softLimitReported: boolean } | null;
   last: { atMs: number; outcome: UpdateOutcome; detail: string; generation: number | null; offered?: number | null } | null;
+  /** The unproven release `.env` names, kept through a preparation stop, and when its wait began. While
+   *  this is set, the previous file names the release the machine last proved. */
+  kept: { generation: number; sinceMs: number } | null;
 }
 
 export function readReleaseState(dir: string): ReleaseState {
-  const empty: ReleaseState = { version: 1, generation: null, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null, deferral: null, drain: null, last: null };
+  const empty: ReleaseState = { version: 1, kept: null, generation: null, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null, deferral: null, drain: null, last: null };
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(dir, RELEASE_STATE_FILE), "utf8"));
     if (!isRecord(parsed) || parsed.version !== 1) return empty;
@@ -252,6 +260,8 @@ export function readReleaseState(dir: string): ReleaseState {
         ? parsed.pendingRemoval.filter((ref): ref is string => typeof ref === "string").slice(0, PENDING_REMOVAL_KEPT)
         : [],
       windowSettledMs: posInt(parsed.windowSettledMs) ? parsed.windowSettledMs : null,
+      kept: isRecord(parsed.kept) && posInt(parsed.kept.generation) && posInt(parsed.kept.sinceMs)
+        ? { generation: parsed.kept.generation, sinceMs: parsed.kept.sinceMs } : null,
       deferral: isRecord(parsed.deferral) && posInt(parsed.deferral.sinceMs) && posInt(parsed.deferral.offered) && posInt(parsed.deferral.offeredSinceMs)
         ? { sinceMs: parsed.deferral.sinceMs, offered: parsed.deferral.offered, offeredSinceMs: parsed.deferral.offeredSinceMs } : null,
       drain: isRecord(parsed.drain) && typeof parsed.drain.requestId === "string" && UUID.test(parsed.drain.requestId) &&
@@ -348,6 +358,8 @@ export interface RunnerUpdateEngine {
   composeUp(dir: string, signal?: AbortSignal): Promise<boolean>;
   /** True once the supervisor container has logged `host_ready` since it last started. */
   supervisorReadySinceStart(dir: string, signal?: AbortSignal): Promise<boolean>;
+  /** CTC-8745: true when the latest readiness line since it started names only a preparation stop. */
+  supervisorInPreparationStop(dir: string, signal?: AbortSignal): Promise<boolean>;
   /** Remove these local images. Returns the ones still present: the engine refuses an image a
    *  container still uses, such as a runner image under phases an in-place update left running. */
   removeImages(images: string[], signal?: AbortSignal): Promise<string[]>;
@@ -369,6 +381,9 @@ export interface RunnerUpdateOptions {
   held?: () => string | null;
   /** A waiting pass, for the schedule's log. */
   onPass?: (result: UpdateResult) => void;
+  /** CTC-8745: the schedule's run, so another follows. Only such a run keeps a release through a
+   *  preparation stop, because the wait ends on a later run. */
+  scheduled?: boolean;
 }
 
 /** Outcomes that settle a window: nothing was pending, or the machine restarted onto (or tried) a
@@ -541,6 +556,35 @@ async function running(engine: RunnerUpdateEngine, dir: string, images: Images, 
   return engine.supervisorReadySinceStart(dir, signal);
 }
 
+/** CTC-8745: these images are running and only a preparation stop keeps them from being ready. A
+ *  stop survives a restart and lifts by itself, so going back would not help. */
+async function inPreparationStop(engine: RunnerUpdateEngine, dir: string, images: Images, signal?: AbortSignal): Promise<boolean> {
+  const live = await engine.services(dir, signal);
+  if (!live?.supervisor?.running || live.supervisor.image !== images.supervisor) return false;
+  if (!live.watchdog?.running || live.watchdog.image !== images.watchdog) return false;
+  return engine.supervisorInPreparationStop(dir, signal);
+}
+
+/** CTC-8745: whether the latest readiness line in this log names a preparation stop and nothing
+ *  else, from a supervisor that writes a line whenever what is failing changes. */
+export function preparationStopOnly(logs: string): boolean {
+  let latest: Record<string, unknown> | null = null;
+  for (const line of logs.split("\n")) {
+    if (!line.includes('"event":"host_')) continue;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (isRecord(parsed) && (parsed.event === "host_ready" || parsed.event === "host_not_ready")) latest = parsed;
+    } catch {
+      // Not a log line this reads.
+    }
+  }
+  // An older supervisor writes one line per flip, so its latest line can be stale: it does not count.
+  if (latest?.event !== "host_not_ready" || latest.linePerChange !== true) return false;
+  if (!Array.isArray(latest.failing) || latest.failing.length !== 1) return false;
+  const [only] = latest.failing as unknown[];
+  return isRecord(only) && only.id === "host.preparation-failed" && only.reason === "failed";
+}
+
 const REPORT_DETAIL = /[^a-z0-9_:,.-]/g;
 
 /** The previous run's outcome as the release read reports it (CTC-6924), or undefined before the
@@ -693,6 +737,10 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   const offered = read.kind === "answered" && read.status === 200 && isRecord(read.body) && read.body.ok === true
     ? parseDesiredRelease(read.body.release) : null;
   if (decision.action === "retain") {
+    // CTC-8745: a kept release ends on local files alone, so a read that offers no release (a hold,
+    // an outage, an older generation) cannot keep it on past its wait.
+    if (!options.check && state.kept !== null && (options.scheduled !== true || now() - state.kept.sinceMs >= PREPARATION_STOP_WAIT_MS))
+      return returnFromKept(engine, options, state, hostId, now);
     if (!options.check && state.drain?.acknowledgedAtMs != null && decision.reason !== "not_newer")
       return drainingResult(dir, state, now(), null, undefined, `read:${decision.reason}`);
     return decision.reason === "not_newer"
@@ -743,7 +791,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   const record = (outcome: UpdateOutcome, detail: string, previous: Images | null, unremoved: string[] = []): UpdateResult => {
     const journal = release.journalFormat === null ? null : { format: release.journalFormat, supervisor: target.supervisor };
     const pendingRemoval = [...new Set([...state.pendingRemoval, ...unremoved])].slice(-PENDING_REMOVAL_KEPT);
-    writeReleaseState(dir, { ...state, generation: release.generation, releaseId: release.releaseId, appliedAtMs: now(), previous, journal, pendingRemoval });
+    writeReleaseState(dir, { ...state, generation: release.generation, releaseId: release.releaseId, appliedAtMs: now(), previous, kept: null, journal, pendingRemoval });
     return { outcome, detail, generation: release.generation, exitCode: 0, ...tagged };
   };
 
@@ -751,12 +799,29 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     return done("planned", changed.length > 0 ? `would_update:${changed.join(",")}` : "already_configured", { ...tagged, generation: release.generation });
   // `.env` naming the release proves nothing on its own: an earlier run may have stopped after writing
   // it. Only the running containers, ready, prove the release is applied.
-  if (changed.length === 0 && (await running(engine, dir, target, signal)))
-    return record("recorded", "already_running_release", state.previous);
+  if (changed.length === 0 && (await running(engine, dir, target, signal))) {
+    if (state.kept === null) return record("recorded", "already_running_release", state.previous);
+    // CTC-8745: the stop lifted and the kept release came up ready, so what it replaced can go now.
+    const kept = existsSync(join(dir, PREVIOUS_ENV_FILE)) ? imagesOf(parseEnvText(readFileSync(join(dir, PREVIOUS_ENV_FILE), "utf8"))) : null;
+    const replaced = RELEASE_COMPONENTS.filter((c) => kept !== null && kept[c] !== "" && kept[c] !== target[c]).map((c) => kept![c]);
+    return record("recorded", "kept_through_preparation_stop", kept ?? state.previous, replaced.length > 0 ? await engine.removeImages(replaced, signal) : []);
+  }
+  // CTC-8745: a kept release has until its deadline, counted from its first wait. Past that it gets
+  // one restart and the normal deadline, and then goes back, whatever the stop says. A run no schedule
+  // follows has nothing to end a wait, so it goes back at the normal deadline.
+  const waitOver = options.scheduled !== true || (state.kept?.generation === release.generation && now() - state.kept.sinceMs >= PREPARATION_STOP_WAIT_MS);
+  const keepWaiting = () => {
+    if (state.kept?.generation !== release.generation)
+      writeReleaseState(dir, { ...state, kept: { generation: release.generation, sinceMs: now() } });
+    return done("retained", WAITING_PREPARATION_STOP, tagged);
+  };
+  // Starting a kept release again inside its wait would change nothing.
+  if (changed.length === 0 && !waitOver && (await inPreparationStop(engine, dir, target, signal))) return keepWaiting();
 
   // What a failure goes back to: today's file, or for a half-applied file the one saved before it.
+  // CTC-8745: a kept release is unproven, so a newer offer goes back past it too.
   let rollbackText: string | null = envText;
-  if (changed.length === 0) {
+  if (changed.length === 0 || state.kept !== null) {
     try {
       rollbackText = readFileSync(join(dir, PREVIOUS_ENV_FILE), "utf8");
     } catch {
@@ -817,7 +882,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   }
 
   // From here the machine changes. The previous file is the rollback.
-  if (changed.length > 0) writePrivateAtomic(join(dir, PREVIOUS_ENV_FILE), envText);
+  if (changed.length > 0 && state.kept === null) writePrivateAtomic(join(dir, PREVIOUS_ENV_FILE), envText);
   writePrivateAtomic(envPath, rewriteEnvText(envText,
     Object.fromEntries(RELEASE_COMPONENTS.map((c) => [RELEASE_ENV_KEYS[c], target[c]]))));
   if ((await engine.composeUp(dir, signal)) && (await waitReady(engine, dir, target, options, now))) {
@@ -825,21 +890,68 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     // image is several GB, against a free-space floor that decides whether the machine takes work).
     // A rollback or failure never reaches here, so the previous images stay for it.
     // An image still in use, such as the runner image under phases left running, is kept for a later run.
-    const unremoved = changed.length > 0
-      ? await engine.removeImages(changed.map((c) => current[c]).filter((ref) => ref !== ""), signal)
-      : [];
+    // CTC-8745: so do the proven images a kept release left in place for its rollback.
+    const proven = state.kept === null ? null : rollbackImages;
+    const replaced = [...new Set([...changed.map((c) => current[c]), ...(proven === null ? [] : RELEASE_COMPONENTS.map((c) => proven[c]))])]
+      .filter((ref) => ref !== "" && !RELEASE_COMPONENTS.some((c) => target[c] === ref));
+    const unremoved = replaced.length > 0 ? await engine.removeImages(replaced, signal) : [];
     const applied = changed.length > 0 ? `updated:${changed.join(",")}` : "reconciled";
-    return record("updated", inPlace ? `${applied}:in_place` : applied, changed.length > 0 ? current : state.previous, unremoved);
+    return record("updated", inPlace ? `${applied}:in_place` : applied, proven ?? (changed.length > 0 ? current : state.previous), unremoved);
   }
 
+  // CTC-8745: not recorded as applied, and the previous images stay, until it comes up ready.
+  if (!waitOver && (await inPreparationStop(engine, dir, target, signal))) return keepWaiting();
   if (rollbackText === null || rollbackImages === null)
     return done("failed", "new_supervisor_not_ready_no_previous", { ...tagged, exitCode: 1 });
   writePrivateAtomic(envPath, rollbackText);
   const custodyRefused = await restoreCustody(rollbackImages);
-  const restored = (await engine.composeUp(dir, signal)) && (await waitReady(engine, dir, rollbackImages, options, now));
+  // CTC-8745: a stop the release did not cause holds the release it went back to as well. That is a
+  // rollback that worked, not a failed one.
+  const restored = (await engine.composeUp(dir, signal))
+    && ((await waitReady(engine, dir, rollbackImages, options, now)) || (await inPreparationStop(engine, dir, rollbackImages, signal)));
+  writeReleaseState(dir, { ...state, kept: null });
   return done(restored && custodyRefused === null ? "rolled_back" : "failed",
     !restored ? "rollback_not_ready" : custodyRefused === null ? "new_supervisor_not_ready" : `custody_restore_failed:${custodyRefused}`,
     { ...tagged, exitCode: 1 });
+}
+
+/** CTC-8745: puts back the proven release a kept one replaced, with no release read. The phase
+ *  boundary and the outcome are the update's own: stop the supervisor, go back only if no phase is
+ *  running, and report it as the rollback it is. */
+async function returnFromKept(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, state: ReleaseState, hostId: string, now: () => number): Promise<UpdateResult> {
+  const { dir, signal } = options;
+  const envPath = join(dir, ".env");
+  const result = (outcome: UpdateOutcome, detail: string, exitCode: number): UpdateResult => ({ outcome, detail, generation: state.generation, exitCode });
+  let rollbackText: string;
+  try {
+    rollbackText = readFileSync(join(dir, PREVIOUS_ENV_FILE), "utf8");
+  } catch {
+    return result("failed", "new_supervisor_not_ready_no_previous", 1);
+  }
+  const rollbackImages = imagesOf(parseEnvText(rollbackText));
+  const env = readEnvFile(envPath) ?? {};
+  const restoreCustody = async (): Promise<string | null> => {
+    if (persistedCustody(dir, env) !== "installed") return null;
+    const attested = await engine.custody(dir, rollbackImages, signal);
+    if ("refused" in attested) return attested.refused;
+    return attested.authority === env.CATALYST_THOUGHTS_CUSTODY_AUTHORITY ? null : "authority_changed";
+  };
+  if (!(await engine.stopSupervisor(dir, signal))) {
+    await engine.composeUp(dir, signal);
+    return result("retained", "supervisor_stop_failed", 0);
+  }
+  const busy = await engine.attemptContainers(dir, hostId, signal);
+  if (busy !== 0) {
+    await engine.composeUp(dir, signal);
+    return result("retained", busy === null ? "docker_unavailable" : "phases_running", 0);
+  }
+  writePrivateAtomic(envPath, rollbackText);
+  const custodyRefused = await restoreCustody();
+  const restored = (await engine.composeUp(dir, signal))
+    && ((await waitReady(engine, dir, rollbackImages, options, now)) || (await inPreparationStop(engine, dir, rollbackImages, signal)));
+  writeReleaseState(dir, { ...state, kept: null });
+  return result(restored && custodyRefused === null ? "rolled_back" : "failed",
+    !restored ? "rollback_not_ready" : custodyRefused === null ? "new_supervisor_not_ready" : `custody_restore_failed:${custodyRefused}`, 1);
 }
 
 async function waitReady(
@@ -989,6 +1101,17 @@ export function dockerRunnerUpdateEngine(
       return { code: 1, stdout: "" };
     }
   };
+  /** The supervisor container's log since it last started, or null when that cannot be read. */
+  const logsSinceStart = async (dir: string, signal?: AbortSignal): Promise<string | null> => {
+    const compose = runnerComposeArgs(dir);
+    if (!compose) return null;
+    const id = (await docker([...compose, "ps", "--quiet", "supervisor"], { cwd: dir, signal })).stdout.trim();
+    if (!/^[0-9a-f]{12,64}$/.test(id)) return null;
+    const started = (await docker(["inspect", "--format", "{{.State.StartedAt}}", id], { signal })).stdout.trim();
+    if (!Number.isFinite(Date.parse(started))) return null;
+    const logs = await docker(["logs", "--since", started, id], { signal, timeoutMs: 30_000 });
+    return `${logs.stdout}\n${logs.stderr ?? ""}`;
+  };
   return {
     async desiredRelease(dir, signal, report) {
       const compose = runnerComposeArgs(dir);
@@ -1068,14 +1191,12 @@ export function dockerRunnerUpdateEngine(
       return kept;
     },
     async supervisorReadySinceStart(dir, signal) {
-      const compose = runnerComposeArgs(dir);
-      if (!compose) return false;
-      const id = (await docker([...compose, "ps", "--quiet", "supervisor"], { cwd: dir, signal })).stdout.trim();
-      if (!/^[0-9a-f]{12,64}$/.test(id)) return false;
-      const started = (await docker(["inspect", "--format", "{{.State.StartedAt}}", id], { signal })).stdout.trim();
-      if (!Number.isFinite(Date.parse(started))) return false;
-      const logs = await docker(["logs", "--since", started, id], { signal, timeoutMs: 30_000 });
-      return `${logs.stdout}\n${logs.stderr ?? ""}`.includes('"event":"host_ready"');
+      const logs = await logsSinceStart(dir, signal);
+      return logs !== null && logs.includes('"event":"host_ready"');
+    },
+    async supervisorInPreparationStop(dir, signal) {
+      const logs = await logsSinceStart(dir, signal);
+      return logs !== null && preparationStopOnly(logs);
     },
   };
 }
@@ -1126,7 +1247,9 @@ export const CUSTODY_UNATTESTED_LINE = "Private thoughts storage on this Mac is 
 
 export function updateResultLines(result: UpdateResult): string[] {
   return [
-    OUTCOME_TEXT[result.outcome],
+    result.detail === WAITING_PREPARATION_STOP
+      ? "The new release is running. This machine stopped asking for phases after their preparation kept failing, so the update finishes once it asks again, or goes back to the previous release after 45 minutes."
+      : OUTCOME_TEXT[result.outcome],
     `Release: ${result.releaseId ?? "none"}, generation ${result.generation ?? "none"} (${result.detail}).`,
     ...(custodyUnattested(result) ? [CUSTODY_UNATTESTED_LINE] : []),
   ];

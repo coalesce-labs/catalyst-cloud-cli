@@ -4,10 +4,11 @@ import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { main } from "../src/cli";
 import type { SchedulerRun } from "../src/runner-auto-update";
-import type { RunnerUpdateEngine } from "../src/runner-update";
+import { type RunnerUpdateEngine, runRunnerUpdate } from "../src/runner-update";
 import type { FleetUpdateEngine } from "../src/runner-update-fleet";
 import { effectivePolicy, readUpdatePolicy, setComponentPolicy } from "../src/update-policy";
 import { makeCtx, tempHome } from "./helpers";
+import { fakeEngine, install as installRelease, OLD, ORIGINAL_ENV } from "./runner-update-fixtures";
 import { answered, countingEngine, hostRelease, ref, runnerInstall } from "./update-fixtures";
 
 // `catalyst runner update` and `catalyst runner auto-update` through the real dispatcher, with the
@@ -26,7 +27,7 @@ function engine(status: number, body: unknown = { ok: false, refusal: "release_u
   return {
     desiredRelease: async () => ({ kind: "answered", status, body, hostId: "host_abc" }), updateDrain: unused,
     attemptContainers: unused, prepare: unused, custody: unused, services: unused,
-    stopSupervisor: unused, composeUp: unused, supervisorReadySinceStart: unused, removeImages: unused,
+    stopSupervisor: unused, composeUp: unused, supervisorReadySinceStart: unused, supervisorInPreparationStop: unused, removeImages: unused,
   };
 }
 
@@ -118,6 +119,17 @@ describe("catalyst runner update", () => {
     const empty = makeCtx(tempHome());
     await main(["runner", "update", "--check", "--json", "--dir", install()], empty, { runner: { engine: engine(503) } });
     expect(JSON.parse(empty.out[0]!).drain).toBeNull();
+  });
+
+  it("CTC-8745: the schedule's run keeps a release through a preparation stop", async () => {
+    const kept = installRelease(ORIGINAL_ENV);
+    const { engine, calls } = fakeEngine(kept, { ready: (image) => image === OLD.supervisor, preparationStop: (image) => image !== OLD.supervisor });
+    await runRunnerUpdate(engine, { dir: kept, scheduled: true, now: () => Date.now(), sleep: async () => {}, readyDeadlineMs: 0 });
+    const before = calls.length;
+    const ctx = makeCtx(tempHome());
+    await main(["runner", "update", "--auto", "--dir", kept], ctx, { runner: { engine } });
+    expect(ctx.out.join("\n")).toContain("waiting_preparation_stop");
+    expect(calls.slice(before).filter((c) => c === "stop" || c === "up")).toEqual([]);
   });
 
   it("an owner's image hold releases an existing drain before the automatic retained result", async () => {
@@ -433,7 +445,7 @@ describe("catalyst runner update under another node than its custody's", () => {
   /** An engine any image work would fail on: a re-run never reaches it in this process. */
   const untouched = (): RunnerUpdateEngine => {
     const no = async (): Promise<never> => { throw new Error("this process must not update"); };
-    return { desiredRelease: no, updateDrain: no, attemptContainers: no, prepare: no, custody: no, services: no, stopSupervisor: no, composeUp: no, supervisorReadySinceStart: no, removeImages: no };
+    return { desiredRelease: no, updateDrain: no, attemptContainers: no, prepare: no, custody: no, services: no, stopSupervisor: no, composeUp: no, supervisorReadySinceStart: no, supervisorInPreparationStop: no, removeImages: no };
   };
   const rerunner = () => {
     const calls: { command: string; args: readonly string[]; env: NodeJS.ProcessEnv }[] = [];
