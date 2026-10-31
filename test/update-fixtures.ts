@@ -117,6 +117,7 @@ export function countingEngine(read: DesiredReleaseRead, running: Record<"superv
       return true;
     },
     supervisorReadySinceStart: async () => (count("supervisorReadySinceStart"), true),
+    supervisorInPreparationStop: async () => (count("supervisorInPreparationStop"), false),
     removeImages: async () => (count("removeImages"), []),
   };
 }
