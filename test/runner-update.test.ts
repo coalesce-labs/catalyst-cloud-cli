@@ -366,6 +366,204 @@ describe("runRunnerUpdate", () => {
       expect(readFileSync(join(dir, ".env"), "utf8")).toBe(ORIGINAL_ENV);
     });
 
+    const NEWER = { digits: ["7", "8", "9"] as [string, string, string], generation: 2 };
+    const newerSupervisor = ref("supervisor", "8");
+    const firstSupervisor = TARGET.supervisor;
+    const clocked = () => {
+      const clock = fastClock();
+      let extra = 0;
+      return { now: () => clock.now() + extra, sleep: clock.sleep, pass: (ms: number) => { extra += ms; } };
+    };
+
+    it("keeps its deadline from the first wait, and goes back at 45 minutes while the stop still holds", async () => {
+      const { engine, calls, live } = fakeEngine(dir, stopOnNew);
+      const { pass, now, sleep } = clocked();
+      const run = () => runRunnerUpdate(engine, { dir, now, sleep, readyDeadlineMs: 20_000 });
+      await run();
+      const since = readReleaseState(dir).kept?.sinceMs;
+      expect(since).toBeTypeOf("number");
+      pass(44 * 60_000);
+      const before = calls.length;
+      expect(await run()).toMatchObject({ outcome: "retained", detail: "waiting_preparation_stop" });
+      expect(calls.slice(before).filter((c) => c === "stop" || c === "up")).toEqual([]);
+      expect(readReleaseState(dir).kept?.sinceMs).toBe(since);
+      pass(2 * 60_000);
+      const result = await run();
+      expect(result).toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_ready", exitCode: 1 });
+      expect(live()).toEqual(OLD);
+      expect(readFileSync(join(dir, ".env"), "utf8")).toBe(ORIGINAL_ENV);
+      expect(readReleaseState(dir).kept).toBeNull();
+    });
+
+    it("waits the whole 45 minutes, and not one more", async () => {
+      const { engine } = fakeEngine(dir, stopOnNew);
+      const { pass, now, sleep } = clocked();
+      const run = () => runRunnerUpdate(engine, { dir, now, sleep, readyDeadlineMs: 20_000 });
+      await run();
+      const since = readReleaseState(dir).kept!.sinceMs;
+      pass(since + 45 * 60_000 - 1 - now());
+      expect((await run()).outcome).toBe("retained");
+      pass(1);
+      expect((await run()).outcome).toBe("rolled_back");
+    });
+
+    it("records a kept release that comes up ready on its restart at the deadline", async () => {
+      let restarted = false;
+      const { engine, live } = fakeEngine(dir, {
+        ready: (image) => image === OLD.supervisor || restarted,
+        preparationStop: (image) => image !== OLD.supervisor && !restarted,
+        onStop: () => { restarted = true; },
+      });
+      const { pass, now, sleep } = clocked();
+      const run = () => runRunnerUpdate(engine, { dir, now, sleep, readyDeadlineMs: 20_000 });
+      const first = fakeEngine(dir, stopOnNew);
+      await runRunnerUpdate(first.engine, { dir, now, sleep, readyDeadlineMs: 20_000 });
+      pass(46 * 60_000);
+      expect(await run()).toMatchObject({ outcome: "updated", detail: "reconciled" });
+      expect(live()).toEqual(TARGET);
+      expect(readReleaseState(dir).kept).toBeNull();
+      expect(readReleaseState(dir).previous).toEqual(OLD);
+    });
+
+    it("goes back past a kept release when a newer offer is broken", async () => {
+      let read = release();
+      const { engine, live } = fakeEngine(dir, {
+        read: () => answered(read),
+        ready: (image) => image === OLD.supervisor,
+        preparationStop: (image) => image === firstSupervisor,
+      });
+      const run = () => runRunnerUpdate(engine, { dir, ...fastClock(), readyDeadlineMs: 20_000 });
+      expect((await run()).detail).toBe("waiting_preparation_stop");
+      read = release(NEWER);
+      expect(await run()).toMatchObject({ outcome: "rolled_back", exitCode: 1 });
+      expect(live()).toEqual(OLD);
+      expect(readFileSync(join(dir, ".env"), "utf8")).toBe(ORIGINAL_ENV);
+      expect(readFileSync(join(dir, PREVIOUS_ENV_FILE), "utf8")).toBe(ORIGINAL_ENV);
+      expect(readReleaseState(dir).kept).toBeNull();
+    });
+
+    it("holds the proven release in the rollback file through a newer offer that is kept too, with its own deadline", async () => {
+      let read = release();
+      const { engine, calls } = fakeEngine(dir, { read: () => answered(read), ready: (image) => image === OLD.supervisor, preparationStop: (image) => image !== OLD.supervisor });
+      const { pass, now, sleep } = clocked();
+      const run = () => runRunnerUpdate(engine, { dir, now, sleep, readyDeadlineMs: 20_000 });
+      await run();
+      pass(40 * 60_000);
+      read = release(NEWER);
+      expect((await run()).detail).toBe("waiting_preparation_stop");
+      expect(readFileSync(join(dir, PREVIOUS_ENV_FILE), "utf8")).toBe(ORIGINAL_ENV);
+      expect(readReleaseState(dir).kept?.generation).toBe(2);
+      pass(40 * 60_000);
+      expect((await run()).detail).toBe("waiting_preparation_stop");
+      expect(calls.some((c) => c.startsWith("rm:"))).toBe(false);
+    });
+
+    it("gives a newer offer its own wait even after the kept release's deadline has passed", async () => {
+      let read = release();
+      const { engine } = fakeEngine(dir, { read: () => answered(read), ready: (image) => image === OLD.supervisor, preparationStop: (image) => image !== OLD.supervisor });
+      const { pass, now, sleep } = clocked();
+      const run = () => runRunnerUpdate(engine, { dir, now, sleep, readyDeadlineMs: 20_000 });
+      await run();
+      pass(46 * 60_000);
+      read = release(NEWER);
+      expect(await run()).toMatchObject({ outcome: "retained", detail: "waiting_preparation_stop" });
+      expect(readReleaseState(dir).kept?.generation).toBe(2);
+    });
+
+    it("removes the proven images too when a newer offer comes up ready, and keeps them as previous", async () => {
+      let read = release();
+      const { engine, calls, live } = fakeEngine(dir, {
+        read: () => answered(read),
+        ready: (image) => image === OLD.supervisor || image === newerSupervisor,
+        preparationStop: (image) => image === firstSupervisor,
+      });
+      const run = () => runRunnerUpdate(engine, { dir, ...fastClock(), readyDeadlineMs: 20_000 });
+      await run();
+      read = release(NEWER);
+      expect(await run()).toMatchObject({ outcome: "updated", exitCode: 0 });
+      expect(live().supervisor).toBe(newerSupervisor);
+      const removed = calls.filter((c) => c.startsWith("rm:")).join();
+      expect(removed).toContain(OLD.supervisor);
+      expect(removed).toContain(firstSupervisor);
+      expect(readReleaseState(dir).previous).toEqual(OLD);
+      expect(readReleaseState(dir).kept).toBeNull();
+    });
+
+    it("leaves a proven image the newer release still uses", async () => {
+      let read = release();
+      const { engine, calls } = fakeEngine(dir, {
+        read: () => answered(read),
+        ready: (image) => image === OLD.supervisor || image === newerSupervisor,
+        preparationStop: (image) => image === firstSupervisor,
+      });
+      const run = () => runRunnerUpdate(engine, { dir, ...fastClock(), readyDeadlineMs: 20_000 });
+      await run();
+      read = release({ ...NEWER, digits: ["c", "8", "9"] });
+      expect((await run()).outcome).toBe("updated");
+      const removed = calls.filter((c) => c.startsWith("rm:")).join();
+      expect(removed).toContain(OLD.supervisor);
+      expect(removed).not.toContain(OLD.runner);
+    });
+
+    it("still finishes the cleanup after another outcome overwrote the last result", async () => {
+      let reachable = true;
+      let lifted = false;
+      const { engine, calls } = fakeEngine(dir, {
+        read: () => (reachable ? answered(release()) : { kind: "unreachable", detail: "TimeoutError", hostId: "host_abc" }),
+        ready: (image) => image === OLD.supervisor || lifted,
+        preparationStop: (image) => image !== OLD.supervisor && !lifted,
+      });
+      const run = () => runRunnerUpdate(engine, { dir, ...fastClock(), readyDeadlineMs: 20_000 });
+      await run();
+      reachable = false;
+      await run();
+      expect(readReleaseState(dir).last?.detail).not.toBe("waiting_preparation_stop");
+      reachable = true;
+      lifted = true;
+      expect(await run()).toMatchObject({ outcome: "recorded", detail: "kept_through_preparation_stop" });
+      expect(calls.filter((c) => c.startsWith("rm:")).join()).toContain(OLD.supervisor);
+    });
+
+    it("does not count a stop while the new watchdog is down or on another image", async () => {
+      const down = fakeEngine(dir, { ...stopOnNew, up: { watchdog: (images) => images.supervisor === OLD.supervisor } });
+      expect((await runRunnerUpdate(down.engine, { dir, ...fastClock(), readyDeadlineMs: 20_000 })).outcome).toBe("rolled_back");
+      const other = install(ORIGINAL_ENV);
+      const stale = fakeEngine(other, stopOnNew);
+      const services = stale.engine.services.bind(stale.engine);
+      stale.engine.services = async (d, signal) => {
+        const live = await services(d, signal);
+        return live && live.supervisor?.image === TARGET.supervisor ? { ...live, watchdog: { image: OLD.watchdog, running: true, startedAtMs: 1 } } : live;
+      };
+      expect((await runRunnerUpdate(stale.engine, { dir: other, ...fastClock(), readyDeadlineMs: 20_000 })).outcome).toBe("rolled_back");
+    });
+
+    it("does not count a stop while the new supervisor is down or on another image", async () => {
+      const { engine } = fakeEngine(dir, { ...stopOnNew, up: { supervisor: (images) => images.supervisor === OLD.supervisor } });
+      expect((await runRunnerUpdate(engine, { dir, ...fastClock(), readyDeadlineMs: 20_000 })).outcome).toBe("rolled_back");
+      const other = install(ORIGINAL_ENV);
+      const stale = fakeEngine(other, stopOnNew);
+      const services = stale.engine.services.bind(stale.engine);
+      stale.engine.services = async (d, signal) => {
+        const live = await services(d, signal);
+        return live && live.watchdog?.image === TARGET.watchdog ? { ...live, supervisor: { image: OLD.supervisor, running: true, startedAtMs: 1 } } : live;
+      };
+      expect((await runRunnerUpdate(stale.engine, { dir: other, ...fastClock(), readyDeadlineMs: 20_000 })).outcome).toBe("rolled_back");
+    });
+
+    it("leaves an image the kept release shares with what it replaced", async () => {
+      const onlyWatchdog = install(ORIGINAL_ENV.replace(OLD.supervisor, TARGET.supervisor).replace(OLD.runner, TARGET.runner));
+      let lifted = false;
+      const { engine, calls } = fakeEngine(onlyWatchdog, {
+        ready: () => lifted,
+        preparationStop: (image) => image === TARGET.supervisor && !lifted,
+      });
+      const run = () => runRunnerUpdate(engine, { dir: onlyWatchdog, ...fastClock(), readyDeadlineMs: 20_000 });
+      expect((await run()).detail).toBe("waiting_preparation_stop");
+      lifted = true;
+      expect(await run()).toMatchObject({ outcome: "recorded", detail: "kept_through_preparation_stop" });
+      expect(calls.filter((c) => c.startsWith("rm:"))).toEqual([`rm:${OLD.watchdog}`]);
+    });
+
     it("does not count a stop the running images do not show", async () => {
       const { engine, live } = fakeEngine(dir, { ready: (image) => image === OLD.supervisor, preparationStop: () => true, composeUp: [false] });
       const result = await runRunnerUpdate(engine, { dir, ...fastClock(), readyDeadlineMs: 20_000 });
@@ -376,11 +574,13 @@ describe("runRunnerUpdate", () => {
 
   describe("CTC-8745: what counts as only a preparation stop", () => {
     const stop = { id: "host.preparation-failed", reason: "failed", remedy: "workspace_unavailable" };
-    const notReady = (...failing: unknown[]) => JSON.stringify({ event: "host_not_ready", failing });
+    const notReady = (...failing: unknown[]) => JSON.stringify({ event: "host_not_ready", linePerChange: true, failing });
     const ready = JSON.stringify({ event: "host_ready", freeSlots: 1 });
 
     it.each([
       ["the stop alone", [notReady(stop)], true],
+      ["the stop alone, from a supervisor that writes one line per flip", [JSON.stringify({ event: "host_not_ready", failing: [stop] })], false],
+      ["the stop alone, with the field anything but true", [JSON.stringify({ event: "host_not_ready", linePerChange: "true", failing: [stop] })], false],
       ["the stop alone, after other log lines", ['{"event":"supervisor_started"}', notReady(stop), "plain text", '{"event":"host_capability_retry"}'], true],
       ["the latest line, when an earlier one named more", [notReady(stop, { id: "host.docker-socket-gid", reason: "failed" }), notReady(stop)], true],
       ["the stop and another prerequisite", [notReady(stop, { id: "host.docker-socket-gid", reason: "failed" })], false],
@@ -942,7 +1142,7 @@ describe("the update schedule", () => {
 
 describe("lastProblemLines (CTC-6709)", () => {
   const state = (last: { outcome: UpdateOutcome; detail: string; generation: number | null } | null): ReleaseState =>
-    ({ version: 1, generation: 105, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
+    ({ version: 1, kept: null, generation: 105, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
       deferral: null, drain: null,
       last: last === null ? null : { atMs: Date.UTC(2026, 9, 24, 4, 30), ...last } });
 
@@ -971,7 +1171,7 @@ describe("lastProblemLines (CTC-6709)", () => {
 
 describe("updateReport (CTC-6924)", () => {
   const state = (last: { outcome: UpdateOutcome; detail: string; generation: number | null } | null, generation: number | null = 105): ReleaseState =>
-    ({ version: 1, generation, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
+    ({ version: 1, kept: null, generation, releaseId: null, appliedAtMs: null, previous: null, journal: null, pendingRemoval: [], windowSettledMs: null,
       deferral: null, drain: null,
       last: last === null ? null : { atMs: 1_800_000_000_000, ...last } });
 

@@ -68,6 +68,8 @@ export interface FakeOptions {
   /** Whether a supervisor on this image reports host_ready. Default: always. */
   ready?: (supervisorImage: string) => boolean;
   preparationStop?: (supervisorImage: string) => boolean;
+  /** Whether a container on these images is up. Default: the supervisor unless stopped, the watchdog always. */
+  up?: { supervisor?: (images: Images) => boolean; watchdog?: (images: Images) => boolean };
   /** The authority custody returns for these images, or `{ refused }`. Default: the installed one, unchanged. */
   custody?: (images: Images) => string | { refused: string };
   /** What is running before the update. Default: what `.env` names. */
@@ -100,8 +102,8 @@ export function fakeEngine(dir: string, options: FakeOptions = {}) {
     },
     async services() {
       return {
-        supervisor: { image: live.supervisor, running: !stopped, startedAtMs: 1 },
-        watchdog: { image: live.watchdog, running: true, startedAtMs: 1 },
+        supervisor: { image: live.supervisor, running: !stopped && (options.up?.supervisor?.(live) ?? true), startedAtMs: 1 },
+        watchdog: { image: live.watchdog, running: options.up?.watchdog?.(live) ?? true, startedAtMs: 1 },
       };
     },
     async stopSupervisor() { calls.push("stop"); options.onStop?.(); if (options.stop === false) return false; stopped = true; return true; },
