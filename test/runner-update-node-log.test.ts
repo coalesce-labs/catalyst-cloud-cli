@@ -15,9 +15,9 @@ const CLONE = "      CATALYST_GIT_CLONE_TIMEOUT_MS: ${CATALYST_GIT_CLONE_TIMEOUT
 const COMPOSE = `name: catalyst-host\nservices:\n  supervisor:\n    environment:\n${CLONE}      NEXT: x\n`;
 const update = (dir: string) =>
   runRunnerUpdate(fakeEngine(dir, { read: answered(release({ generation: 106 })), busy: [0, 0] }).engine, { dir });
-const updateWith = (dir: string, options: Parameters<typeof fakeEngine>[1]) =>
+const updateWith = (dir: string, options: Parameters<typeof fakeEngine>[1], scheduled = false) =>
   runRunnerUpdate(fakeEngine(dir, { read: answered(release({ generation: 106 })), busy: [0, 0], ...options }).engine,
-    { dir, ...fastClock(), readyDeadlineMs: 20_000 });
+    { dir, scheduled, ...fastClock(), readyDeadlineMs: 20_000 });
 const notOnNew = (image: string) => image === OLD.supervisor;
 
 describe("CTC-8674: an update adds the log setting to an older install", () => {
@@ -79,7 +79,8 @@ describe("CTC-8674: an update adds the log setting to an older install", () => {
   it("a release kept waiting runs with the line, so the line stays and the run says so", async () => {
     const dir = install();
     writeFileSync(join(dir, "compose.yaml"), COMPOSE);
-    const kept = await updateWith(dir, { ready: notOnNew, preparationStop: (image) => image !== OLD.supervisor });
+    // Only a scheduled run keeps a release waiting; a run no schedule follows goes back.
+    const kept = await updateWith(dir, { ready: notOnNew, preparationStop: (image) => image !== OLD.supervisor }, true);
     expect(kept).toMatchObject({ outcome: "retained", notices: [NODE_LOG_NOTICE] });
     expect(readFileSync(join(dir, "compose.yaml"), "utf8")).toContain(LINE);
   });
