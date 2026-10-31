@@ -67,6 +67,7 @@ export interface FakeOptions {
   composeUp?: boolean[];
   /** Whether a supervisor on this image reports host_ready. Default: always. */
   ready?: (supervisorImage: string) => boolean;
+  preparationStop?: (supervisorImage: string) => boolean;
   /** The authority custody returns for these images, or `{ refused }`. Default: the installed one, unchanged. */
   custody?: (images: Images) => string | { refused: string };
   /** What is running before the update. Default: what `.env` names. */
@@ -112,6 +113,7 @@ export function fakeEngine(dir: string, options: FakeOptions = {}) {
       return true;
     },
     async supervisorReadySinceStart() { return options.ready ? options.ready(live.supervisor) : true; },
+    async supervisorInPreparationStop() { return options.preparationStop?.(live.supervisor) ?? false; },
     async removeImages(images) { calls.push(`rm:${images.join(",")}`); return images.filter((image) => options.inUse?.(image) ?? false); },
   };
   return { engine, calls, reports, live: () => live };

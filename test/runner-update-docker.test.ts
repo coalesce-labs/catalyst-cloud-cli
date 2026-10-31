@@ -197,6 +197,11 @@ describe("services, stop, readiness and cleanup", () => {
     expect(await dockerRunnerUpdateEngine({ exec: answer('{"event":"supervisor_started"}').exec, env: {} }).supervisorReadySinceStart(install())).toBe(false);
     const missing = scripted(() => ({ code: 0, stdout: "\n" }));
     expect(await dockerRunnerUpdateEngine({ exec: missing.exec, env: {} }).supervisorReadySinceStart(install())).toBe(false);
+    // CTC-8745: the same read, for whether only a preparation stop is failing.
+    const stopped = '{"event":"host_not_ready","failing":[{"id":"host.preparation-failed","reason":"failed","remedy":"workspace_unavailable"}]}';
+    expect(await dockerRunnerUpdateEngine({ exec: answer(stopped).exec, env: {} }).supervisorInPreparationStop(install())).toBe(true);
+    expect(await dockerRunnerUpdateEngine({ exec: answer('{"event":"supervisor_started"}').exec, env: {} }).supervisorInPreparationStop(install())).toBe(false);
+    expect(await dockerRunnerUpdateEngine({ exec: missing.exec, env: {} }).supervisorInPreparationStop(install())).toBe(false);
   });
 
   it("removeImages removes each replaced image by its digest reference", async () => {

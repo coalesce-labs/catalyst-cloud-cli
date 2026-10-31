@@ -26,7 +26,7 @@ function engine(status: number, body: unknown = { ok: false, refusal: "release_u
   return {
     desiredRelease: async () => ({ kind: "answered", status, body, hostId: "host_abc" }), updateDrain: unused,
     attemptContainers: unused, prepare: unused, custody: unused, services: unused,
-    stopSupervisor: unused, composeUp: unused, supervisorReadySinceStart: unused, removeImages: unused,
+    stopSupervisor: unused, composeUp: unused, supervisorReadySinceStart: unused, supervisorInPreparationStop: unused, removeImages: unused,
   };
 }
 
@@ -433,7 +433,7 @@ describe("catalyst runner update under another node than its custody's", () => {
   /** An engine any image work would fail on: a re-run never reaches it in this process. */
   const untouched = (): RunnerUpdateEngine => {
     const no = async (): Promise<never> => { throw new Error("this process must not update"); };
-    return { desiredRelease: no, updateDrain: no, attemptContainers: no, prepare: no, custody: no, services: no, stopSupervisor: no, composeUp: no, supervisorReadySinceStart: no, removeImages: no };
+    return { desiredRelease: no, updateDrain: no, attemptContainers: no, prepare: no, custody: no, services: no, stopSupervisor: no, composeUp: no, supervisorReadySinceStart: no, supervisorInPreparationStop: no, removeImages: no };
   };
   const rerunner = () => {
     const calls: { command: string; args: readonly string[]; env: NodeJS.ProcessEnv }[] = [];

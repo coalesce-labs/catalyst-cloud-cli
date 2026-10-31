@@ -56,6 +56,8 @@ const LOCK_FILE = "update.lock";
 const PENDING_REMOVAL_KEPT = 20;
 const READY_DEADLINE_MS = 5 * 60_000;
 const READY_POLL_MS = 5_000;
+/** CTC-8745: the supervisor is up and its one unmet prerequisite is its own preparation stop. */
+const WAITING_PREPARATION_STOP = "waiting_preparation_stop";
 const ATTEMPT_HOST_LABEL = "dev.catalystcloud.attempt.host-id";
 const ATTEMPT_ID_LABEL = "dev.catalystcloud.attempt.id";
 const DESIRED_RELEASE_PATH = "/api/v1/hosts/desired-release";
@@ -348,6 +350,8 @@ export interface RunnerUpdateEngine {
   composeUp(dir: string, signal?: AbortSignal): Promise<boolean>;
   /** True once the supervisor container has logged `host_ready` since it last started. */
   supervisorReadySinceStart(dir: string, signal?: AbortSignal): Promise<boolean>;
+  /** CTC-8745: true when the latest readiness line since it started names only a preparation stop. */
+  supervisorInPreparationStop(dir: string, signal?: AbortSignal): Promise<boolean>;
   /** Remove these local images. Returns the ones still present: the engine refuses an image a
    *  container still uses, such as a runner image under phases an in-place update left running. */
   removeImages(images: string[], signal?: AbortSignal): Promise<string[]>;
@@ -539,6 +543,33 @@ async function running(engine: RunnerUpdateEngine, dir: string, images: Images, 
   if (!live?.supervisor?.running || live.supervisor.image !== images.supervisor) return false;
   if (!live.watchdog?.running || live.watchdog.image !== images.watchdog) return false;
   return engine.supervisorReadySinceStart(dir, signal);
+}
+
+/** CTC-8745: these images are running and only a preparation stop keeps them from being ready. A
+ *  stop survives a restart and lifts by itself, so going back would not help. */
+async function inPreparationStop(engine: RunnerUpdateEngine, dir: string, images: Images, signal?: AbortSignal): Promise<boolean> {
+  const live = await engine.services(dir, signal);
+  if (!live?.supervisor?.running || live.supervisor.image !== images.supervisor) return false;
+  if (!live.watchdog?.running || live.watchdog.image !== images.watchdog) return false;
+  return engine.supervisorInPreparationStop(dir, signal);
+}
+
+/** CTC-8745: whether the latest readiness line in this log names a preparation stop and nothing
+ *  else. The supervisor writes a line whenever what is failing changes. */
+export function preparationStopOnly(logs: string): boolean {
+  let latest: Record<string, unknown> | null = null;
+  for (const line of logs.split("\n")) {
+    if (!line.includes('"event":"host_')) continue;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (isRecord(parsed) && (parsed.event === "host_ready" || parsed.event === "host_not_ready")) latest = parsed;
+    } catch {
+      // Not a log line this reads.
+    }
+  }
+  if (latest?.event !== "host_not_ready" || !Array.isArray(latest.failing) || latest.failing.length !== 1) return false;
+  const [only] = latest.failing as unknown[];
+  return isRecord(only) && only.id === "host.preparation-failed" && only.reason === "failed";
 }
 
 const REPORT_DETAIL = /[^a-z0-9_:,.-]/g;
@@ -751,8 +782,16 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     return done("planned", changed.length > 0 ? `would_update:${changed.join(",")}` : "already_configured", { ...tagged, generation: release.generation });
   // `.env` naming the release proves nothing on its own: an earlier run may have stopped after writing
   // it. Only the running containers, ready, prove the release is applied.
-  if (changed.length === 0 && (await running(engine, dir, target, signal)))
-    return record("recorded", "already_running_release", state.previous);
+  if (changed.length === 0 && (await running(engine, dir, target, signal))) {
+    if (state.last?.detail !== WAITING_PREPARATION_STOP) return record("recorded", "already_running_release", state.previous);
+    // CTC-8745: the stop lifted and the kept release came up ready, so what it replaced can go now.
+    const kept = existsSync(join(dir, PREVIOUS_ENV_FILE)) ? imagesOf(parseEnvText(readFileSync(join(dir, PREVIOUS_ENV_FILE), "utf8"))) : null;
+    const replaced = RELEASE_COMPONENTS.filter((c) => kept !== null && kept[c] !== "" && kept[c] !== target[c]).map((c) => kept![c]);
+    return record("recorded", "kept_through_preparation_stop", kept ?? state.previous, replaced.length > 0 ? await engine.removeImages(replaced, signal) : []);
+  }
+  // CTC-8745: a kept release is still waiting on its stop. Starting it again would change nothing.
+  if (changed.length === 0 && (await inPreparationStop(engine, dir, target, signal)))
+    return done("retained", WAITING_PREPARATION_STOP, tagged);
 
   // What a failure goes back to: today's file, or for a half-applied file the one saved before it.
   let rollbackText: string | null = envText;
@@ -832,6 +871,9 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     return record("updated", inPlace ? `${applied}:in_place` : applied, changed.length > 0 ? current : state.previous, unremoved);
   }
 
+  // CTC-8745: not recorded as applied, and the previous images stay, until it comes up ready.
+  if (await inPreparationStop(engine, dir, target, signal))
+    return done("retained", WAITING_PREPARATION_STOP, tagged);
   if (rollbackText === null || rollbackImages === null)
     return done("failed", "new_supervisor_not_ready_no_previous", { ...tagged, exitCode: 1 });
   writePrivateAtomic(envPath, rollbackText);
@@ -989,6 +1031,17 @@ export function dockerRunnerUpdateEngine(
       return { code: 1, stdout: "" };
     }
   };
+  /** The supervisor container's log since it last started, or null when that cannot be read. */
+  const logsSinceStart = async (dir: string, signal?: AbortSignal): Promise<string | null> => {
+    const compose = runnerComposeArgs(dir);
+    if (!compose) return null;
+    const id = (await docker([...compose, "ps", "--quiet", "supervisor"], { cwd: dir, signal })).stdout.trim();
+    if (!/^[0-9a-f]{12,64}$/.test(id)) return null;
+    const started = (await docker(["inspect", "--format", "{{.State.StartedAt}}", id], { signal })).stdout.trim();
+    if (!Number.isFinite(Date.parse(started))) return null;
+    const logs = await docker(["logs", "--since", started, id], { signal, timeoutMs: 30_000 });
+    return `${logs.stdout}\n${logs.stderr ?? ""}`;
+  };
   return {
     async desiredRelease(dir, signal, report) {
       const compose = runnerComposeArgs(dir);
@@ -1068,14 +1121,12 @@ export function dockerRunnerUpdateEngine(
       return kept;
     },
     async supervisorReadySinceStart(dir, signal) {
-      const compose = runnerComposeArgs(dir);
-      if (!compose) return false;
-      const id = (await docker([...compose, "ps", "--quiet", "supervisor"], { cwd: dir, signal })).stdout.trim();
-      if (!/^[0-9a-f]{12,64}$/.test(id)) return false;
-      const started = (await docker(["inspect", "--format", "{{.State.StartedAt}}", id], { signal })).stdout.trim();
-      if (!Number.isFinite(Date.parse(started))) return false;
-      const logs = await docker(["logs", "--since", started, id], { signal, timeoutMs: 30_000 });
-      return `${logs.stdout}\n${logs.stderr ?? ""}`.includes('"event":"host_ready"');
+      const logs = await logsSinceStart(dir, signal);
+      return logs !== null && logs.includes('"event":"host_ready"');
+    },
+    async supervisorInPreparationStop(dir, signal) {
+      const logs = await logsSinceStart(dir, signal);
+      return logs !== null && preparationStopOnly(logs);
     },
   };
 }
@@ -1126,7 +1177,9 @@ export const CUSTODY_UNATTESTED_LINE = "Private thoughts storage on this Mac is 
 
 export function updateResultLines(result: UpdateResult): string[] {
   return [
-    OUTCOME_TEXT[result.outcome],
+    result.detail === WAITING_PREPARATION_STOP
+      ? "The new release is running. This machine stopped asking for phases after their preparation kept failing, so the update finishes once it asks again."
+      : OUTCOME_TEXT[result.outcome],
     `Release: ${result.releaseId ?? "none"}, generation ${result.generation ?? "none"} (${result.detail}).`,
     ...(custodyUnattested(result) ? [CUSTODY_UNATTESTED_LINE] : []),
   ];
