@@ -381,6 +381,9 @@ export interface RunnerUpdateOptions {
   held?: () => string | null;
   /** A waiting pass, for the schedule's log. */
   onPass?: (result: UpdateResult) => void;
+  /** CTC-8745: the schedule's run, so another follows. Only such a run keeps a release through a
+   *  preparation stop, because the wait ends on a later run. */
+  scheduled?: boolean;
 }
 
 /** Outcomes that settle a window: nothing was pending, or the machine restarted onto (or tried) a
@@ -800,8 +803,9 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     return record("recorded", "kept_through_preparation_stop", kept ?? state.previous, replaced.length > 0 ? await engine.removeImages(replaced, signal) : []);
   }
   // CTC-8745: a kept release has until its deadline, counted from its first wait. Past that it gets
-  // one restart and the normal deadline, and then goes back, whatever the stop says.
-  const waitOver = state.kept?.generation === release.generation && now() - state.kept.sinceMs >= PREPARATION_STOP_WAIT_MS;
+  // one restart and the normal deadline, and then goes back, whatever the stop says. A run no schedule
+  // follows has nothing to end a wait, so it goes back at the normal deadline.
+  const waitOver = options.scheduled !== true || (state.kept?.generation === release.generation && now() - state.kept.sinceMs >= PREPARATION_STOP_WAIT_MS);
   const keepWaiting = () => {
     if (state.kept?.generation !== release.generation)
       writeReleaseState(dir, { ...state, kept: { generation: release.generation, sinceMs: now() } });
@@ -897,7 +901,10 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     return done("failed", "new_supervisor_not_ready_no_previous", { ...tagged, exitCode: 1 });
   writePrivateAtomic(envPath, rollbackText);
   const custodyRefused = await restoreCustody(rollbackImages);
-  const restored = (await engine.composeUp(dir, signal)) && (await waitReady(engine, dir, rollbackImages, options, now));
+  // CTC-8745: a stop the release did not cause holds the release it went back to as well. That is a
+  // rollback that worked, not a failed one.
+  const restored = (await engine.composeUp(dir, signal))
+    && ((await waitReady(engine, dir, rollbackImages, options, now)) || (await inPreparationStop(engine, dir, rollbackImages, signal)));
   writeReleaseState(dir, { ...state, kept: null });
   return done(restored && custodyRefused === null ? "rolled_back" : "failed",
     !restored ? "rollback_not_ready" : custodyRefused === null ? "new_supervisor_not_ready" : `custody_restore_failed:${custodyRefused}`,
