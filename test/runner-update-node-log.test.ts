@@ -1,4 +1,4 @@
-import { chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -91,5 +91,14 @@ describe("CTC-8674: an update adds the log setting to an older install", () => {
     expect((await update(dir)).outcome).toBe("updated");
     expect(statSync(join(dir, "compose.yaml")).mode & 0o777).toBe(0o644);
     expect(readFileSync(join(dir, "compose.yaml"), "utf8")).toContain(LINE);
+  });
+
+  it("a compose.yaml it cannot read never fails the update, and the update says nothing about logs", async () => {
+    const dir = install();
+    rmSync(join(dir, "compose.yaml"));
+    mkdirSync(join(dir, "compose.yaml"));
+    const result = await update(dir);
+    expect(result.outcome).toBe("updated");
+    expect(result.notices).toBeUndefined();
   });
 });
