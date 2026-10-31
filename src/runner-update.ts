@@ -737,6 +737,10 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   const offered = read.kind === "answered" && read.status === 200 && isRecord(read.body) && read.body.ok === true
     ? parseDesiredRelease(read.body.release) : null;
   if (decision.action === "retain") {
+    // CTC-8745: a kept release ends on local files alone, so a read that offers no release (a hold,
+    // an outage, an older generation) cannot keep it on past its wait.
+    if (!options.check && state.kept !== null && (options.scheduled !== true || now() - state.kept.sinceMs >= PREPARATION_STOP_WAIT_MS))
+      return returnFromKept(engine, options, state, hostId, now);
     if (!options.check && state.drain?.acknowledgedAtMs != null && decision.reason !== "not_newer")
       return drainingResult(dir, state, now(), null, undefined, `read:${decision.reason}`);
     return decision.reason === "not_newer"
@@ -909,6 +913,45 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   return done(restored && custodyRefused === null ? "rolled_back" : "failed",
     !restored ? "rollback_not_ready" : custodyRefused === null ? "new_supervisor_not_ready" : `custody_restore_failed:${custodyRefused}`,
     { ...tagged, exitCode: 1 });
+}
+
+/** CTC-8745: puts back the proven release a kept one replaced, with no release read. The phase
+ *  boundary and the outcome are the update's own: stop the supervisor, go back only if no phase is
+ *  running, and report it as the rollback it is. */
+async function returnFromKept(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, state: ReleaseState, hostId: string, now: () => number): Promise<UpdateResult> {
+  const { dir, signal } = options;
+  const envPath = join(dir, ".env");
+  const result = (outcome: UpdateOutcome, detail: string, exitCode: number): UpdateResult => ({ outcome, detail, generation: state.generation, exitCode });
+  let rollbackText: string;
+  try {
+    rollbackText = readFileSync(join(dir, PREVIOUS_ENV_FILE), "utf8");
+  } catch {
+    return result("failed", "new_supervisor_not_ready_no_previous", 1);
+  }
+  const rollbackImages = imagesOf(parseEnvText(rollbackText));
+  const env = readEnvFile(envPath) ?? {};
+  const restoreCustody = async (): Promise<string | null> => {
+    if (persistedCustody(dir, env) !== "installed") return null;
+    const attested = await engine.custody(dir, rollbackImages, signal);
+    if ("refused" in attested) return attested.refused;
+    return attested.authority === env.CATALYST_THOUGHTS_CUSTODY_AUTHORITY ? null : "authority_changed";
+  };
+  if (!(await engine.stopSupervisor(dir, signal))) {
+    await engine.composeUp(dir, signal);
+    return result("retained", "supervisor_stop_failed", 0);
+  }
+  const busy = await engine.attemptContainers(dir, hostId, signal);
+  if (busy !== 0) {
+    await engine.composeUp(dir, signal);
+    return result("retained", busy === null ? "docker_unavailable" : "phases_running", 0);
+  }
+  writePrivateAtomic(envPath, rollbackText);
+  const custodyRefused = await restoreCustody();
+  const restored = (await engine.composeUp(dir, signal))
+    && ((await waitReady(engine, dir, rollbackImages, options, now)) || (await inPreparationStop(engine, dir, rollbackImages, signal)));
+  writeReleaseState(dir, { ...state, kept: null });
+  return result(restored && custodyRefused === null ? "rolled_back" : "failed",
+    !restored ? "rollback_not_ready" : custodyRefused === null ? "new_supervisor_not_ready" : `custody_restore_failed:${custodyRefused}`, 1);
 }
 
 async function waitReady(

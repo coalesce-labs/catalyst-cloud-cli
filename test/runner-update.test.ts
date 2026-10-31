@@ -395,6 +395,74 @@ describe("runRunnerUpdate", () => {
       expect(readReleaseState(dir).kept).toBeNull();
     });
 
+    it.each([
+      ["a hold", () => answered({ ok: false, error: "release_unavailable" }, 503), "release_unavailable"],
+      ["an outage", () => ({ kind: "unreachable" as const, detail: "fetch failed", hostId: "h" }), "read_unreachable"],
+    ])("goes back on local files past its wait when the read offers no release, under %s", async (_, noRelease, reason) => {
+      let offer = true;
+      const { engine, live } = fakeEngine(dir, { ...stopOnNew, read: () => (offer ? answered(release()) : noRelease()) });
+      const { pass, now, sleep } = clocked();
+      const run = () => runRunnerUpdate(engine, { scheduled: true, dir, now, sleep, readyDeadlineMs: 20_000 });
+      expect((await run()).detail).toBe("waiting_preparation_stop");
+      offer = false;
+      pass(44 * 60_000);
+      expect(await run()).toMatchObject({ outcome: "retained", detail: reason });
+      expect(live()).not.toEqual(OLD);
+      pass(2 * 60_000);
+      expect(await run()).toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_ready", exitCode: 1 });
+      expect(live()).toEqual(OLD);
+      expect(readFileSync(join(dir, ".env"), "utf8")).toBe(ORIGINAL_ENV);
+      expect(readReleaseState(dir).kept).toBeNull();
+      expect(await run()).toMatchObject({ outcome: "retained", detail: reason });
+    });
+
+    it("goes back to the applied release past its wait when only an older generation is offered", async () => {
+      const kept = ref("supervisor", "8");
+      let offer = release({ generation: 2, digits: ["4", "5", "6"] });
+      const { engine, live } = fakeEngine(dir, {
+        ready: (image) => image !== kept,
+        preparationStop: (image) => image === kept,
+        read: () => answered(offer),
+      });
+      const { pass, now, sleep } = clocked();
+      const run = () => runRunnerUpdate(engine, { scheduled: true, dir, now, sleep, readyDeadlineMs: 20_000 });
+      expect(await run()).toMatchObject({ outcome: "updated", generation: 2 });
+      const applied = live();
+      offer = release({ generation: 3, digits: ["7", "8", "9"] });
+      expect((await run()).detail).toBe("waiting_preparation_stop");
+      offer = release({ generation: 1 });
+      pass(46 * 60_000);
+      expect(await run()).toMatchObject({ outcome: "rolled_back", exitCode: 1 });
+      expect(live()).toEqual(applied);
+      expect(await run()).toMatchObject({ outcome: "current", detail: "not_newer" });
+    });
+
+    it("ends a kept release on an owner's own run while a hold offers no release", async () => {
+      let offer = true;
+      const { engine, live } = fakeEngine(dir, { ...stopOnNew, read: () => (offer ? answered(release()) : answered({ ok: false }, 503)) });
+      expect((await runRunnerUpdate(engine, { scheduled: true, dir, ...fastClock(), readyDeadlineMs: 20_000 })).detail).toBe("waiting_preparation_stop");
+      offer = false;
+      expect(await runRunnerUpdate(engine, { dir, ...fastClock(), readyDeadlineMs: 20_000 })).toMatchObject({ outcome: "rolled_back", exitCode: 1 });
+      expect(live()).toEqual(OLD);
+    });
+
+    it("does not go back past its wait while a phase is running, and goes back once none is", async () => {
+      let offer = true;
+      let phases = 0;
+      const { engine, live } = fakeEngine(dir, { ...stopOnNew, phases: () => phases, read: () => (offer ? answered(release()) : answered({ ok: false }, 503)) });
+      const { pass, now, sleep } = clocked();
+      const run = () => runRunnerUpdate(engine, { scheduled: true, dir, now, sleep, readyDeadlineMs: 20_000 });
+      await run();
+      offer = false;
+      phases = 1;
+      pass(46 * 60_000);
+      expect(await run()).toMatchObject({ outcome: "retained", detail: "phases_running", exitCode: 0 });
+      expect(live()).not.toEqual(OLD);
+      phases = 0;
+      expect(await run()).toMatchObject({ outcome: "rolled_back" });
+      expect(live()).toEqual(OLD);
+    });
+
     it("waits the whole 45 minutes, and not one more", async () => {
       const { engine } = fakeEngine(dir, stopOnNew);
       const { pass, now, sleep } = clocked();
@@ -570,6 +638,19 @@ describe("runRunnerUpdate", () => {
       const result = await runRunnerUpdate(engine, { dir, ...fastClock(), readyDeadlineMs: 20_000 });
       expect(result).toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_ready", exitCode: 1 });
       expect(live()).toEqual(OLD);
+    });
+
+    it("reads a return from a kept release that a stop also holds as a rollback, not a failure", async () => {
+      let offer = true;
+      const { engine, live } = fakeEngine(dir, { ready: () => false, preparationStop: () => true, read: () => (offer ? answered(release()) : answered({ ok: false }, 503)) });
+      const { pass, now, sleep } = clocked();
+      const run = () => runRunnerUpdate(engine, { scheduled: true, dir, now, sleep, readyDeadlineMs: 20_000 });
+      expect((await run()).detail).toBe("waiting_preparation_stop");
+      offer = false;
+      pass(46 * 60_000);
+      expect(await run()).toMatchObject({ outcome: "rolled_back", detail: "new_supervisor_not_ready", exitCode: 1 });
+      expect(live()).toEqual(OLD);
+      expect(readReleaseState(dir).kept).toBeNull();
     });
 
     it("leaves an image the kept release shares with what it replaced", async () => {
