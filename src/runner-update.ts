@@ -290,7 +290,7 @@ const NODE_LOG_SETTING = /^\s*CATALYST_NODE_LOG_SHIPPING\s*:/m;
 const NODE_LOG_LINE = "      CATALYST_NODE_LOG_SHIPPING: ${CATALYST_NODE_LOG_SHIPPING-on}\n";
 const NODE_LOG_LINE_FOLLOWS = /^ {6}CATALYST_GIT_CLONE_TIMEOUT_MS: \$\{CATALYST_GIT_CLONE_TIMEOUT_MS:-\}\n/m;
 export const NODE_LOG_NOTICE =
-  "This machine now sends the logs of the containers Catalyst started on it, with secrets removed first, and its CPU, memory and free disk numbers to Catalyst. To stop it, set CATALYST_NODE_LOG_SHIPPING=off in this runner's .env and run docker compose up -d.";
+  "Catalyst's own service containers on this machine now send their logs to Catalyst, with secrets removed first. To stop it, set CATALYST_NODE_LOG_SHIPPING=off in this runner's .env and run docker compose up -d.";
 
 /** CTC-8674: an update replaces image references and nothing else, so a machine set up earlier has no
  *  log setting in its Compose file and ships nothing. This adds the one line, exactly as setup writes
