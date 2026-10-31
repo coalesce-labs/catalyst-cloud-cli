@@ -8,6 +8,8 @@ bun run typecheck
 bun run test
 ```
 
+Pull request CI runs `bun run test:coverage`, the same command the publish workflow runs, so a change that takes coverage under the thresholds in `vitest.config.ts` fails its pull request. Run it locally to see the numbers before you push.
+
 Installing from a git ref (`npm install -g github:coalesce-labs/catalyst-cloud-skills#<branch>`) does **not** give you the CLI, and no document offers it as a way in. npm runs `prepare` in the clone with no `node_modules` at all, so there is no compiler to build `dist/` with; the install now fails loudly and leaves nothing on PATH, which is the whole fix — before 0.2.1 it exited 0 and wrote a `catalyst-skills` shim pointing at a file that was never packed. To try an unreleased branch, clone it and `npm install && npm link`. `test/git-install-rail.test.ts` holds this: if npm ever starts giving `prepare` a toolchain, the rail has to work all the way to a runnable shim before the README may advertise it.
 
 The skills under `skills/` are the source of truth for the published package. The `files` field in `package.json` ships them verbatim, and the customer's own agent installs them: the Claude Code plugin reads them from `.claude-plugin/plugin.json`, and `npx skills add` copies them. The CLI's `install` verb copies the same directories as a repair path. Edit them here and nowhere else.
