@@ -162,3 +162,27 @@ jobs:
           echo "::error::$name@$version is still not deprecated"; exit 1
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+
+  # CTC-9044 — every CLI release gets a GitHub Release, as the SDK's and catalyst-cloud's do, with
+  # that version's CHANGELOG.md section as its notes. It is its own job so that only a checkout and the script can write to the repository,
+  # never the steps above that install and run third-party code. A tag
+  # that already has a Release is left alone, so re-running a release finishes it.
+  github-release:
+    needs: publish
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+
+      - name: GitHub Release for this tag
+        run: node scripts/github-release.mjs "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}
