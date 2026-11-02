@@ -50,6 +50,16 @@ describe("CTC-8674: an update adds the log setting to an older install", () => {
     expect(added!.slice(0, added!.indexOf("\n  supervisor:\n"))).not.toContain("CATALYST_NODE_LOG_SHIPPING");
   });
 
+  it("CTC-9243: a mirror URL an owner added outside the supervisor's environment does not take the line", () => {
+    const edited = BEFORE_CLONE_TIMEOUT.replace("\nservices:\n", "\nx-mirror:\n  CATALYST_MIRROR_URL: https://example.invalid\nservices:\n");
+    expect(edited).not.toBe(BEFORE_CLONE_TIMEOUT);
+    const added = withNodeLogSetting(edited);
+    expect(added).not.toBeNull();
+    expect(added!.split(LINE)).toHaveLength(2);
+    expect(supervisorBlock(added!)).toContain(LINE);
+    expect(added!.slice(0, added!.indexOf("\n  supervisor:\n"))).not.toContain("CATALYST_NODE_LOG_SHIPPING");
+  });
+
   it("CTC-9243: a file from before the log setting still gets it after the clone timeout", () => {
     expect(withNodeLogSetting(BEFORE_LOG_SETTING)).toBe(
       BEFORE_LOG_SETTING.replace(CLONE, `${CLONE}${LINE}`),
