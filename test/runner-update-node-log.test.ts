@@ -13,6 +13,12 @@ import {
 } from "../src/runner-update.js";
 import { answered, fakeEngine, fastClock, install, OLD, ORIGINAL_ENV, release } from "./runner-update-fixtures.js";
 
+// CTC-9243: two Compose files machines were set up with, byte for byte from the source repository.
+const fixture = (name: string) => readFileSync(join(__dirname, "fixtures", "self-host", name), "utf8");
+const BEFORE_CLONE_TIMEOUT = fixture("compose-before-clone-timeout.yaml");
+const BEFORE_LOG_SETTING = fixture("compose-before-log-setting.yaml");
+const supervisorBlock = (compose: string) => compose.slice(compose.indexOf("\n  supervisor:\n"));
+
 const LINE = "      CATALYST_NODE_LOG_SHIPPING: ${CATALYST_NODE_LOG_SHIPPING-on}\n";
 const CLONE = "      CATALYST_GIT_CLONE_TIMEOUT_MS: ${CATALYST_GIT_CLONE_TIMEOUT_MS:-}\n";
 const COMPOSE = `name: catalyst-host\nservices:\n  supervisor:\n    environment:\n${CLONE}      NEXT: x\n`;
@@ -31,6 +37,47 @@ describe("CTC-8674: an update adds the log setting to an older install", () => {
   it("leaves a file that already names the setting alone, whatever its value", () => {
     const owners = COMPOSE.replace(CLONE, `${CLONE}      CATALYST_NODE_LOG_SHIPPING: off\n`);
     expect(withNodeLogSetting(owners)).toBeNull();
+  });
+
+  it("CTC-9243: adds it to a file from before the clone timeout, after the mirror URL, in the supervisor's block only", () => {
+    expect(BEFORE_CLONE_TIMEOUT).not.toContain("CATALYST_GIT_CLONE_TIMEOUT_MS");
+    const added = withNodeLogSetting(BEFORE_CLONE_TIMEOUT);
+    expect(added).not.toBeNull();
+    expect(added!.split(LINE)).toHaveLength(2);
+    const mirror = /^ {6}CATALYST_MIRROR_URL: [^\n]*\n/m.exec(BEFORE_CLONE_TIMEOUT)![0];
+    expect(added).toBe(BEFORE_CLONE_TIMEOUT.replace(mirror, `${mirror}${LINE}`));
+    expect(supervisorBlock(added!)).toContain(LINE);
+    expect(added!.slice(0, added!.indexOf("\n  supervisor:\n"))).not.toContain("CATALYST_NODE_LOG_SHIPPING");
+  });
+
+  it("CTC-9243: a file from before the log setting still gets it after the clone timeout", () => {
+    expect(withNodeLogSetting(BEFORE_LOG_SETTING)).toBe(
+      BEFORE_LOG_SETTING.replace(CLONE, `${CLONE}${LINE}`),
+    );
+  });
+
+  it.each([
+    ["before the clone timeout", BEFORE_CLONE_TIMEOUT],
+    ["before the log setting", BEFORE_LOG_SETTING],
+  ])("CTC-9243: an update of a file from %s brings the line up with the release and keeps an owner's off", async (_, compose) => {
+    for (const owner of [undefined, "off"]) {
+      const dir = install(owner === undefined ? ORIGINAL_ENV : `${ORIGINAL_ENV}CATALYST_NODE_LOG_SHIPPING=${owner}\n`);
+      writeFileSync(join(dir, "compose.yaml"), compose);
+      const seen: string[] = [];
+      const f = fakeEngine(dir, { read: answered(release({ generation: 106 })), busy: [0, 0] });
+      const up = f.engine.composeUp.bind(f.engine);
+      f.engine.composeUp = async (d, signal) => {
+        seen.push(readFileSync(join(d, "compose.yaml"), "utf8"));
+        return up(d, signal);
+      };
+      expect((await runRunnerUpdate(f.engine, { dir })).outcome).toBe("updated");
+      // The first up that starts the new release already passes the setting.
+      expect(seen.length).toBeGreaterThan(0);
+      for (const text of seen) expect(supervisorBlock(text)).toContain(LINE);
+      const env = readFileSync(join(dir, ".env"), "utf8");
+      if (owner === undefined) expect(env).not.toContain("CATALYST_NODE_LOG_SHIPPING");
+      else expect(env).toContain("\nCATALYST_NODE_LOG_SHIPPING=off\n");
+    }
   });
 
   it("leaves a file it does not recognise alone, so that machine ships nothing", () => {
