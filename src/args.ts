@@ -27,6 +27,8 @@ export interface FlagSpec {
   repeat?: boolean;
   /** Boolean unless a following value is supplied (runner opt-in). */
   optionalValue?: boolean;
+  /** The value's name in help (`--link <https-url>`); default `value`. */
+  placeholder?: string;
   help: string;
 }
 
@@ -578,6 +580,15 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     pr: { value: true, help: "renew: the number of a pull request you opened" },
     note: { value: true, help: "renew: a few words about the progress (not part of what counts as new)" },
     generation: { value: true, help: "renew, release: the generation the take printed (default: the one this machine stored)" },
+    "holder-kind": { value: true, placeholder: "kind", help: "take: declare the agent kind (default: unspecified; CATALYST_LEASE_HOLDER_KIND), one of catalyst-seat, claude-code, codex, factory, devin, cursor or other" },
+    name: { value: true, placeholder: "name", help: "take, renew: a display name, 1 to 80 characters; never a credential" },
+    "external-id": { value: true, placeholder: "id", help: "take, renew: the session's id (CATALYST_LEASE_EXTERNAL_ID); never a credential" },
+    link: { value: true, placeholder: "https-url", help: "take, renew: a session link on a host the holder kind allows (CATALYST_LEASE_LINK)" },
+    contact: { value: true, placeholder: "https-url", help: "take, renew: a contact link on linear.app, github.com or app.slack.com; never an email" },
+    team: { value: true, placeholder: "key", help: "list: the team's key, such as CTC (required)" },
+    state: { value: true, placeholder: "live|recent", help: "list: live (default) or recent, which adds leases that lapsed or were released in the last 24 hours" },
+    limit: { value: true, placeholder: "1..200", help: "list: how many leases one page shows, 1 to 200 (default 50)" },
+    cursor: { value: true, placeholder: "token", help: "list: the next page's token, as the previous page's `more:` line printed it" },
   },
   work: {
     team: { value: true, help: "available: one team's key (default: every team in the workspace contract)" },
@@ -701,7 +712,7 @@ export const VERB_USAGE: Record<string, string> = {
   project:
     "project <list [--json] | wip-limit <get|set <n>|set default> [--team K] [--json]>",
   lease:
-    "lease <take <ticket> --agent <seat> [--ttl <minutes>] | renew <ticket> (--commit <sha>|--artifact <path or id>|--finding <id>|--pr <number>) [--note <text>] [--agent <seat>] [--generation <n>] | release <ticket> [--agent <seat>] [--generation <n>] | show <ticket>> [--json]   (a seat's ticket lease: take, renew with new progress, release, read; needs login)",
+    "lease <take <ticket> --agent <seat> [--ttl <minutes>] [--holder-kind <kind>] [--name <name>] [--external-id <id>] [--link <https-url>] [--contact <https-url>] | renew <ticket> (--commit <sha>|--artifact <path or id>|--finding <id>|--pr <number>) [--note <text>] [--agent <seat>] [--generation <n>] [--ttl <minutes>] [--name <name>] [--external-id <id>] [--link <https-url>] [--contact <https-url>] | release <ticket> [--agent <seat>] [--generation <n>] | show <ticket> | list --team <key> [--state live|recent] [--limit <1..200>] [--cursor <token>]> [--json]   (a seat's ticket lease: take, renew with new progress, release, read, list a team's; needs login)",
   "codex-env":
     "codex-env --print [--codex-home <dir>] | --apply | --refresh [--json]   (the telemetry attributes naming the AI account and computer a Codex launch runs as; only --refresh waits on the network)",
   work: "work available [--team K] [--json]   (per team: tickets nobody holds, with the last holder and progress, and open pull requests no live lease covers, drafts included)",
@@ -848,9 +859,9 @@ export function verbHelp(verb: string): string {
   const names = Object.keys(table);
   if (names.length > 0) {
     lines.push("Options:");
-    for (const name of names)
+    for (const [name, spec] of Object.entries(table))
       lines.push(
-        `  --${name}${table[name]!.value ? " <value>" : ""}  ${table[name]!.help}`,
+        `  --${name}${spec.value ? ` <${spec.placeholder ?? "value"}>` : ""}  ${spec.help}`,
       );
     lines.push("");
   }
