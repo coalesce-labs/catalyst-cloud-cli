@@ -411,6 +411,8 @@ async function runLease(args: ParsedArgs, ctx: Ctx): Promise<number> {
     const held = heldLease(args, ctx, ticket);
     const ttl = parseTtlMs(args);
     const declared = resolveHolderDetails(args, ctx.env, "renew");
+    // A link the stored kind refuses is refused here, before any request, the contract read included.
+    if (declared?.link && held.kind !== null) checkSessionHost(declared.link.label, held.kind, declared.link.host);
     if (declared !== null) await requireHolderContract(ctx, cfg);
     const details: HolderDetailsInput | null = declared?.details ?? null;
     if (declared?.link) await checkRenewLink(client, ticket, held, declared.link);

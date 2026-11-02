@@ -553,6 +553,15 @@ describe("lease renew with holder details (CTC-8873)", () => {
     });
   });
 
+  test("a link the stored kind refuses makes no request, not even a contract read", async () => {
+    mkdirSync(join(configDirFor(home), "leases"), { recursive: true });
+    writeFileSync(join(configDirFor(home), "leases", "CTC-6480--factory-droid.json"), JSON.stringify({ ticket: "CTC-6480", agent: "factory-droid", generation: 3, holder: null, kind: "factory" }));
+    respond = (r) => r.path === CONTRACT_ROUTE ? json(contractDoc("2.65.0")) : json({ outcome: "renewed", lease: factoryLease() });
+    expect(await main(["lease", "renew", "CTC-6480", "--pr", "1", "--link", "https://claude.ai/code/s_1"], ctx)).toBe(1);
+    expect(ctx.err.at(-1)).toBe("--link: kind factory allows no session link yet (allowed hosts: none)");
+    expect(requests).toEqual([]);
+  });
+
   test("with no stored kind, the lease is read once for it; a mismatched or absent kind refuses before the renew", async () => {
     seedContract("2.65.0");
     const args = ["lease", "renew", "CTC-6480", "--pr", "1", "--agent", "factory-droid", "--generation", "3"];
