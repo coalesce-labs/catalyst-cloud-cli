@@ -42,7 +42,7 @@ const TOKENS: [string, string][] = [
   ["-----BEGIN RSA PRIVATE KEY-----", "private key"],
   ["GITHUB_TOKEN=abcd1234", "secret assignment"],
 ];
-const CLEAN = ["s_8f2c", "task-review-2", "sk-integration-test-runner", "ghp_short", "Factory Droid (CTC-6480 trial)", "https://claude.ai/code/session_01", "AKIAshort", "TOKEN=ab"];
+const CLEAN = ["s_8f2c", "task-example", "sk-integration-test-runner", "ghp_short", "Example Agent (trial)", "https://example.com/session_01", "AKIAshort", "TOKEN=ab"];
 
 const resolve = (argv: string[], env: NodeJS.ProcessEnv = {}, action: "take" | "renew" = "take") =>
   resolveHolderDetails(parseArgs(["lease", action, "CTC-1", ...argv]), env, action);
@@ -153,7 +153,7 @@ describe("resolving holder details", () => {
     expect(normalizeDisplayName("é".repeat(80))).toBe("é".repeat(80));
     expect(normalizeDisplayName("é".repeat(81))).toBeNull();
     for (const bad of ["a\u0000b", "a\u0007b", "a\u007fb", "a\u0085b", "a\u202eb", "a\u2066b", "a\u200fb", "a\u061cb"]) expect(normalizeDisplayName(bad)).toBeNull();
-    expect(resolve(["--name", "  Review   2 "])!.details).toEqual({ displayName: "Review 2" });
+    expect(resolve(["--name", "  Agent   1 "])!.details).toEqual({ displayName: "Agent 1" });
     expect(refusal(["--name", "x".repeat(81)])).toBe("--name is 1 to 80 characters with no control or bidi characters");
   });
 
@@ -214,9 +214,9 @@ describe("resolving holder details", () => {
 
 describe("labels from what a cloud returns", () => {
   test("show labels use the declared name and kind whenever they exist; take labels keep the seat for unspecified", () => {
-    const unspecified = { kind: "unspecified", displayName: "review-2" };
-    expect(holderLabel(unspecified, "seat:k:review-2")).toBe("review-2 [unspecified]");
-    expect(writeLabel(unspecified, "seat:k:review-2")).toBe("seat:k:review-2");
+    const unspecified = { kind: "unspecified", displayName: "agent-1" };
+    expect(holderLabel(unspecified, "seat:k:agent-1")).toBe("agent-1 [unspecified]");
+    expect(writeLabel(unspecified, "seat:k:agent-1")).toBe("seat:k:agent-1");
     expect(writeLabel({ kind: "factory", displayName: "F" }, "seat:k:f")).toBe("F [factory]");
     expect(holderLabel(null, "seat:k:old")).toBe("seat:k:old");
     expect(holderLabel({ kind: "factory" }, null)).toBe("nobody");
@@ -227,7 +227,7 @@ describe("labels from what a cloud returns", () => {
     expect(ownerLabel({ type: "organization-key", keyId: "key_1", keyName: "factory-trial" })).toBe("organization key factory-trial");
     expect(ownerLabel({ type: "organization-key", keyId: "key_1", keyName: null })).toBe("organization key key_1");
     expect(ownerLabel({ type: "organization-key" })).toBeNull();
-    expect(ownerLabel({ type: "person", userId: "u", name: "Tony Ruiz" })).toBe("person Tony Ruiz");
+    expect(ownerLabel({ type: "person", userId: "u", name: "Sam Example" })).toBe("person Sam Example");
     expect(ownerLabel({ type: "person", userId: "u", name: null, email: "tony@example.com" })).toBe("person (a member of this workspace)");
     expect(ownerLabel({ type: "robot" })).toBeNull();
     expect(ownerLabel("organization key")).toBeNull();

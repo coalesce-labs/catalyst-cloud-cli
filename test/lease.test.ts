@@ -356,12 +356,12 @@ const seedContract = (contractVersion: string) =>
   writeContractCache(home, { etag: null, fetchedAt: new Date(now - 1_000).toISOString(), contractVersion, doc: contractDoc(contractVersion) });
 const factoryOwner = { type: "organization-key", keyId: "key_01JFACTORY", keyName: "factory-trial" };
 const factoryDetails = (over: Body = {}): Body => ({
-  kind: "factory", displayName: "Factory Droid (CTC-6480 trial)", sessionUrl: null, externalId: "s_8f2c", contact: null,
+  kind: "factory", displayName: "Example Agent (trial)", sessionUrl: null, externalId: "s_8f2c", contact: null,
   owner: factoryOwner, declared: true, generation: 3, recordedAtMs: now, ...over,
 });
 const factoryLease = (over: Body = {}): Body =>
   lease({ ticket: "CTC-6480", holder: "seat:key_01JFACTORY:factory-droid", generation: 3, holderDetails: factoryDetails(), ...over });
-const factoryTake = ["lease", "take", "CTC-6480", "--agent", "factory-droid", "--holder-kind", "factory", "--name", "Factory Droid (CTC-6480 trial)", "--external-id", "s_8f2c"];
+const factoryTake = ["lease", "take", "CTC-6480", "--agent", "factory-droid", "--holder-kind", "factory", "--name", "Example Agent (trial)", "--external-id", "s_8f2c"];
 
 describe("lease take with holder details (CTC-8873)", () => {
   test("scenario: an external agent takes a lease with its details, and show names it and its owner", async () => {
@@ -370,10 +370,10 @@ describe("lease take with holder details (CTC-8873)", () => {
     expect(await main(factoryTake, ctx)).toBe(0);
     expect(requests).toEqual([{
       method: "POST", path: "/api/v1/agent/ticket-lease/take",
-      body: { ticket: "CTC-6480", agent: "factory-droid", holderDetails: { kind: "factory", displayName: "Factory Droid (CTC-6480 trial)", externalId: "s_8f2c" } },
+      body: { ticket: "CTC-6480", agent: "factory-droid", holderDetails: { kind: "factory", displayName: "Example Agent (trial)", externalId: "s_8f2c" } },
       authorization: `Bearer ${key}`,
     }]);
-    expect(ctx.out).toEqual(["CTC-6480: held by Factory Droid (CTC-6480 trial) [factory] until 2026-10-23T18:30:00.000Z, generation 3"]);
+    expect(ctx.out).toEqual(["CTC-6480: held by Example Agent (trial) [factory] until 2026-10-23T18:30:00.000Z, generation 3"]);
     const file = join(configDirFor(home), "leases", "CTC-6480--factory-droid.json");
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ ticket: "CTC-6480", agent: "factory-droid", generation: 3, holder: "seat:key_01JFACTORY:factory-droid", kind: "factory" });
     expect(statSync(file).mode & 0o777).toBe(0o600);
@@ -381,7 +381,7 @@ describe("lease take with holder details (CTC-8873)", () => {
     respond = () => json({ ticket: "CTC-6480", lease: { ...factoryLease(), live: true, lastHolderDetails: null }, delegations: [] });
     expect(await main(["lease", "show", "CTC-6480"], ctx)).toBe(0);
     expect(ctx.out.slice(1)).toEqual([
-      "CTC-6480: held by Factory Droid (CTC-6480 trial) [factory] until 2026-10-23T18:30:00.000Z, generation 3",
+      "CTC-6480: held by Example Agent (trial) [factory] until 2026-10-23T18:30:00.000Z, generation 3",
       "  owner: organization key factory-trial",
       "  external id: s_8f2c",
     ]);
@@ -410,7 +410,7 @@ describe("lease take with holder details (CTC-8873)", () => {
 
   test("a contract read that fails never falls through to the take", async () => {
     respond = (r) => r.path === CONTRACT_ROUTE ? json({ error: "boom" }, 500) : json({ outcome: "taken", lease: factoryLease() });
-    expect(await main(["lease", "take", "CTC-6480", "--agent", "x", "--name", "Review 2"], ctx)).not.toBe(0);
+    expect(await main(["lease", "take", "CTC-6480", "--agent", "x", "--name", "Agent 1"], ctx)).not.toBe(0);
     expect(requests.map((r) => r.path)).toEqual([CONTRACT_ROUTE]);
   });
 
@@ -425,14 +425,14 @@ describe("lease take with holder details (CTC-8873)", () => {
   });
 
   test("scenario: today's scripts run unchanged against a 2.65 cloud, with kind unspecified", async () => {
-    const unspecified = { kind: "unspecified", displayName: "review-2", sessionUrl: null, externalId: null, contact: null, owner: { type: "person", userId: "user-tony", name: "Tony Ruiz" }, declared: true };
-    respond = () => json({ outcome: "taken", minted: true, adopted: [], lease: lease({ ticket: "CTC-6480", holder: "seat:key-2:review-2", generation: 4, holderDetails: unspecified }) });
-    expect(await main(["lease", "take", "CTC-6480", "--agent", "review-2", "--ttl", "60"], ctx)).toBe(0);
+    const unspecified = { kind: "unspecified", displayName: "agent-1", sessionUrl: null, externalId: null, contact: null, owner: { type: "person", userId: "user-sam", name: "Sam Example" }, declared: true };
+    respond = () => json({ outcome: "taken", minted: true, adopted: [], lease: lease({ ticket: "CTC-6480", holder: "seat:key-2:agent-1", generation: 4, holderDetails: unspecified }) });
+    expect(await main(["lease", "take", "CTC-6480", "--agent", "agent-1", "--ttl", "60"], ctx)).toBe(0);
     expect(requests).toEqual([{
       method: "POST", path: "/api/v1/agent/ticket-lease/take",
-      body: { ticket: "CTC-6480", agent: "review-2", ttlMs: 3_600_000 }, authorization: `Bearer ${key}`,
+      body: { ticket: "CTC-6480", agent: "agent-1", ttlMs: 3_600_000 }, authorization: `Bearer ${key}`,
     }]);
-    expect(ctx.out).toEqual(["CTC-6480: held by seat:key-2:review-2 until 2026-10-23T18:30:00.000Z, generation 4"]);
+    expect(ctx.out).toEqual(["CTC-6480: held by seat:key-2:agent-1 until 2026-10-23T18:30:00.000Z, generation 4"]);
     expect(ctx.err).toEqual([]);
   });
 
@@ -469,10 +469,10 @@ describe("lease take with holder details (CTC-8873)", () => {
     seedContract("2.65.0");
     respond = () => json({ outcome: "taken", minted: true, lease: lease({ holderDetails: { kind: "claude-code", displayName: "agent-a" } }) });
     ctx.env.CATALYST_LEASE_HOLDER_KIND = "claude-code";
-    ctx.env.CATALYST_LEASE_LINK = "https://claude.ai/code/session_01";
-    ctx.env.CATALYST_LEASE_EXTERNAL_ID = "session_01";
+    ctx.env.CATALYST_LEASE_LINK = "https://claude.ai/code/session_abc";
+    ctx.env.CATALYST_LEASE_EXTERNAL_ID = "session_abc";
     expect(await main(["lease", "take", "ENG-123", "--agent", "agent-a"], ctx)).toBe(0);
-    expect(requests.at(-1)!.body!.holderDetails).toEqual({ kind: "claude-code", sessionUrl: "https://claude.ai/code/session_01", externalId: "session_01" });
+    expect(requests.at(-1)!.body!.holderDetails).toEqual({ kind: "claude-code", sessionUrl: "https://claude.ai/code/session_abc", externalId: "session_abc" });
     expect(await main(["lease", "take", "ENG-123", "--agent", "agent-a", "--holder-kind", "codex", "--link", "https://chatgpt.com/codex/tasks/t_1", "--external-id", "t_1", "--ttl", "45"], ctx)).toBe(0);
     expect(requests.at(-1)!.body).toEqual({
       ticket: "ENG-123", agent: "agent-a", ttlMs: 2_700_000,
@@ -497,13 +497,13 @@ describe("lease take with holder details (CTC-8873)", () => {
     expect(ctx.err).toEqual([]);
     expect(await main(["lease", "take", "CTC-6480", "--agent", "factory-droid", "--holder-kind", "factory", "--external-id", "s_new"], ctx)).toBe(0);
     expect(ctx.err).toEqual(["CTC-6480: this seat already holds the ticket; its recorded holder details were kept"]);
-    expect(ctx.out.at(-1)).toBe("CTC-6480: held by Factory Droid (CTC-6480 trial) [factory] until 2026-10-23T18:30:00.000Z, generation 3");
+    expect(ctx.out.at(-1)).toBe("CTC-6480: held by Example Agent (trial) [factory] until 2026-10-23T18:30:00.000Z, generation 3");
   });
 
   test("a refused take names the incumbent by its declared name and kind", async () => {
     respond = () => json({ outcome: "refused", refusal: { reason: "ticket_lease_held", current: factoryLease(), occupied: null, retryAtMs: now + 30 * 60_000 + 1 } });
     expect(await main(["lease", "take", "CTC-6480", "--agent", "x"], ctx)).toBe(1);
-    expect(ctx.out).toEqual(["refused: ticket_lease_held; held by Factory Droid (CTC-6480 trial) [factory] until 2026-10-23T18:30:00.000Z; retry at 2026-10-23T18:30:00.001Z"]);
+    expect(ctx.out).toEqual(["refused: ticket_lease_held; held by Example Agent (trial) [factory] until 2026-10-23T18:30:00.000Z; retry at 2026-10-23T18:30:00.001Z"]);
   });
 });
 
@@ -519,17 +519,17 @@ describe("lease renew with holder details (CTC-8873)", () => {
     await takeFactory();
     respond = () => json({ outcome: "renewed", lease: factoryLease({ lastProgress: "pr:15901", holderDetails: factoryDetails({ externalId: "s_91aa" }) }) });
     const contact = "https://github.com/coalesce-labs/catalyst-cloud-cli/issues/1";
-    expect(await main(["lease", "renew", "CTC-6480", "--pr", "15901", "--name", "Factory Droid (CTC-6480 trial)", "--external-id", "s_91aa", "--contact", contact], ctx)).toBe(0);
+    expect(await main(["lease", "renew", "CTC-6480", "--pr", "15901", "--name", "Example Agent (trial)", "--external-id", "s_91aa", "--contact", contact], ctx)).toBe(0);
     expect(requests).toEqual([{
       method: "POST", path: "/api/v1/agent/ticket-lease/renew",
       body: {
         ticket: "CTC-6480", agent: "factory-droid", generation: 3, progress: { kind: "pr", ref: "15901" },
-        holderDetails: { displayName: "Factory Droid (CTC-6480 trial)", externalId: "s_91aa", contact },
+        holderDetails: { displayName: "Example Agent (trial)", externalId: "s_91aa", contact },
       },
       authorization: `Bearer ${key}`,
     }]);
     expect(ctx.out.slice(1)).toEqual([
-      "CTC-6480: held by Factory Droid (CTC-6480 trial) [factory] until 2026-10-23T18:30:00.000Z, generation 3",
+      "CTC-6480: held by Example Agent (trial) [factory] until 2026-10-23T18:30:00.000Z, generation 3",
       "  last progress: pr:15901",
     ]);
     expect(await main(["lease", "renew", "CTC-6480", "--pr", "15902", "--holder-kind", "codex"], ctx)).toBe(1);
@@ -565,7 +565,7 @@ describe("lease renew with holder details (CTC-8873)", () => {
   test("a renew whose take declared no kind is refused without pointing at --holder-kind, which renew refuses", async () => {
     seedContract("2.65.0");
     mkdirSync(join(configDirFor(home), "leases"), { recursive: true });
-    writeFileSync(join(configDirFor(home), "leases", "CTC-6480--review-2.json"), JSON.stringify({ ticket: "CTC-6480", agent: "review-2", generation: 3, holder: null, kind: "unspecified" }));
+    writeFileSync(join(configDirFor(home), "leases", "CTC-6480--agent-1.json"), JSON.stringify({ ticket: "CTC-6480", agent: "agent-1", generation: 3, holder: null, kind: "unspecified" }));
     expect(await main(["lease", "renew", "CTC-6480", "--pr", "1", "--link", "https://claude.ai/code/s_1"], ctx)).toBe(1);
     expect(ctx.err.at(-1)).toBe("--link: kind unspecified allows no session link yet (allowed hosts: none)");
     expect(requests).toEqual([]);
@@ -642,14 +642,14 @@ describe("lease renew with holder details (CTC-8873)", () => {
 });
 
 describe("lease show and list with holder details (CTC-8873)", () => {
-  const tony = { type: "person", userId: "user-tony", name: "Tony Ruiz" };
+  const sam = { type: "person", userId: "user-sam", name: "Sam Example" };
   const row = (ticket: string, over: Body): Body => ({ ...lease({ ticket }), live: true, lastHolderDetails: null, ...over });
   const three = {
     team: "CTC", state: "live", nextCursor: null,
     leases: [
       row("CTC-6480", { holder: "seat:key_01JFACTORY:factory-droid", generation: 3, deadlineMs: now + 30 * 60_000, holderDetails: factoryDetails() }),
-      row("CTC-6477", { holder: "seat:key-2:review-2", generation: 1, deadlineMs: now + 20 * 60_000, holderDetails: { kind: "claude-code", displayName: "Review 2", owner: tony } }),
-      row("CTC-6476", { holder: "seat:key-2:review-3", generation: 2, deadlineMs: now + 10 * 60_000, holderDetails: { kind: "unspecified", displayName: "review-3", owner: tony } }),
+      row("CTC-6477", { holder: "seat:key-2:agent-1", generation: 1, deadlineMs: now + 20 * 60_000, holderDetails: { kind: "claude-code", displayName: "Agent 1", owner: sam } }),
+      row("CTC-6476", { holder: "seat:key-2:agent-2", generation: 2, deadlineMs: now + 10 * 60_000, holderDetails: { kind: "unspecified", displayName: "agent-2", owner: sam } }),
     ],
   };
 
@@ -659,9 +659,9 @@ describe("lease show and list with holder details (CTC-8873)", () => {
     expect(requests).toEqual([{ method: "GET", path: "/api/v1/agent/ticket-leases?team=CTC", body: null, authorization: `Bearer ${key}` }]);
     expect(ctx.out).toEqual([
       "CTC: 3 live leases",
-      "  CTC-6480: Factory Droid (CTC-6480 trial) [factory], owner organization key factory-trial, until 2026-10-23T18:30:00.000Z, generation 3",
-      "  CTC-6477: Review 2 [claude-code], owner person Tony Ruiz, until 2026-10-23T18:20:00.000Z, generation 1",
-      "  CTC-6476: review-3 [unspecified], owner person Tony Ruiz, until 2026-10-23T18:10:00.000Z, generation 2",
+      "  CTC-6480: Example Agent (trial) [factory], owner organization key factory-trial, until 2026-10-23T18:30:00.000Z, generation 3",
+      "  CTC-6477: Agent 1 [claude-code], owner person Sam Example, until 2026-10-23T18:20:00.000Z, generation 1",
+      "  CTC-6476: agent-2 [unspecified], owner person Sam Example, until 2026-10-23T18:10:00.000Z, generation 2",
     ]);
   });
 
@@ -677,7 +677,7 @@ describe("lease show and list with holder details (CTC-8873)", () => {
     expect(ctx.out).toEqual([
       "CTC: 0 live leases",
       "CTC: 1 recent lease",
-      "  CTC-6480: free; last held by Factory Droid (CTC-6480 trial) [factory], generation 3",
+      "  CTC-6480: free; last held by Example Agent (trial) [factory], generation 3",
       "  more: catalyst lease list --team CTC --state recent --limit 1 --cursor eyJzIjoxfQ",
     ]);
     const cursor = "a'b c$(x)&\u001b[31m";
@@ -726,7 +726,7 @@ describe("lease show and list with holder details (CTC-8873)", () => {
   test("show: a free row pairs the name with its own details; a live row names the previous holder; old rows keep the seat", async () => {
     const shows: Body[] = [
       { ticket: "CTC-6480", lease: { ...factoryLease({ lastProgress: "pr:15901", holderDetails: factoryDetails({ externalId: "s_91aa" }) }), live: false, lastHolder: null, lastHolderDetails: { kind: "codex", displayName: "Not this one" } } },
-      { ticket: "CTC-6480", lease: { ...factoryLease({ holderDetails: factoryDetails({ sessionUrl: "https://app.factory.ai/s/1", contact: "https://github.com/x", owner: { type: "person", userId: "u", name: null } }) }), live: true, lastHolder: "seat:key-2:review-2", lastHolderDetails: { kind: "unspecified", displayName: "review-2" } } },
+      { ticket: "CTC-6480", lease: { ...factoryLease({ holderDetails: factoryDetails({ sessionUrl: "https://app.factory.ai/s/1", contact: "https://github.com/x", owner: { type: "person", userId: "u", name: null } }) }), live: true, lastHolder: "seat:key-2:agent-1", lastHolderDetails: { kind: "unspecified", displayName: "agent-1" } } },
       { ticket: "CTC-6480", lease: { ...lease({ ticket: "CTC-6480", lastHolder: "seat:key-3:old" }), live: true } },
       { ticket: "CTC-9000", lease: null },
     ];
@@ -735,16 +735,16 @@ describe("lease show and list with holder details (CTC-8873)", () => {
       expect(await main(["lease", "show", String(shown.ticket)], ctx)).toBe(0);
     }
     expect(ctx.out).toEqual([
-      "CTC-6480: free; last held by Factory Droid (CTC-6480 trial) [factory], generation 3",
+      "CTC-6480: free; last held by Example Agent (trial) [factory], generation 3",
       "  last progress: pr:15901",
       "  owner: organization key factory-trial",
       "  external id: s_91aa",
-      "CTC-6480: held by Factory Droid (CTC-6480 trial) [factory] until 2026-10-23T18:30:00.000Z, generation 3",
+      "CTC-6480: held by Example Agent (trial) [factory] until 2026-10-23T18:30:00.000Z, generation 3",
       "  owner: person (a member of this workspace)",
       "  session: https://app.factory.ai/s/1",
       "  external id: s_8f2c",
       "  contact: https://github.com/x",
-      "  previous holder: review-2 [unspecified]",
+      "  previous holder: agent-1 [unspecified]",
       `CTC-6480: held by ${holder} until 2026-10-23T18:30:00.000Z, generation 7`,
       "  previous holder: seat:key-3:old",
       "CTC-9000: no ticket lease",
