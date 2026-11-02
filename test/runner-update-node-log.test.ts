@@ -87,6 +87,8 @@ describe("CTC-8674: an update adds the log setting to an older install", () => {
     const kept = await updateWith(dir, { ready: notOnNew, preparationStop: (image) => image !== OLD.supervisor }, true);
     expect(kept).toMatchObject({ outcome: "retained", notices: [NODE_LOG_NOTICE] });
     expect(readFileSync(join(dir, "compose.yaml"), "utf8")).toContain(LINE);
+    // Review finding 2: the notice shown here is recorded, so the next update does not show it again.
+    expect(nodeLogNoticeOwed(dir, ORIGINAL_ENV)).toBe(false);
   });
 
   it("the file keeps the mode setup gave it", async () => {
