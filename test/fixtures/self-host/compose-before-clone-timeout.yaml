@@ -1,0 +1,113 @@
+# deploy/self-host/compose.yaml — one Catalyst host on one Docker engine.
+#
+# The same file runs on Linux (amd64 or arm64) and on macOS through OrbStack or Docker Desktop. It
+# assumes nothing from the host's init system: no systemd unit, timer or drop-in. Copy .env.example
+# to .env, fill it in, then `docker compose up -d`. README.md explains every choice below.
+#
+# Two long-running services, and neither depends on the other:
+#   - supervisor: enrolls this host with a one-time join token, leases work from the tenant DO, and
+#     runs each phase as disposable setup and session containers (apps/host-agent/Dockerfile.supervisor).
+#   - deadline-watchdog: stops an attempt container once its hard deadline passes, including while
+#     the supervisor is dead. That is why it has no `depends_on`.
+# Attempt containers are NOT services here. The supervisor creates them through the Docker API.
+
+name: catalyst-host
+
+x-hardened: &hardened
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  # ⛔ unless-stopped, never on-failure. A daemon can exit 0 when every slot has retired (today's
+  # host agent does exactly that), and on-failure leaves an exit-0 service down for good.
+  restart: unless-stopped
+  logging:
+    driver: local
+    options:
+      max-size: 10m
+      max-file: "3"
+  tmpfs:
+    - /tmp:size=16m,mode=1777
+
+services:
+  deadline-watchdog:
+    <<: *hardened
+    image: ${CATALYST_WATCHDOG_IMAGE:?set CATALYST_WATCHDOG_IMAGE to a digest-pinned image, see .env.example}
+    # The Docker socket is root:<gid> 0660 on every engine we run on (docker group on Linux, gid 0 on
+    # OrbStack and Docker Desktop). The image runs as uid 10003, so it needs that group and no more.
+    group_add:
+      - "${DOCKER_SOCKET_GID:?set DOCKER_SOCKET_GID, see .env.example}"
+    volumes:
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+    environment:
+      CATALYST_WATCHDOG_STOP_GRACE_SECONDS: ${CATALYST_WATCHDOG_STOP_GRACE_SECONDS:-120}
+      CATALYST_WATCHDOG_INTERVAL_MS: ${CATALYST_WATCHDOG_INTERVAL_MS:-5000}
+      CATALYST_WATCHDOG_MAX_UNREACHABLE_MS: ${CATALYST_WATCHDOG_MAX_UNREACHABLE_MS:-30000}
+      CATALYST_WATCHDOG_DOCKER_API_VERSION: ${CATALYST_WATCHDOG_DOCKER_API_VERSION:-1.44}
+    # A stop it has started keeps running on the engine's side after the watchdog exits.
+    stop_grace_period: 10s
+
+  supervisor:
+    <<: *hardened
+    # The environment names are the contract's SELF_HOST_SUPERVISOR_ENV
+    # (packages/protocol/src/host-enrollment.ts), exactly; a test in apps/deadline-watchdog holds
+    # this file to that list. The image runs as 10001:10001 with a read-only root; exit 1 means the
+    # Engine was unreachable for 2 min (a fresh container remounts the socket), exit 2 a config error.
+    image: ${CATALYST_SUPERVISOR_IMAGE:?set CATALYST_SUPERVISOR_IMAGE to a digest-pinned image, see .env.example}
+    group_add:
+      - "${DOCKER_SOCKET_GID:?set DOCKER_SOCKET_GID, see .env.example}"
+    volumes:
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+      # The host journal and outbox. Never authoritative: deleting it costs undelivered evidence and
+      # never blocks a start (docs/design/disposable-host-contracts.md, "The host journal").
+      - supervisor-state:/var/lib/catalyst/supervisor
+      # The per-host credential and the tenant's runner org key (CATALYST_ORG_KEY_FILE), on their own
+      # volume so the delete-the-state-directory test (removing supervisor-state) never costs an
+      # enrollment. The supervisor replaces the credential by rename, so the directory stays writable.
+      - host-credential:/var/lib/catalyst/host-credential
+      # ⛔ SAME PATH ON BOTH SIDES. The supervisor passes workspace paths to `docker create`, and the
+      # engine resolves a bind source on the HOST. A path that exists only inside this container
+      # mounts an empty directory into the phase.
+      - ${CATALYST_SLOTS_DIR:-/srv/catalyst/slots}:${CATALYST_SLOTS_DIR:-/srv/catalyst/slots}
+      # Thoughts stay as today (CTC-3493): a tenant's thoughts checkout and its pool lock directory
+      # are SHARED and read-write across that tenant's session containers, and every thoughts sync
+      # runs under thoughts.lock. The supervisor keeps one subdirectory per tenant under each root,
+      # so two projects on one engine never share a checkout or a lock. Same path on both sides for
+      # the same reason as the slots: the supervisor binds these into session containers, and the
+      # engine resolves bind sources on the host. Never mounted into a setup container.
+      - ${CATALYST_THOUGHTS_DIR:-/srv/catalyst/thoughts}:${CATALYST_THOUGHTS_DIR:-/srv/catalyst/thoughts}
+      - ${CATALYST_POOL_LOCK_DIR:-/srv/catalyst/locks}:${CATALYST_POOL_LOCK_DIR:-/srv/catalyst/locks}
+      # CTC-4266: the host's proof that its nftables chain drops private ranges from the session
+      # bridge, written by a root timer. Read-only. Only a native Linux engine needs a file in it;
+      # on Docker Desktop the directory stays empty (README.md, "Create the session network").
+      - ${CATALYST_SESSION_EGRESS_DIR:-./session-egress}:/var/lib/catalyst/session-egress:ro
+    environment:
+      CATALYST_MIRROR_URL: ${CATALYST_MIRROR_URL:-https://staging.catalystcloud.dev}
+      CATALYST_HOST_NAME: ${CATALYST_HOST_NAME:-}
+      CATALYST_HOST_JOIN_TOKEN: ${CATALYST_HOST_JOIN_TOKEN:-}
+      CATALYST_RUNNER_IMAGE: ${CATALYST_RUNNER_IMAGE:?set CATALYST_RUNNER_IMAGE to name@sha256, see .env.example}
+      CATALYST_SLOTS: ${CATALYST_SLOTS:-2}
+      CATALYST_SLOTS_DIR: ${CATALYST_SLOTS_DIR:-/srv/catalyst/slots}
+      # Empty lets the supervisor choose: filesystem when it finds per-slot filesystems on a native
+      # Linux engine, budget otherwise (always budget on macOS).
+      CATALYST_SLOT_DISK_MODE: ${CATALYST_SLOT_DISK_MODE:-}
+      CATALYST_SLOT_DISK_BUDGET_GIB: ${CATALYST_SLOT_DISK_BUDGET_GIB:-20}
+      CATALYST_HOST_CREDENTIAL_FILE: ${CATALYST_HOST_CREDENTIAL_FILE:-/var/lib/catalyst/host-credential/credential}
+      CATALYST_DISK_BUDGET_GIB: ${CATALYST_DISK_BUDGET_GIB:-60}
+      CATALYST_WORKSPACE_STORAGE: ${CATALYST_WORKSPACE_STORAGE:-}
+      CATALYST_THOUGHTS_DIR: ${CATALYST_THOUGHTS_DIR:-/srv/catalyst/thoughts}
+      CATALYST_POOL_LOCK_DIR: ${CATALYST_POOL_LOCK_DIR:-/srv/catalyst/locks}
+      CATALYST_ORG_KEY_FILE: ${CATALYST_ORG_KEY_FILE:-/var/lib/catalyst/host-credential/org-key}
+      # `attempt`: sessions use their grant's own credential and the host holds no org key (CTC-4921).
+      # Unset keeps an existing install on the org key until it opts in.
+      CATALYST_SESSION_CREDENTIAL: ${CATALYST_SESSION_CREDENTIAL:-org-key}
+      # Every setup and session container joins this network. It must exist before the supervisor
+      # takes work: missing or not isolated is not-ready, never the default bridge.
+      CATALYST_SESSION_NETWORK: ${CATALYST_SESSION_NETWORK:-catalyst-session-v1}
+      CATALYST_SESSION_EGRESS_ATTESTATION: ${CATALYST_SESSION_EGRESS_ATTESTATION:-/var/lib/catalyst/session-egress/attestation.json}
+    # SIGTERM re-adopts on the next start instead of stopping phases, so the supervisor needs only
+    # long enough to flush its journal.
+    stop_grace_period: 30s
+
+volumes:
+  supervisor-state:
+  host-credential:

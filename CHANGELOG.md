@@ -8,6 +8,12 @@
 
 `--json` on every `catalyst lease` command now prints Catalyst's answer exactly as it came, refusals included. A refusal used to add a `status` field to that answer; it no longer does, and the exit code still says the command was refused.
 
+## 0.16.45
+
+`catalyst runner update` now tells a self-hosted machine's owner everything the machine sends to Catalyst: the logs of the containers Catalyst runs on it, including the containers a ticket's work runs in, and the machine's CPU, memory and free disk as numbers. Secrets are removed on the machine first, and nothing else on the machine is sent. The 0.16.44 notice named only Catalyst's own service containers.
+
+A machine that already sends its logs is shown the new notice once, on its next successful update, and a `node-log-notice` file in the runner folder records that. A machine whose owner set `CATALYST_NODE_LOG_SHIPPING` to anything but `on` in the runner's `.env` is not told that logs are sent. To stop sending, set `CATALYST_NODE_LOG_SHIPPING=off` in the runner's `.env` and run `docker compose up -d`.
+
 ## 0.16.44
 
 `catalyst runner update` now adds the log setting to a self-hosted machine that was set up before it existed. If the machine's `compose.yaml` has no `CATALYST_NODE_LOG_SHIPPING` line, the update adds the line a new setup writes and prints a notice saying so. With that line, which is on by default, Catalyst's own service containers on the machine send their logs to Catalyst, with secrets removed first, once Catalyst turns log collection on for your workspace. To keep it off, set `CATALYST_NODE_LOG_SHIPPING=off` in the runner's `.env` and run `docker compose up -d`; a value you set there always wins. An update that rolls back leaves `compose.yaml` as it was, and a file that already names the setting, or that the update does not recognise, is left alone.
