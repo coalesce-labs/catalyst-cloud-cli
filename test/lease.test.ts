@@ -473,8 +473,11 @@ describe("lease take with holder details (CTC-8873)", () => {
     ctx.env.CATALYST_LEASE_EXTERNAL_ID = "session_01";
     expect(await main(["lease", "take", "ENG-123", "--agent", "agent-a"], ctx)).toBe(0);
     expect(requests.at(-1)!.body!.holderDetails).toEqual({ kind: "claude-code", sessionUrl: "https://claude.ai/code/session_01", externalId: "session_01" });
-    expect(await main(["lease", "take", "ENG-123", "--agent", "agent-a", "--holder-kind", "codex", "--link", "https://chatgpt.com/codex/tasks/t_1", "--external-id", "t_1"], ctx)).toBe(0);
-    expect(requests.at(-1)!.body!.holderDetails).toEqual({ kind: "codex", sessionUrl: "https://chatgpt.com/codex/tasks/t_1", externalId: "t_1" });
+    expect(await main(["lease", "take", "ENG-123", "--agent", "agent-a", "--holder-kind", "codex", "--link", "https://chatgpt.com/codex/tasks/t_1", "--external-id", "t_1", "--ttl", "45"], ctx)).toBe(0);
+    expect(requests.at(-1)!.body).toEqual({
+      ticket: "ENG-123", agent: "agent-a", ttlMs: 2_700_000,
+      holderDetails: { kind: "codex", sessionUrl: "https://chatgpt.com/codex/tasks/t_1", externalId: "t_1" },
+    });
     // A blank variable is absent; a blank flag is an error.
     ctx.env.CATALYST_LEASE_HOLDER_KIND = " ";
     ctx.env.CATALYST_LEASE_LINK = "";
@@ -568,6 +571,32 @@ describe("lease renew with holder details (CTC-8873)", () => {
       expect(ctx.err.at(-1)).toBe("catalyst: --link needs the current holder kind; take this lease with this CLI before setting its session link");
       expect(requests.map((r) => r.method)).toEqual(["GET"]);
     }
+  });
+
+  test("renew reads the link and external id stand-ins, a flag wins, and release never sends the stored kind", async () => {
+    await takeFactory();
+    writeFileSync(join(configDirFor(home), "leases", "CTC-6480--factory-droid.json"), JSON.stringify({ ticket: "CTC-6480", agent: "factory-droid", generation: 3, holder: null, kind: "claude-code" }));
+    respond = () => json({ outcome: "renewed", lease: factoryLease() });
+    ctx.env.CATALYST_LEASE_LINK = "https://claude.ai/code/s_env";
+    ctx.env.CATALYST_LEASE_EXTERNAL_ID = "s_env";
+    expect(await main(["lease", "renew", "CTC-6480", "--pr", "1"], ctx)).toBe(0);
+    expect(requests.at(-1)!.body!.holderDetails).toEqual({ sessionUrl: "https://claude.ai/code/s_env", externalId: "s_env" });
+    expect(await main(["lease", "renew", "CTC-6480", "--pr", "2", "--external-id", "s_flag"], ctx)).toBe(0);
+    expect(requests.at(-1)!.body!.holderDetails).toEqual({ sessionUrl: "https://claude.ai/code/s_env", externalId: "s_flag" });
+    expect(requests.map((r) => r.method)).toEqual(["POST", "POST"]);
+    respond = () => json({ outcome: "released", lease: factoryLease({ holder: null }) });
+    expect(await main(["lease", "release", "CTC-6480"], ctx)).toBe(0);
+    expect(requests.at(-1)!.body).toEqual({ ticket: "CTC-6480", agent: "factory-droid", generation: 3 });
+  });
+
+  test("a stored kind from another generation is not used: the lease is read for the current one", async () => {
+    await takeFactory();
+    respond = (r) => r.method === "GET"
+      ? json({ ticket: "CTC-6480", lease: { ...factoryLease({ generation: 4, holderDetails: factoryDetails({ kind: "codex" }) }), live: true } })
+      : json({ outcome: "renewed", lease: factoryLease({ generation: 4 }) });
+    expect(await main(["lease", "renew", "CTC-6480", "--pr", "1", "--generation", "4", "--link", "https://chatgpt.com/c/1"], ctx)).toBe(0);
+    expect(requests.map((r) => r.method)).toEqual(["GET", "POST"]);
+    expect(requests[1]!.body).toMatchObject({ agent: "factory-droid", generation: 4, holderDetails: { sessionUrl: "https://chatgpt.com/c/1" } });
   });
 
   test("a renew with no details reads no contract; release and show refuse detail flags", async () => {

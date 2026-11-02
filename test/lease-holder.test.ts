@@ -152,7 +152,7 @@ describe("resolving holder details", () => {
     expect(normalizeDisplayName("Zoë")).toBe("Zoë");
     expect(normalizeDisplayName("é".repeat(80))).toBe("é".repeat(80));
     expect(normalizeDisplayName("é".repeat(81))).toBeNull();
-    for (const bad of ["a\u0000b", "a\u0007b", "a\u007fb", "a\u0085b", "a‮b", "a⁦b", "a‏b", "a؜b"]) expect(normalizeDisplayName(bad)).toBeNull();
+    for (const bad of ["a\u0000b", "a\u0007b", "a\u007fb", "a\u0085b", "a\u202eb", "a\u2066b", "a\u200fb", "a\u061cb"]) expect(normalizeDisplayName(bad)).toBeNull();
     expect(resolve(["--name", "  Review   2 "])!.details).toEqual({ displayName: "Review 2" });
     expect(refusal(["--name", "x".repeat(81)])).toBe("--name is 1 to 80 characters with no control or bidi characters");
   });
@@ -234,7 +234,7 @@ describe("labels from what a cloud returns", () => {
   });
 
   test("sanitize drops C0, C1 and bidi controls only", () => {
-    expect(sanitize("a\u001b[31mb\u009bc‮d⁩e é")).toBe("a[31mbcde é");
+    expect(sanitize("a\u001b[31mb\u009bc\u202ed\u2069e é\u2028\u2029")).toBe("a[31mbcde é");
   });
 
   test("a declared field the cloud did not keep is a difference", () => {
@@ -245,6 +245,9 @@ describe("labels from what a cloud returns", () => {
 
   test("shell words: bare when safe, single-quoted when printable, ANSI-C quoted otherwise", () => {
     expect(shellWord("eyJzIjoxfQ")).toBe("eyJzIjoxfQ");
+    expect(shellWord("eyJzIjoxfQ==")).toBe("eyJzIjoxfQ==");
+    expect(shellWord("~abc")).toBe("'~abc'");
+    expect(shellWord("=foo")).toBe("'=foo'");
     expect(shellWord("a b;c|d")).toBe("'a b;c|d'");
     expect(shellWord("it's")).toBe("'it'\\''s'");
     expect(shellWord("a\u001bb'\\é😀")).toBe("$'a\\u001bb\\'\\\\\\u00e9\\U0001f600'");

@@ -210,7 +210,8 @@ export function resolveHolderDetails(
 
   const details: HolderDetailsInput = {};
   if (raw.kind !== undefined) {
-    const kind = HOLDER_KINDS.find((k) => k === raw.kind!.value.trim());
+    const wanted = raw.kind.value.trim();
+    const kind = HOLDER_KINDS.find((k) => k === wanted);
     if (kind === undefined) throw new HolderDetailError(`${raw.kind.label} is one of ${HOLDER_KINDS.join(", ")}`);
     details.kind = kind;
   }
@@ -258,9 +259,10 @@ function text(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-/** `value` with every C0, C1 and bidi control removed, for a terminal. */
+/** `value` with every C0, C1 and bidi control, and the line and paragraph separators, removed for
+ *  a terminal. */
 export function sanitize(value: string): string {
-  return value.replace(CONTROLS, "");
+  return value.replace(CONTROLS, "").replace(/[\u2028\u2029]/g, "");
 }
 
 /** The fields a printed label reads from a lease row's `holderDetails` or `lastHolderDetails`. */
@@ -343,7 +345,8 @@ export function detailsDiffer(declared: HolderDetailsInput, kept: unknown): bool
 /** One shell word for `value`: bare when it is plainly safe, single-quoted when it is printable
  *  ASCII, and ANSI-C quoted (`$'…'`) otherwise, so no byte of it reaches the terminal raw. */
 export function shellWord(value: string): string {
-  if (/^[A-Za-z0-9._~:/=+-]+$/.test(value)) return value;
+  // A leading `~` or `=` is expanded by bash or zsh, so only a word that starts otherwise is bare.
+  if (/^[A-Za-z0-9._:/+-][A-Za-z0-9._~:/=+-]*$/.test(value)) return value;
   if (/^[\x20-\x7e]*$/.test(value)) return `'${value.replace(/'/g, "'\\''")}'`;
   let out = "";
   for (const ch of value) {

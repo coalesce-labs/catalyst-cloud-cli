@@ -859,9 +859,9 @@ export function verbHelp(verb: string): string {
   const names = Object.keys(table);
   if (names.length > 0) {
     lines.push("Options:");
-    for (const name of names)
+    for (const [name, spec] of Object.entries(table))
       lines.push(
-        `  --${name}${table[name]!.value ? ` <${table[name]!.placeholder ?? "value"}>` : ""}  ${table[name]!.help}`,
+        `  --${name}${spec.value ? ` <${spec.placeholder ?? "value"}>` : ""}  ${spec.help}`,
       );
     lines.push("");
   }
