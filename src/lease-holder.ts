@@ -175,12 +175,13 @@ function hostList(hosts: readonly string[]): string {
   return hosts.length <= 1 ? hosts.join("") : `${hosts.slice(0, -1).join(", ")} or ${hosts.at(-1)}`;
 }
 
-/** The session-link check against one kind's hosts. */
-export function checkSessionHost(label: string, kind: string, host: string): void {
+/** The session-link check against one kind's hosts. Only a take can still declare a kind, so only
+ *  a take's refusal suggests --holder-kind. */
+export function checkSessionHost(label: string, kind: string, host: string, take = false): void {
   const hosts = SESSION_HOSTS[kind] ?? [];
   if (hosts.includes(host)) return;
   if (hosts.length === 0) {
-    const hint = kind === "unspecified" ? "; declare the agent kind with --holder-kind" : "";
+    const hint = take && kind === "unspecified" ? "; declare the agent kind with --holder-kind" : "";
     throw new HolderDetailError(`${label}: kind ${kind} allows no session link yet (allowed hosts: none)${hint}`);
   }
   throw new HolderDetailError(`${label}: kind ${kind} allows session links on ${hostList(hosts)} only`);
@@ -241,7 +242,7 @@ export function resolveHolderDetails(
     if (host === null)
       throw new HolderDetailError(`${raw.sessionUrl.label} must be an https link of at most ${URL_MAX} characters with no user name, port, query or fragment`);
     // A take knows its kind (unspecified when none is declared); a renew's comes from the lease.
-    if (action === "take") checkSessionHost(raw.sessionUrl.label, details.kind ?? "unspecified", host);
+    if (action === "take") checkSessionHost(raw.sessionUrl.label, details.kind ?? "unspecified", host, true);
     details.sessionUrl = raw.sessionUrl.value;
     link = { label: raw.sessionUrl.label, host };
   }

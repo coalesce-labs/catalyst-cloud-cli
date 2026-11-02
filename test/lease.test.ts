@@ -562,6 +562,15 @@ describe("lease renew with holder details (CTC-8873)", () => {
     expect(requests).toEqual([]);
   });
 
+  test("a renew whose take declared no kind is refused without pointing at --holder-kind, which renew refuses", async () => {
+    seedContract("2.65.0");
+    mkdirSync(join(configDirFor(home), "leases"), { recursive: true });
+    writeFileSync(join(configDirFor(home), "leases", "CTC-6480--review-2.json"), JSON.stringify({ ticket: "CTC-6480", agent: "review-2", generation: 3, holder: null, kind: "unspecified" }));
+    expect(await main(["lease", "renew", "CTC-6480", "--pr", "1", "--link", "https://claude.ai/code/s_1"], ctx)).toBe(1);
+    expect(ctx.err.at(-1)).toBe("--link: kind unspecified allows no session link yet (allowed hosts: none)");
+    expect(requests).toEqual([]);
+  });
+
   test("with no stored kind, the lease is read once for it; a mismatched or absent kind refuses before the renew", async () => {
     seedContract("2.65.0");
     const args = ["lease", "renew", "CTC-6480", "--pr", "1", "--agent", "factory-droid", "--generation", "3"];
