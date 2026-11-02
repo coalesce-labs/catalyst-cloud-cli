@@ -113,10 +113,12 @@ describe("CTC-8674: an update adds the log setting to an older install", () => {
 describe("CTC-8674: a machine told only about service containers is shown the wider notice once", () => {
   const withLine = COMPOSE.replace(CLONE, `${CLONE}${LINE}`);
 
-  it("the notice names the work containers, the machine numbers, that nothing else is read, and the off setting", () => {
+  it("the notice names the work containers, the machine numbers, that nothing else is sent, and the off setting", () => {
     expect(NODE_LOG_NOTICE).toContain("including the ones tickets run in");
     expect(NODE_LOG_NOTICE).toContain("CPU, memory and free disk");
-    expect(NODE_LOG_NOTICE).toContain("Nothing else on this machine is read.");
+    expect(NODE_LOG_NOTICE).toContain("Nothing else on this machine is sent.");
+    // The supervisor lists every container on the machine to find its own, so it reads more than it sends.
+    expect(NODE_LOG_NOTICE).not.toContain("is read");
     expect(NODE_LOG_NOTICE).toContain("CATALYST_NODE_LOG_SHIPPING=off");
   });
 

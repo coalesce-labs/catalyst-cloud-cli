@@ -299,7 +299,7 @@ const NODE_LOG_SETTING = /^\s*CATALYST_NODE_LOG_SHIPPING\s*:/m;
 const NODE_LOG_LINE = "      CATALYST_NODE_LOG_SHIPPING: ${CATALYST_NODE_LOG_SHIPPING-on}\n";
 const NODE_LOG_LINE_FOLLOWS = /^ {6}CATALYST_GIT_CLONE_TIMEOUT_MS: \$\{CATALYST_GIT_CLONE_TIMEOUT_MS:-\}\n/m;
 export const NODE_LOG_NOTICE =
-  "The containers Catalyst runs on this machine, including the ones tickets run in, send their logs and this machine's CPU, memory and free disk to Catalyst, with secrets removed first. Nothing else on this machine is read. To stop it, set CATALYST_NODE_LOG_SHIPPING=off in this runner's .env and run docker compose up -d.";
+  "The containers Catalyst runs on this machine, including the ones tickets run in, send their logs and this machine's CPU, memory and free disk to Catalyst, with secrets removed first. Nothing else on this machine is sent. To stop it, set CATALYST_NODE_LOG_SHIPPING=off in this runner's .env and run docker compose up -d.";
 /** CTC-8674: which notice this machine has shown, so a wider one is shown once to a machine that saw
  *  an earlier, narrower one. Version 1 named only Catalyst's own service containers (0.16.44). */
 export const NODE_LOG_NOTICE_FILE = "node-log-notice";
