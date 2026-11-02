@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+`catalyst lease take` can now say who holds a lease. `--holder-kind` names the kind of agent (catalyst-seat, claude-code, codex, factory, devin, cursor or other), `--name` a display name, `--external-id` the session's id, `--link` a session link on a host that kind allows, and `--contact` a link on linear.app, github.com or app.slack.com. `CATALYST_LEASE_HOLDER_KIND`, `CATALYST_LEASE_LINK` and `CATALYST_LEASE_EXTERNAL_ID` stand in for their flags. `catalyst lease renew` takes `--name`, `--external-id`, `--link` and `--contact` beside its progress. Every member of the workspace can read these details, so the CLI refuses a value that looks like a credential before it sends anything, naming the flag and never the value. It also refuses a link on a host the kind does not allow, and holder details on a Catalyst Cloud too old to record them (it needs contract 2.65.0). A take or renew with none of these flags sends what it sent before.
+
+`catalyst lease show` now prints the holder's name and kind, the owner Catalyst recorded for the login that took the lease, and the session, external id and contact when they are set. The new `catalyst lease list --team <key>` lists one page of a team's leases, one line each, with `--state recent` for leases that ended in the last day, and prints the command for the next page.
+
+`--json` on every `catalyst lease` command now prints Catalyst's answer exactly as it came, refusals included. A refusal used to add a `status` field to that answer; it no longer does, and the exit code still says the command was refused.
+
 ## 0.16.44
 
 `catalyst runner update` now adds the log setting to a self-hosted machine that was set up before it existed. If the machine's `compose.yaml` has no `CATALYST_NODE_LOG_SHIPPING` line, the update adds the line a new setup writes and prints a notice saying so. With that line, which is on by default, Catalyst's own service containers on the machine send their logs to Catalyst, with secrets removed first, once Catalyst turns log collection on for your workspace. To keep it off, set `CATALYST_NODE_LOG_SHIPPING=off` in the runner's `.env` and run `docker compose up -d`; a value you set there always wins. An update that rolls back leaves `compose.yaml` as it was, and a file that already names the setting, or that the update does not recognise, is left alone.

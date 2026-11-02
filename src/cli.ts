@@ -253,7 +253,7 @@ export function usageText(): string {
     "  catalyst repo status [--json]   (visible workspace repositories and their paused state; needs login)",
     "  catalyst flow [--repo <owner/name>] [--period 2w] [--granularity hour|day] [--json]   (a repository's open pull requests over time; needs login)",
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
-    "  catalyst lease <take <ticket> --agent <seat> [--ttl <minutes>]|renew <ticket> --commit|--artifact|--finding|--pr <ref> [--note <text>]|release <ticket>|show <ticket>> [--json]   (a seat's ticket lease; needs login)",
+    "  catalyst lease <take <ticket> --agent <seat> [--ttl <minutes>] [--holder-kind <kind>] [--name <name>] [--external-id <id>] [--link <url>] [--contact <url>]|renew <ticket> --commit|--artifact|--finding|--pr <ref> [--note <text>] [--name|--external-id|--link|--contact <value>]|release <ticket>|show <ticket>|list --team <key>> [--json]   (a seat's ticket lease; needs login)",
     "  catalyst work available [--team K] [--json]   (tickets nobody holds and open pull requests no lease covers)",
     "  catalyst codex-env --print [--codex-home <dir>] | --apply | --refresh   (the telemetry attributes naming the AI account and computer a Codex launch runs as)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
