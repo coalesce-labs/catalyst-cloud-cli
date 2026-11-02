@@ -167,7 +167,7 @@ describe("resolving holder details", () => {
     expect(CONTACT_HOSTS).toEqual(["linear.app", "github.com", "app.slack.com"]);
     for (const contact of ["https://linear.app/x/issue/CTC-1", "https://github.com/o/r/issues/1", "https://app.slack.com/client/T/C"])
       expect(resolve(["--contact", contact])!.details).toEqual({ contact });
-    for (const email of ["ryan@example.com", "mailto:ryan@example.com"])
+    for (const email of ["sam@example.com", "mailto:sam@example.com"])
       expect(refusal(["--contact", email])).toBe("--contact must be a link, not an email: an https link on linear.app, github.com or app.slack.com");
     for (const bad of ["http://github.com/x", "https://gist.github.com/x", "https://github.com:443/x", "+1 555 0100", "https://github.com/x?a=1"])
       expect(refusal(["--contact", bad]), bad).toBe("--contact must be an https link on linear.app, github.com or app.slack.com, with no user name, port, query or fragment");
@@ -228,7 +228,7 @@ describe("labels from what a cloud returns", () => {
     expect(ownerLabel({ type: "organization-key", keyId: "key_1", keyName: null })).toBe("organization key key_1");
     expect(ownerLabel({ type: "organization-key" })).toBeNull();
     expect(ownerLabel({ type: "person", userId: "u", name: "Sam Example" })).toBe("person Sam Example");
-    expect(ownerLabel({ type: "person", userId: "u", name: null, email: "tony@example.com" })).toBe("person (a member of this workspace)");
+    expect(ownerLabel({ type: "person", userId: "u", name: null, email: "sam@example.com" })).toBe("person (a member of this workspace)");
     expect(ownerLabel({ type: "robot" })).toBeNull();
     expect(ownerLabel("organization key")).toBeNull();
   });
