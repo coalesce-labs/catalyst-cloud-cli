@@ -571,6 +571,17 @@ describe("lease renew with holder details (CTC-8873)", () => {
     expect(requests).toEqual([]);
   });
 
+  test("a kind the cloud returned reaches a link refusal with its terminal controls removed", async () => {
+    seedContract("2.65.0");
+    const kind = "\u001b]0;owned\u0007evil‮";
+    respond = (r) => r.method === "GET"
+      ? json({ ticket: "CTC-6480", lease: { ...factoryLease({ holderDetails: factoryDetails({ kind }) }), live: true } })
+      : json({ outcome: "renewed", lease: factoryLease() });
+    expect(await main(["lease", "renew", "CTC-6480", "--pr", "1", "--agent", "factory-droid", "--generation", "3", "--link", "https://claude.ai/code/s_1"], ctx)).toBe(1);
+    expect(ctx.err.at(-1)).toBe("--link: kind ]0;ownedevil allows no session link yet (allowed hosts: none)");
+    expect(requests.map((r) => r.method)).toEqual(["GET"]);
+  });
+
   test("with no stored kind, the lease is read once for it; a mismatched or absent kind refuses before the renew", async () => {
     seedContract("2.65.0");
     const args = ["lease", "renew", "CTC-6480", "--pr", "1", "--agent", "factory-droid", "--generation", "3"];

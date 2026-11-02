@@ -182,9 +182,10 @@ export function checkSessionHost(label: string, kind: string, host: string, take
   if (hosts.includes(host)) return;
   if (hosts.length === 0) {
     const hint = take && kind === "unspecified" ? "; declare the agent kind with --holder-kind" : "";
-    throw new HolderDetailError(`${label}: kind ${kind} allows no session link yet (allowed hosts: none)${hint}`);
+    // A renew's kind came from the cloud, so it is printed the way every server string is.
+    throw new HolderDetailError(`${label}: kind ${sanitize(kind)} allows no session link yet (allowed hosts: none)${hint}`);
   }
-  throw new HolderDetailError(`${label}: kind ${kind} allows session links on ${hostList(hosts)} only`);
+  throw new HolderDetailError(`${label}: kind ${sanitize(kind)} allows session links on ${hostList(hosts)} only`);
 }
 
 /** The holder details a take or renew declares, checked, or null when it declares none.
