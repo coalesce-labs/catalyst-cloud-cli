@@ -349,7 +349,19 @@ async function checkRenewLink(
   checkSessionHost(link.label, kind, link.host);
 }
 
+/** `lease`: a holder detail refused here prints its one line to stderr and exits 1, with no usage
+ *  text, because the command was well formed and only a value was refused. */
 export async function cmdLease(args: ParsedArgs, ctx: Ctx): Promise<number> {
+  try {
+    return await runLease(args, ctx);
+  } catch (err) {
+    if (!(err instanceof HolderDetailError)) throw err;
+    ctx.stderr(err.message);
+    return 1;
+  }
+}
+
+async function runLease(args: ParsedArgs, ctx: Ctx): Promise<number> {
   const [action, rawTicket, ...extra] = positionals(args);
   if (action === "list") return listLeases(args, ctx, positionals(args).slice(1));
   if (action !== "take" && action !== "renew" && action !== "release" && action !== "show")

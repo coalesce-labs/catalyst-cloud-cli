@@ -390,7 +390,7 @@ describe("lease take with holder details (CTC-8873)", () => {
   test("scenario: a cloud on contract 2.64 refuses holder details before any take is sent", async () => {
     seedContract("2.64.0");
     expect(await main(["lease", "take", "CTC-6480", "--agent", "x", "--holder-kind", "factory"], ctx)).toBe(1);
-    expect(ctx.err).toEqual(["catalyst: this cloud does not record holder details yet (needs contract 2.65.0)"]);
+    expect(ctx.err).toEqual(["this cloud does not record holder details yet (needs contract 2.65.0)"]);
     expect(requests).toEqual([]);
   });
 
@@ -416,9 +416,9 @@ describe("lease take with holder details (CTC-8873)", () => {
 
   test("scenario: a link off the kind's allowlist is refused naming the allowed hosts, with no request at all", async () => {
     expect(await main(["lease", "take", "CTC-6480", "--agent", "x", "--holder-kind", "claude-code", "--link", "https://example.com/s/1"], ctx)).toBe(1);
-    expect(ctx.err[0]).toBe("catalyst: --link: kind claude-code allows session links on claude.ai only");
+    expect(ctx.err[0]).toBe("--link: kind claude-code allows session links on claude.ai only");
     expect(await main(["lease", "take", "CTC-6480", "--agent", "x", "--holder-kind", "factory", "--link", "https://app.factory.ai/s/1"], ctx)).toBe(1);
-    expect(ctx.err.at(-1)).toBe("catalyst: --link: kind factory allows no session link yet (allowed hosts: none)");
+    expect(ctx.err.at(-1)).toBe("--link: kind factory allows no session link yet (allowed hosts: none)");
     expect(await main(["lease", "take", "CTC-6480", "--agent", "x", "--link", "https://claude.ai/s/1"], ctx)).toBe(1);
     expect(ctx.err.at(-1)).toContain("kind unspecified allows no session link yet (allowed hosts: none); declare the agent kind with --holder-kind");
     expect(requests).toEqual([]);
@@ -446,7 +446,7 @@ describe("lease take with holder details (CTC-8873)", () => {
     ];
     for (const [flags, flag] of cases) {
       expect(await main(["lease", "take", "CTC-6480", "--agent", "x", ...flags], ctx)).toBe(1);
-      expect(ctx.err.at(-1)).toMatch(new RegExp(`^catalyst: ${flag} looks like a (GitHub token|secret assignment)\\. Holder details are visible to every member of the workspace`));
+      expect(ctx.err.at(-1)).toMatch(new RegExp(`^${flag} looks like a (GitHub token|secret assignment)\\. Holder details are visible to every member of the workspace`));
     }
     ctx.env.CATALYST_LEASE_EXTERNAL_ID = ghToken;
     expect(await main(["lease", "take", "CTC-6480", "--agent", "x"], ctx)).toBe(1);
@@ -486,7 +486,7 @@ describe("lease take with holder details (CTC-8873)", () => {
     expect(await main(["lease", "take", "ENG-123", "--agent", "agent-a"], ctx)).toBe(0);
     expect(requests.at(-1)!.body).toEqual({ ticket: "ENG-123", agent: "agent-a" });
     expect(await main(["lease", "take", "ENG-123", "--agent", "agent-a", "--name=  "], ctx)).toBe(1);
-    expect(ctx.err.at(-1)).toBe("catalyst: --name needs a value; leave the flag out to send none");
+    expect(ctx.err.at(-1)).toBe("--name needs a value; leave the flag out to send none");
     expect(requests.length).toBe(sent + 1);
   });
 
@@ -542,7 +542,7 @@ describe("lease renew with holder details (CTC-8873)", () => {
     await takeFactory();
     ctx.env.CATALYST_LEASE_HOLDER_KIND = "claude-code";
     expect(await main(["lease", "renew", "CTC-6480", "--pr", "1", "--link", "https://claude.ai/code/s_1"], ctx)).toBe(1);
-    expect(ctx.err.at(-1)).toBe("catalyst: --link: kind factory allows no session link yet (allowed hosts: none)");
+    expect(ctx.err.at(-1)).toBe("--link: kind factory allows no session link yet (allowed hosts: none)");
     expect(requests).toEqual([]);
     respond = () => json({ outcome: "renewed", lease: lease({ holderDetails: { kind: "catalyst-seat", displayName: "seat" } }) });
     writeFileSync(join(configDirFor(home), "leases", "CTC-6480--factory-droid.json"), JSON.stringify({ ticket: "CTC-6480", agent: "factory-droid", generation: 3, holder: null, kind: "catalyst-seat" }));
@@ -559,7 +559,7 @@ describe("lease renew with holder details (CTC-8873)", () => {
     const read = (over: Body) => json({ ticket: "CTC-6480", lease: { ...factoryLease({ holderDetails: factoryDetails({ kind: "claude-code" }) }), live: true, ...over } });
     respond = (r) => r.method === "GET" ? read({}) : json({ outcome: "renewed", lease: factoryLease() });
     expect(await main([...args, "--link", "https://example.com/s/1"], ctx)).toBe(1);
-    expect(ctx.err.at(-1)).toBe("catalyst: --link: kind claude-code allows session links on claude.ai only");
+    expect(ctx.err.at(-1)).toBe("--link: kind claude-code allows session links on claude.ai only");
     expect(requests.map((r) => r.method)).toEqual(["GET"]);
     expect(requests[0]!.path).toBe("/api/v1/agent/ticket-lease?ticket=CTC-6480");
     expect(await main([...args, "--link", "https://claude.ai/code/s_1"], ctx)).toBe(0);
@@ -568,7 +568,7 @@ describe("lease renew with holder details (CTC-8873)", () => {
       respond = (r) => r.method === "GET" ? read(over) : json({ outcome: "renewed", lease: factoryLease() });
       requests = [];
       expect(await main([...args, "--link", "https://claude.ai/code/s_1"], ctx)).toBe(1);
-      expect(ctx.err.at(-1)).toBe("catalyst: --link needs the current holder kind; take this lease with this CLI before setting its session link");
+      expect(ctx.err.at(-1)).toBe("--link needs the current holder kind; take this lease with this CLI before setting its session link");
       expect(requests.map((r) => r.method)).toEqual(["GET"]);
     }
   });
