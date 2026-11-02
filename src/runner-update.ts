@@ -306,13 +306,22 @@ export const NODE_LOG_NOTICE_FILE = "node-log-notice";
 export const NODE_LOG_NOTICE_VERSION = "2";
 const NODE_LOG_ENV_VALUE = /^CATALYST_NODE_LOG_SHIPPING=(.*)$/m;
 
+/** A `.env` value as Compose reads it: a trailing carriage return, surrounding spaces and one pair of
+ *  surrounding quotes removed, so `"on"` and a CRLF line read as the `on` the runner sends on. */
+function composeEnvValue(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const value = raw.replace(/\r$/, "").trim();
+  const quoted = /^(["'])(.*)\1$/.exec(value);
+  return quoted ? quoted[2] : value;
+}
+
 /** True when this machine sends its logs and has not yet been shown the current notice: its Compose
  *  file names the setting, `.env` leaves it unset (the file's default is on) or sets exactly `on`, and
  *  the record of the last notice shown is older. Anything unreadable owes nothing. */
 export function nodeLogNoticeOwed(dir: string, envText: string): boolean {
   try {
     if (!NODE_LOG_SETTING.test(readFileSync(join(dir, "compose.yaml"), "utf8"))) return false;
-    const value = NODE_LOG_ENV_VALUE.exec(envText)?.[1];
+    const value = composeEnvValue(NODE_LOG_ENV_VALUE.exec(envText)?.[1]);
     if (value !== undefined && value !== "on") return false;
     const shown = existsSync(join(dir, NODE_LOG_NOTICE_FILE))
       ? readFileSync(join(dir, NODE_LOG_NOTICE_FILE), "utf8").trim()

@@ -153,6 +153,20 @@ describe("CTC-8674: a machine told only about service containers is shown the wi
     expect(result.notices).toBeUndefined();
   });
 
+  it.each(['"on"', "'on'", "on\r", " on "])("an on that Compose reads from %j still owes it", (value) => {
+    const env = `${ORIGINAL_ENV}CATALYST_NODE_LOG_SHIPPING=${value}\n`;
+    const dir = install(env);
+    writeFileSync(join(dir, "compose.yaml"), withLine);
+    expect(nodeLogNoticeOwed(dir, env)).toBe(true);
+  });
+
+  it.each(['"off"', "off\r", "'on"])("a value Compose does not read as on, %j, owes nothing", (value) => {
+    const env = `${ORIGINAL_ENV}CATALYST_NODE_LOG_SHIPPING=${value}\n`;
+    const dir = install(env);
+    writeFileSync(join(dir, "compose.yaml"), withLine);
+    expect(nodeLogNoticeOwed(dir, env)).toBe(false);
+  });
+
   it("an explicit on still owes it", () => {
     const env = `${ORIGINAL_ENV}CATALYST_NODE_LOG_SHIPPING=on\n`;
     const dir = install(env);
