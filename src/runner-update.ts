@@ -298,6 +298,9 @@ export function writeReleaseState(dir: string, state: ReleaseState): void {
 const NODE_LOG_SETTING = /^\s*CATALYST_NODE_LOG_SHIPPING\s*:/m;
 const NODE_LOG_LINE = "      CATALYST_NODE_LOG_SHIPPING: ${CATALYST_NODE_LOG_SHIPPING-on}\n";
 const NODE_LOG_LINE_FOLLOWS = /^ {6}CATALYST_GIT_CLONE_TIMEOUT_MS: \$\{CATALYST_GIT_CLONE_TIMEOUT_MS:-\}\n/m;
+/** CTC-9243: a Compose file older than the clone timeout (before 2026-10-07) has no line above, but
+ *  every revision passes the mirror URL to the supervisor, once, and only there. */
+const NODE_LOG_LINE_FALLBACK = /^ {6}CATALYST_MIRROR_URL: [^\n]*\n/m;
 export const NODE_LOG_NOTICE =
   "The containers Catalyst runs on this machine, including the ones tickets run in, send their logs and this machine's CPU, memory and free disk to Catalyst, with secrets removed first. Nothing else on this machine is sent. To stop it, set CATALYST_NODE_LOG_SHIPPING=off in this runner's .env and run docker compose up -d.";
 /** CTC-8674: which notice this machine has shown, so a wider one is shown once to a machine that saw
@@ -348,7 +351,7 @@ function nodeLogNoticeShown(dir: string): string[] {
  *  recognise. `.env` is never touched here, so a value the owner set there always wins. */
 export function withNodeLogSetting(composeText: string): string | null {
   if (NODE_LOG_SETTING.test(composeText)) return null;
-  const follows = NODE_LOG_LINE_FOLLOWS.exec(composeText);
+  const follows = NODE_LOG_LINE_FOLLOWS.exec(composeText) ?? NODE_LOG_LINE_FALLBACK.exec(composeText);
   if (follows === null) return null;
   const at = follows.index + follows[0].length;
   return `${composeText.slice(0, at)}${NODE_LOG_LINE}${composeText.slice(at)}`;
