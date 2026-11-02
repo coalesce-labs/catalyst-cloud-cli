@@ -299,7 +299,39 @@ const NODE_LOG_SETTING = /^\s*CATALYST_NODE_LOG_SHIPPING\s*:/m;
 const NODE_LOG_LINE = "      CATALYST_NODE_LOG_SHIPPING: ${CATALYST_NODE_LOG_SHIPPING-on}\n";
 const NODE_LOG_LINE_FOLLOWS = /^ {6}CATALYST_GIT_CLONE_TIMEOUT_MS: \$\{CATALYST_GIT_CLONE_TIMEOUT_MS:-\}\n/m;
 export const NODE_LOG_NOTICE =
-  "Catalyst's own service containers on this machine now send their logs to Catalyst, with secrets removed first. To stop it, set CATALYST_NODE_LOG_SHIPPING=off in this runner's .env and run docker compose up -d.";
+  "The containers Catalyst runs on this machine, including the ones tickets run in, send their logs and this machine's CPU, memory and free disk to Catalyst, with secrets removed first. Nothing else on this machine is read. To stop it, set CATALYST_NODE_LOG_SHIPPING=off in this runner's .env and run docker compose up -d.";
+/** CTC-8674: which notice this machine has shown, so a wider one is shown once to a machine that saw
+ *  an earlier, narrower one. Version 1 named only Catalyst's own service containers (0.16.44). */
+export const NODE_LOG_NOTICE_FILE = "node-log-notice";
+export const NODE_LOG_NOTICE_VERSION = "2";
+const NODE_LOG_ENV_VALUE = /^CATALYST_NODE_LOG_SHIPPING=(.*)$/m;
+
+/** True when this machine sends its logs and has not yet been shown the current notice: its Compose
+ *  file names the setting, `.env` leaves it unset (the file's default is on) or sets exactly `on`, and
+ *  the record of the last notice shown is older. Anything unreadable owes nothing. */
+export function nodeLogNoticeOwed(dir: string, envText: string): boolean {
+  try {
+    if (!NODE_LOG_SETTING.test(readFileSync(join(dir, "compose.yaml"), "utf8"))) return false;
+    const value = NODE_LOG_ENV_VALUE.exec(envText)?.[1];
+    if (value !== undefined && value !== "on") return false;
+    const shown = existsSync(join(dir, NODE_LOG_NOTICE_FILE))
+      ? readFileSync(join(dir, NODE_LOG_NOTICE_FILE), "utf8").trim()
+      : "";
+    return shown !== NODE_LOG_NOTICE_VERSION;
+  } catch {
+    return false;
+  }
+}
+
+/** The notice, recorded as shown. A record that cannot be written shows it again next time. */
+function nodeLogNoticeShown(dir: string): string[] {
+  try {
+    writePrivateAtomic(join(dir, NODE_LOG_NOTICE_FILE), `${NODE_LOG_NOTICE_VERSION}\n`);
+  } catch {
+    // Showing the notice twice is better than not at all.
+  }
+  return [NODE_LOG_NOTICE];
+}
 
 /** CTC-8674: an update replaces image references and nothing else, so a machine set up earlier has no
  *  log setting in its Compose file and ships nothing. This adds the one line, exactly as setup writes
@@ -950,16 +982,16 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
       .filter((ref) => ref !== "" && !RELEASE_COMPONENTS.some((c) => target[c] === ref));
     const unremoved = replaced.length > 0 ? await engine.removeImages(replaced, signal) : [];
     const applied = changed.length > 0 ? `updated:${changed.join(",")}` : "reconciled";
-    if (composeBefore !== null) notices.push(NODE_LOG_NOTICE);
+    if (composeBefore !== null || nodeLogNoticeOwed(dir, envText)) notices.push(...nodeLogNoticeShown(dir));
     return record("updated", inPlace ? `${applied}:in_place` : applied, proven ?? (changed.length > 0 ? current : state.previous), unremoved);
   }
 
   // CTC-8745: not recorded as applied, and the previous images stay, until it comes up ready.
   // The new supervisor is up with the line, so a release kept waiting keeps it and says so.
   if (!waitOver && (await inPreparationStop(engine, dir, target, signal)))
-    return composeBefore === null ? keepWaiting() : { ...keepWaiting(), notices: [NODE_LOG_NOTICE] };
+    return composeBefore === null ? keepWaiting() : { ...keepWaiting(), notices: nodeLogNoticeShown(dir) };
   if (rollbackText === null || rollbackImages === null)
-    return done("failed", "new_supervisor_not_ready_no_previous", { ...tagged, exitCode: 1, ...(composeBefore === null ? {} : { notices: [NODE_LOG_NOTICE] }) });
+    return done("failed", "new_supervisor_not_ready_no_previous", { ...tagged, exitCode: 1, ...(composeBefore === null ? {} : { notices: nodeLogNoticeShown(dir) }) });
   writePrivateAtomic(envPath, rollbackText);
   const settingStays = undoSetting();
   const custodyRefused = await restoreCustody(rollbackImages);
@@ -970,7 +1002,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   writeReleaseState(dir, { ...state, kept: null });
   return done(restored && custodyRefused === null ? "rolled_back" : "failed",
     !restored ? "rollback_not_ready" : custodyRefused === null ? "new_supervisor_not_ready" : `custody_restore_failed:${custodyRefused}`,
-    { ...tagged, exitCode: 1, ...(settingStays ? { notices: [NODE_LOG_NOTICE] } : {}) });
+    { ...tagged, exitCode: 1, ...(settingStays ? { notices: nodeLogNoticeShown(dir) } : {}) });
 }
 
 /** CTC-8745: puts back the proven release a kept one replaced, with no release read. The phase
