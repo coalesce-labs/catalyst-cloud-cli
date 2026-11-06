@@ -900,10 +900,10 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   // one restart and the normal deadline, and then goes back, whatever the stop says. A run no schedule
   // follows has nothing to end a wait, so it goes back at the normal deadline.
   const waitOver = options.scheduled !== true || (state.kept?.generation === release.generation && now() - state.kept.sinceMs >= PREPARATION_STOP_WAIT_MS);
-  const keepWaiting = () => {
+  const keepWaiting = (extra: Partial<UpdateResult> = {}) => {
     if (state.kept?.generation !== release.generation)
       writeReleaseState(dir, { ...state, kept: { generation: release.generation, sinceMs: now() } });
-    return done("retained", WAITING_PREPARATION_STOP, tagged);
+    return done("retained", WAITING_PREPARATION_STOP, { ...tagged, ...extra });
   };
   // Starting a kept release again inside its wait would change nothing.
   if (changed.length === 0 && !waitOver && (await inPreparationStop(engine, dir, target, signal))) return keepWaiting();
@@ -1021,7 +1021,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   // CTC-8745: not recorded as applied, and the previous images stay, until it comes up ready.
   // The new supervisor is up with the line, so a release kept waiting keeps it and says so.
   if (!waitOver && (await inPreparationStop(engine, dir, target, signal)))
-    return composeBefore === null ? keepWaiting() : { ...keepWaiting(), notices: nodeLogNoticeShown(dir) };
+    return keepWaiting(composeBefore === null ? {} : { notices: nodeLogNoticeShown(dir) });
   if (rollbackText === null || rollbackImages === null)
     return done("failed", "new_supervisor_not_ready_no_previous", { ...tagged, exitCode: 1, ...(composeBefore === null ? {} : { notices: nodeLogNoticeShown(dir) }) });
   writePrivateAtomic(envPath, rollbackText);
@@ -1373,7 +1373,7 @@ export const CUSTODY_UNATTESTED_LINE = "Private thoughts storage on this Mac is 
 
 export function updateResultLines(result: UpdateResult): string[] {
   return [
-    result.detail === WAITING_PREPARATION_STOP
+    result.detail.split(",")[0] === WAITING_PREPARATION_STOP
       ? "The new release is running. This machine stopped asking for phases after their preparation kept failing, so the update finishes once it asks again, or goes back to the previous release after 45 minutes."
       : OUTCOME_TEXT[result.outcome],
     `Release: ${result.releaseId ?? "none"}, generation ${result.generation ?? "none"} (${result.detail}).`,

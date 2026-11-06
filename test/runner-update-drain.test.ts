@@ -652,6 +652,18 @@ describe("CTC-9745: an update that re-pins a Docker CLI says so", () => {
     const report = JSON.parse(updateReport(readReleaseState(dir), "0.1.0")!) as { detail: string };
     expect(report.detail).toContain("docker_cli_repinned:a1a1a1a1a1a1:b2b2b2b2b2b2:9bnsxjn65r");
   });
+  it("keeps the re-pin line and the waiting line when the new release waits out a preparation stop", async () => {
+    const { dir, authority } = custodyMachine();
+    const time = clock(A);
+    const fake = fakeEngine(dir, { read: offered(), ready: () => false, preparationStop: () => true, custody: () => ({ authority, dockerRepin: repin }) });
+    const result = await runRunnerUpdate(fake.engine, { dir, scheduled: true, now: time.now, sleep: time.sleep, readyDeadlineMs: 20_000 });
+    expect(result.outcome).toBe("retained");
+    expect(result.detail).toBe("waiting_preparation_stop,docker_cli_repinned:a1a1a1a1a1a1:b2b2b2b2b2b2:9bnsxjn65r");
+    expect(result.notices).toContain(dockerRepinLine(repin));
+    const lines = updateResultLines(result);
+    expect(lines[0]).toContain("goes back to the previous release after 45 minutes");
+    expect(lines.join("\n")).toContain(repin.newSha256);
+  });
   it("says nothing about a re-pin when the Docker CLI did not change", async () => {
     const { dir, authority } = custodyMachine();
     const time = clock(A);
