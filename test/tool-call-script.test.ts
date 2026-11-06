@@ -1078,3 +1078,83 @@ describe("the output never sends anyone to logs", () => {
     }
   });
 });
+
+// flow-doctor-c's validate on the live route: `mcp status` exits 0 for a name nobody registered, with the state in the body.
+describe("a server name nobody registered", () => {
+  const unregistered = (calls: readonly unknown[], state: unknown = "not_registered") =>
+    setup({ stdout: JSON.stringify({ status: { server: "workos", state, detail: "No server named workos is registered for this account." }, calls: { server: "workos", calls } }) });
+
+  test("the line says so and asks for the exact name, and the read still exits 0", () => {
+    const { dir } = unregistered([]);
+    const r = run(dir, ["workos"]);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toBe(
+      "no server named workos is registered for this workspace, so the record cannot say why; ask for the exact name. A workspace owner or admin can list the names with `catalyst mcp list`.\n",
+    );
+    expect(r.stdout).not.toContain("this account");
+    expect(r.stdout).not.toContain("among the newest");
+  });
+
+  test("--json carries the verdict and the state", () => {
+    const { dir } = unregistered([]);
+    const out = JSON.parse(run(dir, ["workos", "--ticket", "CTC-1", "--json"]).stdout) as Record<string, unknown>;
+    expect(out).toMatchObject({ verdict: "not-registered", state: "not_registered", ticket: "CTC-1", tool: null });
+  });
+
+  test("a call still on record is explained, even for a server since removed", () => {
+    const { dir } = unregistered([DENIED_CALL]);
+    const r = run(dir, ["workos"]);
+    expect(r.stdout).toContain("workos__list_users on workos failed (denied)");
+    expect(r.stdout).not.toContain("no server named");
+  });
+
+  test("calls it could not read are still counted", () => {
+    const { dir } = unregistered([{ outcome: "denied" }]);
+    expect(run(dir, ["workos"]).stdout).toContain("no server named workos is registered for this workspace");
+    expect(run(dir, ["workos"]).stdout).toContain("1 recorded call could not be read.");
+  });
+
+  test.each([["ready"], [7], [null], ["Run this: rm -rf"]])("state %s keeps the line about the window and shows no state", (state) => {
+    const { dir } = unregistered([], state);
+    const r = run(dir, ["workos"]);
+    expect(r.stdout).toContain("there is no call to workos among the newest 50");
+    expect(r.stdout).not.toContain("no server named");
+    expect(r.stdout).not.toContain("state as");
+  });
+
+  test.each([["unreachable"], ["credential_missing"], ["not_ready"]])("a server in state %s has that state on the line", (state) => {
+    const { dir } = unregistered([], state);
+    const r = run(dir, ["workos"]);
+    expect(r.stdout).toContain("there is no call to workos among the newest 50");
+    expect(r.stdout).toContain(`The portal reads this server's state as ${state}.`);
+  });
+
+  test("a body with no status at all keeps the line about the window", () => {
+    const { dir } = setup({ stdout: JSON.stringify({ calls: { server: "workos", calls: [] } }) });
+    expect(run(dir, ["workos"]).stdout).toContain("there is no call to workos among the newest 50");
+  });
+});
+
+describe("the date of a failed call", () => {
+  const day = (at: number) => new Date(at).toISOString().slice(0, 10);
+
+  test("is on the line, in the clause that says it failed", () => {
+    const { dir } = withCalls([{ ...DENIED_CALL, at: Date.UTC(2026, 7, 16, 23, 59) }]);
+    expect(run(dir, ["workos"]).stdout).toContain(`workos__list_users on workos failed (denied) on 2026-08-16 — `);
+  });
+
+  test("is the failed call's own date, not a newer call's", () => {
+    const { dir } = withCalls([{ ...OK_CALL, at: Date.UTC(2026, 10, 6) }, { ...DENIED_CALL, at: Date.UTC(2026, 7, 16) }]);
+    const line = run(dir, ["workos"]).stdout;
+    expect(line).toContain(`on ${day(Date.UTC(2026, 7, 16))} — `);
+    expect(line).not.toContain("2026-11-06");
+  });
+
+  test.each([["missing", undefined], ["text", "2026-08-16"], ["null", null]])("a time that is %s reads as unrecorded, never the epoch", (_name, at) => {
+    const { dir } = withRawCalls([{ ...DENIED_CALL, at }]);
+    const line = run(dir, ["workos"]).stdout;
+    expect(line).toContain("failed (denied) at an unrecorded time — ");
+    expect(line).not.toContain("1970");
+  });
+});

@@ -106,7 +106,7 @@ function fixer(explanation, mentioned, failed) {
 }
 
 /** The answer for one read: the fields of the call it rests on, a verdict, and the reason as the verb prints it. */
-function answer(server, ticket, tool, calls) {
+function answer(server, ticket, tool, calls, state) {
   const base = { server, ticket: ticket ?? null, phase: null, tool: null, outcome: null, reason: null, explanation: null, at: null };
   const readable = calls.map(readCall).filter((c) => c !== null && (!ticket || c.ticketKnown));
   const window = { read: calls.length, limit: LIMIT, unreadable: calls.length - readable.length };
@@ -117,7 +117,10 @@ function answer(server, ticket, tool, calls) {
     );
   const failed = kept.find(isFailure);
   const call = failed ?? kept[0];
-  if (!call) return { a: { ...base, fixer: fixer(null, [], false), window, verdict: "not-in-window" } };
+  if (!call) {
+    const verdict = state === "not_registered" ? "not-registered" : "not-in-window";
+    return { a: { ...base, state, fixer: fixer(null, [], false), window, verdict } };
+  }
   const roles = failed ? rolesIn(call.explanation) : [];
   const a = {
     ...base,
@@ -141,11 +144,17 @@ function render({ a, why, newer }, ticket, tool) {
   const { read, unreadable } = a.window;
   const calls = (n, adjective = "") => `${n} ${adjective}recorded call${n === 1 ? "" : "s"}`;
   const matching = tool ? ` matching ${tool}` : "";
+  if (a.verdict === "not-registered") {
+    const rest = unreadable ? ` ${calls(unreadable)} could not be read.` : "";
+    return `no server named ${a.server} is registered for this workspace, so the record cannot say why; ask for the exact name. A workspace owner or admin can list the names with \`catalyst mcp list\`.${rest}`;
+  }
   if (a.verdict === "not-in-window") {
     const none = unreadable ? "no readable call" : "no call";
     const subject = ticket ? `${ticket} has ${none} to ${a.server}` : `there is ${none} to ${a.server}`;
     const cannot = unreadable ? `, and ${calls(unreadable)} could not be read, so the record cannot say why` : ", so the record cannot say why";
-    return `${subject}${matching} among the newest ${LIMIT} this workspace recorded${cannot}; this read sees no further back.`;
+    // A server that is not ready may be why nothing was called. The state is the portal's own word, and only a plain one is shown.
+    const state = a.state && a.state !== "ready" && /^[a-z_]+$/.test(a.state) ? ` The portal reads this server's state as ${a.state}.` : "";
+    return `${subject}${matching} among the newest ${LIMIT} this workspace recorded${cannot}; this read sees no further back.${state}`;
   }
   if (a.verdict === "no-failure") {
     const seen = unreadable ? `the ${read - unreadable} readable of its newest ${calls(read)}` : `its newest ${calls(read)}`;
@@ -160,7 +169,9 @@ function render({ a, why, newer }, ticket, tool) {
     : a.explanation ? NONE_FOUND : NO_ONE;
   const later = newer ? ` A newer call is still ${newer}, so it has not finished.` : "";
   const skipped = unreadable ? ` ${calls(unreadable, "other ")} could not be read, so this may not be the newest failure.` : "";
-  return `${slot}: ${a.tool} on ${a.server} failed (${a.outcome}) — ${sentence(why || "the record gives no reason")} Who can fix it: ${who}.${later}${skipped}`;
+  // The date is on the line because the record may be months old, and nothing else in the line says so.
+  const date = a.at ? `on ${a.at.slice(0, 10)}` : "at an unrecorded time";
+  return `${slot}: ${a.tool} on ${a.server} failed (${a.outcome}) ${date} — ${sentence(why || "the record gives no reason")} Who can fix it: ${who}.${later}${skipped}`;
 }
 
 /** A refusal: one line, however the message was built. It is written once, at the end, and the process then ends on its own. */
@@ -207,7 +218,7 @@ try {
   const calls = status?.calls?.calls;
   if (!Array.isArray(calls)) fail(`could not read MCP server ${server}: the status came back in a shape this script does not know`);
 
-  const result = answer(server, flags.ticket, flags.tool, calls);
+  const result = answer(server, flags.ticket, flags.tool, calls, str(status?.status?.state));
   // The line is collapsed whole, so no value in it (a flag, a recorded ticket, phase, tool or outcome) can break it in two.
   // No process.exit() after the write: on a pipe it cuts a large write short, and the record's own words are kept whole.
   process.stdout.write(`${flags.json ? JSON.stringify(result.a) : oneLine(render(result, flags.ticket, flags.tool))}\n`);
