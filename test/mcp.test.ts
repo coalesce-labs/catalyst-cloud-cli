@@ -11,7 +11,7 @@ afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: 
 const input = { name: "linear", url: "https://mcp.linear.app/mcp", auth: { kind: "bearer", secretName: "LINEAR_API_KEY" } };
 const server = { id: "srv-1", ...input, status: "pending" };
 
-function setup(body: unknown = { outcome: "registered", server }, status = 201, withRoutes = true) {
+function setup(body: unknown = { outcome: "registered", server }, status = 201, withRoutes = true, extraRoutes: readonly unknown[] = []) {
   const home = tempHome();
   homes.push(home);
   const calls: { method: string; url: string; body: unknown; headers: Headers }[] = [];
@@ -20,6 +20,7 @@ function setup(body: unknown = { outcome: "registered", server }, status = 201, 
     { method: "GET", path: "/api/v1/agent/portal-servers", takesWriteBudgetUnit: false, since: "1.18.0" },
     { method: "POST", path: "/api/v1/agent/portal-servers/register", takesWriteBudgetUnit: false, since: "1.18.0" },
     { method: "POST", path: "/api/v1/agent/portal-servers/remove", takesWriteBudgetUnit: false, since: "1.18.0" },
+    ...(extraRoutes as typeof doc.routes),
   ];
   const ctx = makeCtx(home, { fetch: async (target, init) => {
     const url = String(target);
@@ -32,6 +33,18 @@ function setup(body: unknown = { outcome: "registered", server }, status = 201, 
 }
 
 describe("catalyst-skills mcp", () => {
+  // CTC-9961: the cloud has listed this row since contract 2.28.0, and the SDK refused the whole document for it.
+  it.each([
+    ["list", ["mcp", "list"], { outcome: "ok", servers: [server] }, 200, "/api/v1/agent/portal-servers"],
+    ["add", ["mcp", "add", "linear", "--url", input.url, "--bearer", "LINEAR_API_KEY"], { outcome: "registered", server }, 201, "/api/v1/agent/portal-servers/register"],
+    ["remove", ["mcp", "remove", "linear"], { outcome: "removed", removed: true }, 200, "/api/v1/agent/portal-servers/remove"],
+  ])("%s works when the contract lists a route with an HTTP method the SDK has not seen", async (_verb, argv, body, status, path) => {
+    const { ctx, calls } = setup(body, status, true, [{ method: "DELETE", path: "/api/v1/agent/projects/:id", takesWriteBudgetUnit: false, idempotencyKeyField: null, since: "2.28.0" }]);
+    expect(await main(argv, ctx)).toBe(0);
+    expect(ctx.err.join(" ")).not.toContain("TenantContract");
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual(["/api/v1/agent/contract", path]);
+  });
+
   it("registers a bearer reference and explains pending approval", async () => {
     const { ctx, calls } = setup();
     expect(await main(["mcp", "add", "linear", "--url", input.url, "--bearer", "LINEAR_API_KEY"], ctx)).toBe(0);
