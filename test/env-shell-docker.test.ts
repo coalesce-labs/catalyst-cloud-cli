@@ -311,9 +311,7 @@ describe("pull", () => {
   });
 
   test.each([
-    ["an ANSI colour sequence in the password", PASSWORD, "\x1b[31m"],
     ["a CRLF in the password", PASSWORD, "\r\n"],
-    ["an ANSI colour sequence in the auth value", EXPECTED_AUTH, "\x1b[31m"],
     ["a line feed in the auth value", EXPECTED_AUTH, "\n"],
   ] as const)(
     "pull() CTC-6157: Docker breaks the credential up with %s → none of it comes back",
@@ -328,6 +326,31 @@ describe("pull", () => {
       expect(pullDirs()).toEqual([]);
     },
   );
+
+  test.each(
+    [
+      ["an ANSI colour sequence", "\x1b[31m"],
+      ["an OSC ended by BEL", "\x1b]0;title\x07"],
+      ["an unterminated OSC", "\x1b]0;title"],
+      ["a charset designation", "\x1b(B"],
+      ["an 8-bit CSI", "\x9b31m"],
+    ].flatMap(([name, gap]) =>
+      [PASSWORD, EXPECTED_AUTH].flatMap((secret) =>
+        [0, 395 - LEAD.length].map((pad) => [name, secret, gap, pad] as const),
+      ),
+    ),
+  )("pull() CTC-6157: %s in a secret (secret %#, pad %#) → escape-bearing text is withheld", async (_name, secret, gap, pad) => {
+    const docker = spawnEnvShellDocker({
+      env: baseEnv({
+        FAKE_PULL_EXIT: "1",
+        FAKE_PULL_ERR: `progress line\n${LEAD}${"a".repeat(pad)}${broken(secret, gap)} rejected`,
+      }),
+      tmpdir: () => pullTmp,
+    });
+    const result = await docker.pull(REF, HOST, CRED_CONFIG);
+    expect(result).toEqual({ ok: false, detail: "" });
+    expect(pullDirs()).toEqual([]);
+  });
 });
 
 describe("run", () => {
@@ -387,20 +410,16 @@ describe("exitCodeOf and lastLine", () => {
     expect(lastLine("denied", [""])).toBe("denied");
   });
 
-  // What Docker's echo may put inside a credential: ANSI colour and cursor sequences, line breaks, and
-  // plain control characters. Whatever sits between the characters, none of the credential comes back.
+  // What Docker's echo may put inside a credential: line breaks and plain control characters (text
+  // with an escape or a C1 control is withheld, tested below). Whatever sits between the characters, none of the credential comes back.
   const BREAKS = [
-    ["an ANSI colour sequence", "\x1b[31m"],
-    ["an ANSI sequence with parameters", "\x1b[38;5;196m"],
-    ["an ANSI private-mode sequence", "\x1b[?25l"],
-    ["a reset and a colour", "\x1b[0m\x1b[1;31m"],
     ["a CRLF", "\r\n"],
     ["a line feed", "\n"],
     ["a carriage return", "\r"],
-    ["an erase-line sequence and a CRLF", "\x1b[2K\r\n"],
     ["a NUL", "\x00"],
     ["a bell", "\x07"],
-    ["a lone escape character", "\x1b"],
+    ["a DEL", "\x7f"],
+    ["a non-ASCII character", "\u00e9"],
   ] as const;
 
   const BROKEN_CREDENTIALS = BREAKS.flatMap(([name, gap]) => [
@@ -417,20 +436,20 @@ describe("exitCodeOf and lastLine", () => {
   test.each([
     ["after its first character", 1],
     ["before its last character", PASSWORD.length - 1],
-  ])("lastLine CTC-6157: an ANSI sequence %s still redacts the password", (_name, at) => {
-    const echo = `${LEAD}${broken(PASSWORD, "\x1b[31m", at)} rejected`;
+  ])("lastLine CTC-6157: a line break %s still redacts the password", (_name, at) => {
+    const echo = `${LEAD}${broken(PASSWORD, "\r\n", at)} rejected`;
     expect(lastLine(echo, [PASSWORD])).toBe(`${LEAD}[redacted] rejected`);
   });
 
-  test("lastLine CTC-6157: a sequence between every pair of characters of the credential still redacts it", () => {
+  test("lastLine CTC-6157: a control character between every pair of characters of the credential still redacts it", () => {
     for (const secret of [PASSWORD, EXPECTED_AUTH]) {
-      const echo = `${LEAD}${[...secret].join("\x1b[0m")} rejected`;
+      const echo = `${LEAD}${[...secret].join("\x00")} rejected`;
       expect(lastLine(echo, [PASSWORD, EXPECTED_AUTH])).toBe(`${LEAD}[redacted] rejected`);
     }
   });
 
   test("lastLine CTC-6157: a break and the 400-character cut together: the cut falls after the redaction", () => {
-    const echo = "a".repeat(395) + broken(PASSWORD, "\x1b[31m") + " rejected";
+    const echo = "a".repeat(395) + broken(PASSWORD, "\x07") + " rejected";
     expect(lastLine(echo, [PASSWORD])).toBe("a".repeat(395) + "[reda");
     const crlf = "a".repeat(395) + broken(EXPECTED_AUTH, "\r\n") + " rejected";
     expect(lastLine(crlf, [EXPECTED_AUTH])).toBe("a".repeat(395) + "[reda");
@@ -440,7 +459,7 @@ describe("exitCodeOf and lastLine", () => {
     ["longest first", ["XYZ12345", "abcXYZ12345def"]],
     ["shortest first", ["abcXYZ12345def", "XYZ12345"]],
   ])("lastLine CTC-6157: one secret inside another (%s), with a break inside both", (_name, secrets) => {
-    expect(lastLine("denied abc\x1b[31mXYZ12345def", secrets)).toBe("denied [redacted]");
+    expect(lastLine("denied abc\x00XYZ12345def", secrets)).toBe("denied [redacted]");
     expect(lastLine("denied abcXYZ\r\n12345def", secrets)).toBe("denied [redacted]");
   });
 
@@ -451,8 +470,8 @@ describe("exitCodeOf and lastLine", () => {
 
   test("lastLine CTC-6157: a secret is matched as written, so regex metacharacters in it are not special", () => {
     const secret = "a.b*c+(d)[e]{1}|f^$\\g";
-    expect(lastLine(`x ${broken(secret, "\x1b[31m")} y aXb*c+(d)`, [secret])).toBe(
-      "x [redacted] y aXb*c+(d)",
+    expect(lastLine(`x ${broken(secret, "\x00")} y aXb*c+(d)[e]{1}|f^$\\g`, [secret])).toBe(
+      "x [redacted] y aXb*c+(d)[e]{1}|f^$\\g",
     );
   });
 
@@ -491,45 +510,50 @@ const SEQUENCE_CASES = SEQUENCES.flatMap(([name, gap]) => [
   [`${name} in the auth value`, EXPECTED_AUTH, gap] as const,
 ]);
 
-describe("lastLine CTC-6157: complete escape and control sequences", () => {
-  test.each(SEQUENCE_CASES)("%s → the whole credential is redacted", (_name, secret, gap) => {
+describe("lastLine CTC-6157: text with an escape or a C1 control is withheld", () => {
+  test.each(SEQUENCE_CASES)("%s → the detail is withheld", (_name, secret, gap) => {
     const shown = lastLine(`progress\n${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH]);
-    expectNoSecretFragment(shown);
-    expect(shown).toBe(`${LEAD}[redacted] rejected`);
+    expect(shown).toBe("");
   });
 
-  test.each(SEQUENCE_CASES)("%s straddling the 400-character cut → no fragment of it", (_name, secret, gap) => {
+  test.each(SEQUENCE_CASES)("%s straddling the 400-character cut → withheld", (_name, secret, gap) => {
     const line = LEAD + "a".repeat(395 - LEAD.length) + broken(secret, gap) + " rejected";
-    const shown = lastLine(line, [PASSWORD, EXPECTED_AUTH]);
-    expectNoSecretFragment(shown);
-    expect(shown).toBe(LEAD + "a".repeat(395 - LEAD.length) + "[reda");
+    expect(lastLine(line, [PASSWORD, EXPECTED_AUTH])).toBe("");
   });
 
-  test.each(SEQUENCE_CASES)("%s → redactSecrets (the second layer) redacts it too", (_name, secret, gap) => {
-    const shown = redactSecrets(`${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH]);
-    expect(shown).toBe(`${LEAD}[redacted] rejected`);
+  test.each(SEQUENCE_CASES)("%s → redactSecrets (the second layer) withholds it too", (_name, secret, gap) => {
+    expect(redactSecrets(`${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH])).toBe("");
   });
 
-  test("an OSC with no terminator inside the password leaves no readable piece of it", () => {
+  test("an OSC with no terminator inside a secret is withheld", () => {
     for (const secret of [PASSWORD, EXPECTED_AUTH]) {
       for (const gap of ["\x1b]0;title", "\x9d0;title", "\x1bPdata"]) {
-        const shown = lastLine(`${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH]);
-        expectNoSecretFragment(shown);
-        expect(shown.startsWith(LEAD)).toBe(true);
+        expect(lastLine(`${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH])).toBe("");
       }
     }
   });
 
-  test("an unterminated OSC inside the password straddling the cut leaves no fragment", () => {
+  test("an unterminated OSC inside the password straddling the cut is withheld", () => {
     const line = LEAD + "a".repeat(390 - LEAD.length) + broken(PASSWORD, "\x1b]0;title") + " rejected";
-    expectNoSecretFragment(lastLine(line, [PASSWORD, EXPECTED_AUTH]));
+    expect(lastLine(line, [PASSWORD, EXPECTED_AUTH])).toBe("");
+  });
+
+  test("a low-entropy password: coloured text that only mentions the word is withheld, never half-redacted", () => {
+    const shown = lastLine("\x1b[31mwrong password for user\x1b[0m", ["password123", "cGFzc3dvcmQxMjM="]);
+    expect(shown).toBe("");
+  });
+
+  test("escape-free text that mentions the word stays as it was", () => {
+    expect(lastLine("wrong password for user", ["password123"])).toBe("wrong password for user");
+    expect(redactSecrets("wrong password for user", ["password123"])).toBe("wrong password for user");
   });
 
   test("text with no secret in it, even with sequences, comes out as before", () => {
-    expect(lastLine("denied \x1b]0;title\x07 \x1b(B \x9b31m end", [PASSWORD, EXPECTED_AUTH])).toBe(
+    expect(lastLine("denied \x1b]0;title\x07 \x1b(B \x9b31m end")).toBe(
       "denied ]0;title (B 31m end",
     );
-    expect(redactSecrets("plain ctcpull_ only", [PASSWORD])).toBe("plain ctcpull_ only");
+    expect(redactSecrets("plain \x1b[31mctcpull_\x1b[0m only", [""])).toBe("plain \x1b[31mctcpull_\x1b[0m only");
+    expect(redactSecrets("plain \x1b[31m only", [])).toBe("plain \x1b[31m only");
   });
 
   test("hostile unterminated control strings are handled in linear time", () => {

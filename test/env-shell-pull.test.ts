@@ -361,14 +361,8 @@ describe("downloadImage with the real docker adapter (CTC-6157)", () => {
   );
 
   test.each([
-    ["an ANSI colour sequence in the password", PASSWORD, "\x1b[31m"],
     ["a CRLF in the password", PASSWORD, "\r\n"],
-    ["an ANSI colour sequence in the auth value", EXPECTED_AUTH, "\x1b[31m"],
     ["a line feed in the auth value", EXPECTED_AUTH, "\n"],
-    ["an OSC ended by BEL in the password", PASSWORD, "\x1b]0;title\x07"],
-    ["an OSC ended by ST in the auth value", EXPECTED_AUTH, "\x1b]0;title\x1b\\"],
-    ["a charset designation in the password", PASSWORD, "\x1b(B"],
-    ["an 8-bit CSI in the auth value", EXPECTED_AUTH, "\x9b31m"],
   ] as const)(
     "Docker breaks the credential up with %s → the refusal holds none of it",
     async (_name, secret, gap) => {
@@ -387,14 +381,58 @@ describe("downloadImage with the real docker adapter (CTC-6157)", () => {
     },
   );
 
-  test("CTC-6157: an unterminated OSC inside the password → the refusal holds no readable piece of it", async () => {
-    const docker = scriptedDocker(`progress line\n${LEAD}${broken(PASSWORD, "\x1b]0;title")} rejected`);
+  const WITHHELD = [
+    ["an ANSI colour sequence", "\x1b[31m"],
+    ["an OSC ended by BEL", "\x1b]0;title\x07"],
+    ["an OSC ended by ST", "\x1b]0;title\x1b\\"],
+    ["an unterminated OSC", "\x1b]0;title"],
+    ["a DCS ended by ST", "\x1bPq\x1b\\"],
+    ["a charset designation", "\x1b(B"],
+    ["an 8-bit CSI", "\x9b31m"],
+    ["an 8-bit OSC ended by 0x9C", "\x9d0;title\x9c"],
+  ] as const;
+
+  test.each(
+    WITHHELD.flatMap(([name, gap]) =>
+      ([PASSWORD, EXPECTED_AUTH] as const).flatMap((secret) =>
+        ([0, 395 - LEAD.length] as const).map((pad) => [name, secret, gap, pad] as const),
+      ),
+    ),
+  )(
+    "CTC-6157: Docker breaks the credential up with %s (secret %#, pad before it %#) → the detail is withheld",
+    async (_name, secret, gap, pad) => {
+      const docker = scriptedDocker(`progress line\n${LEAD}${"a".repeat(pad)}${broken(secret, gap)} rejected`);
+      await signIn();
+      server.pullCredential = { status: 200, body: issuedBody() };
+      const refusal = refusalOf(await download(docker));
+      expect(refusal.code).toBe("image_download_refused");
+      expectNoSecretFragment(JSON.stringify(refusal));
+      for (const line of notes) expectNoSecretFragment(line);
+      expect(refusal.message).toBe(
+        `Could not download ${REF} with the credential your workspace issued: docker pull failed.`,
+      );
+    },
+  );
+
+  test("CTC-6157: a low-entropy password and a coloured error that only mentions the word → withheld, not half-redacted", async () => {
+    const docker = scriptedDocker("\x1b[31mwrong password for user\x1b[0m");
     await signIn();
-    server.pullCredential = { status: 200, body: issuedBody() };
+    server.pullCredential = { status: 200, body: issuedBody({ password: "password123" }) };
     const refusal = refusalOf(await download(docker));
-    expect(refusal.code).toBe("image_download_refused");
-    expectNoSecretFragment(refusal.message);
-    expectNoSecretFragment(JSON.stringify(refusal));
+    expect(refusal.message).toBe(
+      `Could not download ${REF} with the credential your workspace issued: docker pull failed.`,
+    );
+    expect(refusal.message).not.toContain("[redacted]");
+  });
+
+  test("CTC-6157: the same password and an escape-free error that mentions the word → shown as it is", async () => {
+    const docker = scriptedDocker("wrong password for user");
+    await signIn();
+    server.pullCredential = { status: 200, body: issuedBody({ password: "password123" }) };
+    const refusal = refusalOf(await download(docker));
+    expect(refusal.message).toBe(
+      `Could not download ${REF} with the credential your workspace issued: wrong password for user.`,
+    );
   });
 });
 

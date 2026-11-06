@@ -88,124 +88,50 @@ export function exitCodeOf(status: number | null, signal: NodeJS.Signals | null)
   return signal ? 128 + (constants.signals[signal] ?? 0) : 1;
 }
 
-/** What can sit between two characters of an echoed secret without showing on a terminal. Two models
- *  are tried, because a malformed sequence can swallow a secret character: the first drops every
- *  character outside printable ASCII, line breaks included; the second also drops each complete ECMA-48
- *  sequence whole, so that its printable remainder (`[31m`, `]0;title`, `(B`) goes with it:
- *   - CSI: `ESC [` or 0x9B, parameter bytes 0x30-0x3F, intermediates 0x20-0x2F, one final byte 0x40-0x7E;
- *   - a control string (OSC `]`, DCS `P`, SOS `X`, PM `^`, APC `_`, or 0x9D, 0x90, 0x98, 0x9E, 0x9F)
- *     up to and including its terminator BEL, `ESC \` or 0x9C;
- *   - any other escape: `ESC`, intermediates 0x20-0x2F, one final byte 0x30-0x7E (`ESC ( B`, `ESC 7`).
- *  A sequence that never completes (a control string with no terminator) is not dropped by either model;
- *  `scrubFragments` is the net for that. */
-function withoutBreaks(text: string, sequences: boolean): { kept: string; at: number[] } {
-  const gone = new Uint8Array(text.length);
-  const code = (i: number): number => (i < text.length ? text.charCodeAt(i) : -1);
-  const csiEnd = (from: number): number => {
-    let j = from;
-    while (code(j) >= 0x30 && code(j) <= 0x3f) j++;
-    while (code(j) >= 0x20 && code(j) <= 0x2f) j++;
-    return code(j) >= 0x40 && code(j) <= 0x7e ? j + 1 : -1;
-  };
-  // Once a search for a terminator finds none, no later start can find one either: stay linear.
-  let noTerminator = false;
-  const stringEnd = (from: number): number => {
-    if (noTerminator) return -1;
-    for (let j = from; j < text.length; j++) {
-      const c = text.charCodeAt(j);
-      if (c === 0x07 || c === 0x9c) return j + 1;
-      if (c === 0x1b && code(j + 1) === 0x5c) return j + 2;
-    }
-    noTerminator = true;
-    return -1;
-  };
-  const sequenceEnd = (i: number): number => {
-    const c = text.charCodeAt(i);
-    if (c === 0x9b) return csiEnd(i + 1);
-    if (c === 0x9d || c === 0x90 || c === 0x98 || c === 0x9e || c === 0x9f) return stringEnd(i + 1);
-    if (c !== 0x1b) return -1;
-    const next = code(i + 1);
-    if (next === 0x5b) return csiEnd(i + 2);
-    if (next === 0x5d || next === 0x50 || next === 0x58 || next === 0x5e || next === 0x5f) return stringEnd(i + 2);
-    let j = i + 1;
-    while (code(j) >= 0x20 && code(j) <= 0x2f) j++;
-    return code(j) >= 0x30 && code(j) <= 0x7e ? j + 1 : -1;
-  };
-  for (let i = 0; i < text.length; i++) {
-    const end = sequences ? sequenceEnd(i) : -1;
-    if (end > 0) {
-      gone.fill(1, i, end);
-      i = end - 1;
-    } else if (text.charCodeAt(i) < 0x20 || text.charCodeAt(i) > 0x7e) gone[i] = 1;
-  }
+/** `text` without every character outside printable ASCII (C0 controls, line breaks, DEL, non-ASCII),
+ *  and where each character that is left sat in `text`. A secret is printable ASCII, so an occurrence
+ *  that is contiguous in `text` stays contiguous here, and one that Docker split with such characters
+ *  becomes contiguous. */
+function printableView(text: string): { kept: string; at: number[] } {
   let kept = "";
   const at: number[] = [];
   for (let i = 0; i < text.length; i++) {
-    if (gone[i]) continue;
+    const c = text.charCodeAt(i);
+    if (c < 0x20 || c > 0x7e) continue;
     kept += text[i];
     at.push(i);
   }
   return { kept, at };
 }
 
-const FRAGMENT = 8;
-
-/** Whether `text` holds an escape or an 8-bit control character: the only case where a split the break
- *  model cannot parse is possible, and so the only one `scrubFragments` runs for. */
-function hasEscape(text: string): boolean {
-  return /[\x1b\x80-\x9f]/.test(text);
-}
-
-/** Replaces each stretch of `text` that is made of 8-character pieces of a secret with "[redacted]".
- *  The net under `redactSecrets`, for a split no break model parses, such as an OSC with no terminator
- *  inside a secret: it catches the readable pieces on either side, not a piece shorter than 8. Callers
- *  run it only for text that held an escape or an 8-bit control character, so that other text comes
- *  out as it went in. It is a `Set` lookup of fixed-size slices, never a pattern built from a secret. */
-function scrubFragments(text: string, secrets: readonly string[]): string {
-  const pieces = new Set<string>();
-  for (const secret of secrets) {
-    for (let i = 0; i + FRAGMENT <= secret.length; i++) pieces.add(secret.slice(i, i + FRAGMENT));
-  }
-  if (pieces.size === 0) return text;
-  const hit = new Uint8Array(text.length);
-  let any = false;
-  for (let i = 0; i + FRAGMENT <= text.length; i++) {
-    if (!pieces.has(text.slice(i, i + FRAGMENT))) continue;
-    hit.fill(1, i, i + FRAGMENT);
-    any = true;
-  }
-  if (!any) return text;
-  let out = "";
-  for (let i = 0; i < text.length; i++) {
-    if (!hit[i]) out += text[i];
-    else if (i === 0 || !hit[i - 1]) out += "[redacted]";
-  }
-  return out;
-}
-
-/** Every occurrence of each non-empty secret becomes "[redacted]", also when Docker broke it up with
- *  control characters, a line break or a complete ECMA-48 escape or control sequence (CTC-6157): the whole stretch from its first
- *  character to its last is replaced. Occurrences that overlap, such as one secret inside another,
- *  become one marker. This is a plain `indexOf` over the text with the breaks taken out, never a
- *  pattern built from a secret, so it cannot backtrack and needs no escaping. The secrets here are
- *  printable ASCII: a password is `\x21-\x7e` and an `auth` value is base64. */
+/** Every occurrence of each non-empty secret becomes "[redacted]", also when Docker split it with
+ *  control characters or a line break (CTC-6157): the whole stretch from its first character to its
+ *  last is replaced. Occurrences that overlap, such as one secret inside another, become one marker.
+ *  This is a plain `indexOf` over the text with those characters taken out, never a pattern built from
+ *  a secret, so it cannot backtrack and needs no escaping. The secrets here are printable ASCII: a
+ *  password is `\x21-\x7e` and an `auth` value is base64.
+ *
+ *  Text that holds an escape (U+001B) or a C1 control (U+0080-U+009F) is withheld whole, as "", when
+ *  there is a secret to protect. No model of escape sequences is complete: a malformed one can take a
+ *  secret's own characters as its parameters, and guessing at fragments would redact ordinary words.
+ *  Docker writes its errors to a pipe and does not colour them, so such text comes only from unusual
+ *  daemon or registry output, and losing it costs little. Without a secret the text is returned as is. */
 export function redactSecrets(text: string, secrets: readonly string[]): string {
   const wanted = secrets.filter((secret) => secret !== "");
   if (wanted.length === 0) return text;
+  if (/[\x1b\x80-\x9f]/.test(text)) return "";
   // covered[i] counts the occurrences that start at or before i and have not ended yet.
   const covered = new Int32Array(text.length + 1);
   let found = false;
-  for (const sequences of [false, true]) {
-    const { kept, at } = withoutBreaks(text, sequences);
-    for (const secret of wanted) {
-      for (let i = kept.indexOf(secret); i >= 0; i = kept.indexOf(secret, i + 1)) {
-        covered[at[i]]++;
-        covered[at[i + secret.length - 1] + 1]--;
-        found = true;
-      }
+  const { kept, at } = printableView(text);
+  for (const secret of wanted) {
+    for (let i = kept.indexOf(secret); i >= 0; i = kept.indexOf(secret, i + 1)) {
+      covered[at[i]]++;
+      covered[at[i + secret.length - 1] + 1]--;
+      found = true;
     }
   }
-  if (!found) return hasEscape(text) ? scrubFragments(text, wanted) : text;
+  if (!found) return text;
   let out = "";
   let depth = 0;
   let inside = false;
@@ -215,23 +141,20 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
     else if (!inside) out += "[redacted]";
     inside = depth > 0;
   }
-  return hasEscape(text) ? scrubFragments(out, wanted) : out;
+  return out;
 }
 
 /** Docker's last non-empty error line, printable characters only. The secrets are redacted from the
  *  whole raw text, before it is split into lines and stripped and before it is cut to 400 characters,
- *  so neither a break inside a secret nor the cut can leave a fragment that no replacement matches
- *  (CTC-6157). The cut can still fall inside "[redacted]". */
+ *  so neither a split inside a secret nor the cut can leave a fragment that no replacement matches
+ *  (CTC-6157). The cut can still fall inside "[redacted]". Text with an escape or a C1 control, when
+ *  there is a secret, gives "" (see `redactSecrets`). */
 export function lastLine(text: string, secrets: readonly string[] = []): string {
   const lines = redactSecrets(text, secrets)
     .split(/\r?\n/)
     .map((line) => line.replace(/[^\x20-\x7e]/g, "").trim())
     .filter((line) => line !== "");
-  // The escapes are gone by now, so a piece of a secret an unparsed one split shows again: scrub the
-  // line once more, when the raw text held an escape, before it is cut.
-  const last = lines.at(-1) ?? "";
-  const scrubbed = hasEscape(text) ? scrubFragments(last, secrets.filter((secret) => secret !== "")) : last;
-  return scrubbed.slice(0, 400);
+  return (lines.at(-1) ?? "").slice(0, 400);
 }
 
 /** The secrets a pull's config carries: each `auth` value and the password it encodes. */
