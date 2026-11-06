@@ -231,7 +231,7 @@ export async function runEnvShell(args: ParsedArgs, ctx: Ctx, deps: EnvShellDeps
               message: "Docker's current context could not be read. Check it with docker context ls, then run catalyst env shell again.",
             },
       );
-    const downloaded = await downloadImage({ ref: image, host: endpoint.host, root, ctx, docker, notify: notice, readRepositoryName });
+    const downloaded = await downloadImage({ ref: image, endpoint, root, ctx, docker, notify: notice, readRepositoryName });
     if (!downloaded.ok) return refuse(downloaded.refusal);
     credential = downloaded.credential;
   }

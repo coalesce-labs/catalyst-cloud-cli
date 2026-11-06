@@ -11,7 +11,7 @@ import {
   pullCredentialRoute,
   registryOf,
 } from "../src/env/shell-pull";
-import type { DockerConfigJson, EnvShellDocker } from "../src/env/shell-docker";
+import type { DockerConfigJson, EnvShellDocker, EnvShellEndpoint } from "../src/env/shell-docker";
 import { RUNNER_HOST_IMAGES } from "../src/onboard-runner";
 import { buildFixtureContract, FIXTURE_ROUTE_PREFIX } from "./fixture-contract";
 import { startMeFixture, type FixtureServer } from "./fixture";
@@ -20,6 +20,7 @@ import { makeCtx, seedJoined, tempHome, type TestCtx } from "./helpers";
 const DIGEST = "5e".repeat(32);
 const REF = `registry.catalystcloud.dev/tenant-3/env-web-1a2b3c4d@sha256:${DIGEST}`;
 const HOST = "unix:///var/run/docker.sock";
+const HOST_TLS = "tcp://remote.example:2376";
 const ROOT = "/work/checkout";
 const PASSWORD = "ctcpull_SECRETVALUE123";
 const ROUTE_PATH = `${FIXTURE_ROUTE_PREFIX}/registry/pull-credential`;
@@ -28,6 +29,7 @@ const EXPECTED_AUTH = Buffer.from(`x-catalyst-pull:${PASSWORD}`).toString("base6
 interface PullCall {
   ref: string;
   host: string;
+  context?: string;
   config: DockerConfigJson;
 }
 
@@ -41,8 +43,13 @@ function fakeDocker(answers: { ok: boolean; detail: string }[]): { docker: EnvSh
     endpoint: async () => notUsed(),
     imagePresent: async () => notUsed(),
     run: async () => notUsed(),
-    pull: async (ref, host, config) => {
-      pulls.push({ ref, host, config: structuredClone(config) });
+    pull: async (ref, endpoint, config) => {
+      pulls.push({
+        ref,
+        host: endpoint.host,
+        ...(endpoint.context ? { context: endpoint.context } : {}),
+        config: structuredClone(config),
+      });
       const next = answers.shift();
       if (!next) throw new Error(`unexpected pull #${pulls.length} of ${ref}`);
       return next;
@@ -102,11 +109,11 @@ async function signIn(opts: { route?: boolean } = {}): Promise<void> {
 
 function download(
   docker: EnvShellDocker,
-  opts: { ref?: string; readRepositoryName?: (root: string) => Promise<string | null> } = {},
+  opts: { ref?: string; endpoint?: EnvShellEndpoint; readRepositoryName?: (root: string) => Promise<string | null> } = {},
 ) {
   return downloadImage({
     ref: opts.ref ?? REF,
-    host: HOST,
+    endpoint: opts.endpoint ?? { host: HOST },
     root: ROOT,
     ctx,
     docker,
@@ -190,6 +197,18 @@ describe("downloadImage", () => {
     });
     expect(notes.some((line) => line.includes("valid for 59 minutes"))).toBe(true);
     expect(notes.at(-1)).toBe("  Downloaded.");
+  });
+
+  test("a named Docker context travels with both pulls (CTC-6154): the anonymous try and the issued credential", async () => {
+    await signIn();
+    server.pullCredential = { status: 200, body: issuedBody() };
+    const { docker, pulls } = fakeDocker([REFUSED_ANONYMOUSLY, { ok: true, detail: "" }]);
+    const endpoint = { host: HOST_TLS, context: "remote-tls" };
+    expect(await download(docker, { endpoint })).toEqual({ ok: true, credential: "issued" });
+    expect(pulls).toEqual([
+      { ref: REF, host: HOST_TLS, context: "remote-tls", config: CREDENTIAL_FREE_CONFIG },
+      { ref: REF, host: HOST_TLS, context: "remote-tls", config: { auths: { "registry.catalystcloud.dev": { auth: EXPECTED_AUTH } } } },
+    ]);
   });
 
   test("issued for another repository → credential_out_of_scope; the second pull never runs", async () => {

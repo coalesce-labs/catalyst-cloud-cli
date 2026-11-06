@@ -34,7 +34,7 @@ const RESOLVED: Record<string, string> = { "node@22": "22.23.3", "bun@1.3.14": "
 
 interface Recorded {
   calls: string[];
-  pulls: { ref: string; host: string; config: DockerConfigJson }[];
+  pulls: { ref: string; host: string; context?: string; config: DockerConfigJson }[];
   runs: { argv: string[]; env: NodeJS.ProcessEnv; mode: "interactive" | "capture" }[];
 }
 
@@ -81,9 +81,9 @@ function recordingPort(
         rec.calls.push("imagePresent");
         return present;
       },
-      pull: async (ref, host, config) => {
+      pull: async (ref, endpoint, config) => {
         rec.calls.push("pull");
-        rec.pulls.push({ ref, host, config: structuredClone(config) });
+        rec.pulls.push({ ref, host: endpoint.host, ...(endpoint.context ? { context: endpoint.context } : {}), config: structuredClone(config) });
         const answer = pulls.shift() ?? { ok: false, detail: "no more pulls" };
         if (answer.ok) present = true;
         return answer;
