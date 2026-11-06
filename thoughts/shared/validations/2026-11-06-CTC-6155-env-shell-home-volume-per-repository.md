@@ -65,7 +65,9 @@ Verdict PASS, run at base `2f11ab3a73810d7f1972ae9c8603374e4df2e8f1`.
 - Step 4, tests: `npx vitest run` exit 0, 5635 passed, 2 skipped. PR 618 checks at the head are all passing or skipped as optional (`check`, `check (node 26)`, `matrix`, CodeQL).
 - Step 5, lint: SKIPPED, no linter configured (no `.trunk/`, biome or eslint config).
 
-### Code Review Findings (`review-code`)
+### Code Review Findings
+
+Produced by the `review-code` skill.
 
 Verdict PASS. Scope: base `2f11ab3a73810d7f1972ae9c8603374e4df2e8f1`, ancestry proven, 3 code files reviewed (`src/env/shell-plan.ts`, `test/env-shell-plan.test.ts`, `test/env-shell.test.ts`). All five lenses ran: guidelines (the repo has no CLAUDE.md or AGENTS.md; `.agents/rules/public-text.md` scopes to README and skills only), diff bugs, history, prior review comments (PR 618 has no review comments) and in-code guidance. No finding at confidence 80 or above.
 - Matches plan: `src/env/shell-plan.ts:42-46` and its one call site `src/env/shell-plan.ts:84`, with no other caller of `homeVolumeFor`.
