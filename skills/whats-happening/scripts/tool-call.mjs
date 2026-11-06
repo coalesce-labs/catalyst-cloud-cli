@@ -25,7 +25,7 @@ const normaliseServer = (raw) =>
 
 /** The first actor the explanation names, with its article ("a workspace admin"), or null. */
 function actorIn(explanation) {
-  const m = ACTOR.exec(explanation ?? "");
+  const m = (explanation ?? "").match(ACTOR);
   if (!m) return null;
   const actor = m[2].toLowerCase();
   return `${m[1]?.toLowerCase() ?? (/^[aeiou]/.test(actor) ? "an" : "a")} ${actor}`;
