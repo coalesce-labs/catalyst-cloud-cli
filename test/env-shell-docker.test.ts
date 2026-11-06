@@ -3,7 +3,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { main } from "../src/cli";
 import { exitCodeOf, lastLine, spawnEnvShellDocker } from "../src/env/shell-docker";
+import { makeCtx } from "./helpers";
 
 // The real spawn wrapper, driven against a scripted `docker` placed first on PATH. The fake records
 // every call (argv, the Docker selectors it saw, and for a pull the throwaway config file and its
@@ -90,7 +92,11 @@ case "$sub" in
     printf '%s\\n' "\${FAKE_VERSION_OS-}"
     exit "\${FAKE_VERSION_EXIT:-0}" ;;
   context)
-    printf '%s\\t%s\\n' "\${FAKE_CONTEXT_NAME-default}" "\${FAKE_CONTEXT_HOST-}"
+    # Answers by the --format it is given: the name and host when it asks for .Name, the host alone otherwise.
+    case "$*" in
+      *.Name*) printf '%s\\t%s\\n' "\${FAKE_CONTEXT_NAME-default}" "\${FAKE_CONTEXT_HOST-}" ;;
+      *) printf '%s\\n' "\${FAKE_CONTEXT_HOST-}" ;;
+    esac
     exit "\${FAKE_CONTEXT_EXIT:-0}" ;;
   image)
     exit "\${FAKE_INSPECT_EXIT:-0}" ;;
@@ -488,6 +494,45 @@ describe("pull through a named context (CTC-6154)", () => {
     });
     expect(pullDirs()).toEqual([]);
     expectStoreIntact(tlsDir);
+  });
+
+  // End to end through `catalyst env shell`, whose signature did not change: no docker port is injected, so the
+  // CLI builds the real one over ctx.env. The image is missing, and the anonymous pull succeeds, so what decides the
+  // test is the TLS outcome the fake records for that one pull.
+  describe("catalyst env shell, no injected docker", () => {
+    async function shellWith(extra: NodeJS.ProcessEnv): Promise<number> {
+      const repo = join(root, "repo");
+      mkdirSync(join(repo, ".catalyst"), { recursive: true });
+      writeFileSync(join(repo, ".catalyst", "catalyst.toml"), '[environment]\ntoolchains = [{ name = "node", version = "22" }]\n');
+      const ctx = makeCtx(home, {
+        env: baseEnv({ HOME: home, CATALYST_SKILLS_OFFLINE: "1", FAKE_VERSION_OS: "linux", FAKE_INSPECT_EXIT: "1", ...extra }),
+      });
+      return main(["env", "shell", "--root", repo], ctx, {
+        env: { shell: { isTty: () => true, platform: "darwin", uid: 501, readRepositoryName: async () => "acme/web", gitCommonDir: async () => null } },
+      });
+    }
+
+    function expectContextTls(): void {
+      const pull = calls().find((call) => call.vars.eff_tls !== undefined);
+      if (!pull) throw new Error("the fake docker never saw a pull");
+      expect(pull.vars.eff_err).toBe("");
+      expect(pull.vars.eff_host).toBe(HOST_TLS);
+      expect(pull.vars.eff_tls).toBe("verify");
+      expect(pull.vars.eff_pems).toBe(PEM_NAMES);
+      expect(pull.vars.eff_ca).toBe("CA-remote-tls");
+    }
+
+    test("DOCKER_CONTEXT names a TLS context: the first image download carries the context's TLS files", async () => {
+      writeContext(join(home, ".docker"), "remote-tls", HOST_TLS, { pems: PEMS });
+      expect(await shellWith({ DOCKER_CONTEXT: "remote-tls", FAKE_CONTEXT_NAME: "remote-tls", FAKE_CONTEXT_HOST: HOST_TLS })).toBe(0);
+      expectContextTls();
+    });
+
+    test("the current context is a TLS context (no DOCKER_CONTEXT): the first image download carries its TLS files", async () => {
+      writeContext(join(home, ".docker"), "remote-tls", HOST_TLS, { pems: PEMS });
+      expect(await shellWith({ FAKE_CONTEXT_NAME: "remote-tls", FAKE_CONTEXT_HOST: HOST_TLS })).toBe(0);
+      expectContextTls();
+    });
   });
 });
 
