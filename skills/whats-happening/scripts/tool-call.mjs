@@ -41,6 +41,15 @@ const NO_ONE =
   "the record names no one; a workspace owner or admin manages this workspace's MCP servers";
 const NOT_NAMED = "the explanation does not name one";
 
+// The verb treats ok as the only success and never classifies the rest, so the script does: ok is success, these
+// outcomes mean the call has not finished (compared exactly, as the verb compares ok), and any other outcome is a failure.
+const IN_FLIGHT = new Set([
+  "pending", "in_flight", "in-flight", "in_progress", "in-progress", "running", "queued", "started",
+  "awaiting_approval", "awaiting-approval", "approval_pending",
+]);
+const isFailure = (c) => c.outcome !== "ok" && !IN_FLIGHT.has(c.outcome);
+const isUnfinished = (c) => IN_FLIGHT.has(c.outcome);
+
 const oneLine = (s) => s.replace(/\s+/g, " ").trim();
 const text = (v) => (typeof v === "string" && oneLine(v) ? oneLine(v) : null);
 /** A plain object: the only shape a recorded call, or its dispatch, can have. */
@@ -105,7 +114,7 @@ function answer(server, ticket, tool, calls) {
         (!ticket || (c.ticket ?? "").toLowerCase() === ticket.toLowerCase()) &&
         (!tool || c.tool.toLowerCase().includes(tool.toLowerCase())),
     );
-  const failed = kept.find((c) => c.outcome !== "ok");
+  const failed = kept.find(isFailure);
   const call = failed ?? kept[0];
   if (!call) return { a: { ...base, fixer: { named: false, who: null }, window, verdict: "not-in-window" } };
   const who = failed ? actorIn(call.explanation) : null;
@@ -122,11 +131,12 @@ function answer(server, ticket, tool, calls) {
     window,
     verdict: failed ? "failed" : "no-failure",
   };
-  return { a, why: [call.denied, call.explanation].filter(Boolean).join(": ") };
+  const newer = failed ? kept.slice(0, kept.indexOf(failed)).find(isUnfinished)?.outcome ?? null : null;
+  return { a, why: [call.denied, call.explanation].filter(Boolean).join(": "), newer };
 }
 
 /** The one line the desk replies with. Records the script could not read are counted, and no sentence speaks for them. */
-function render({ a, why }, ticket, tool) {
+function render({ a, why, newer }, ticket, tool) {
   const { read, unreadable } = a.window;
   const calls = (n, adjective = "") => `${n} ${adjective}recorded call${n === 1 ? "" : "s"}`;
   const matching = tool ? ` matching ${tool}` : "";
@@ -140,12 +150,14 @@ function render({ a, why }, ticket, tool) {
     const seen = unreadable ? `the ${read - unreadable} readable of its newest ${calls(read)}` : `its newest ${calls(read)}`;
     const newest = ticket || tool ? "the newest one that matches" : unreadable ? "the newest readable one" : "the newest";
     const rest = unreadable ? `; ${calls(unreadable)} could not be read, so this may not be the whole picture` : "";
-    return `no failed call to ${a.server}${ticket ? ` on ${ticket}` : ""}${matching} in ${seen}; ${newest} was ok at ${a.at ?? "an unrecorded time"}${rest}.`;
+    const state = isUnfinished(a) ? `is still ${a.outcome}, so it has not finished` : `was ok at ${a.at ?? "an unrecorded time"}`;
+    return `no failed call to ${a.server}${ticket ? ` on ${ticket}` : ""}${matching} in ${seen}; ${newest} ${state}${rest}.`;
   }
   const slot = a.ticket ? `${a.ticket} ${a.phase ?? ""}`.trim() : "no ticket";
   const who = a.fixer.who ?? (a.explanation ? NOT_NAMED : NO_ONE);
+  const later = newer ? ` A newer call is still ${newer}, so it has not finished.` : "";
   const skipped = unreadable ? ` ${calls(unreadable, "other ")} could not be read, so this may not be the newest failure.` : "";
-  return `${slot}: ${a.tool} on ${a.server} failed (${a.outcome}) — ${sentence(why || "the record gives no reason")} Who can fix it: ${who}.${skipped}`;
+  return `${slot}: ${a.tool} on ${a.server} failed (${a.outcome}) — ${sentence(why || "the record gives no reason")} Who can fix it: ${who}.${later}${skipped}`;
 }
 
 function fail(message) {
