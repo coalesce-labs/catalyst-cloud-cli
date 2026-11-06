@@ -427,6 +427,7 @@ describe("each skill's scripts spawn the catalyst verbs it teaches", () => {
       /"explain"/,
       /"accounts"/,
       /"contract",\s*"--path"/,
+      /"mcp",\s*"status"/,
     ],
     unstick: [/"explain"/, /"--history"/, /"release"/, /"--dry-run"/],
   };
@@ -2548,4 +2549,93 @@ describe("no skill description names a readiness-check count the engine does not
       }
     });
   }
+});
+
+// CTC-6104: "why did the MCP call fail?" is a question the desk answers in one line, from the same
+// record the terminal verb prints (`catalyst mcp status <server> --json`). The script that builds the
+// line is held by test/tool-call-script.test.ts; this block holds the text that routes a question to
+// it, and the rule that no skill ever sends a person to read logs.
+describe("a failed tool call is answered in one line from the portal's record (CTC-6104)", () => {
+  const read = (rel: string) => readFileSync(join(skillsRoot, rel), "utf8");
+  const REFERENCE = "whats-happening/references/why-a-tool-call-failed.md";
+
+  test("the desk's SKILL.md names the script and routes a tool-call question to the reference", () => {
+    const md = read("whats-happening/SKILL.md");
+    expect(md).toContain("scripts/tool-call.mjs");
+    const row = md
+      .split("\n")
+      .find((l) => l.startsWith("|") && l.includes("references/why-a-tool-call-failed.md"));
+    expect(row, "a ## Load on demand row must link references/why-a-tool-call-failed.md").toBeDefined();
+    const question = row?.split("|")[1] ?? "";
+    expect(question).toMatch(/tool call|MCP/i);
+    expect(md.indexOf(row ?? "")).toBeGreaterThan(md.search(/^## Load on demand\s*$/m));
+  });
+
+  test("the reference says to run the script, which reads the verb, and to reply in one line with all four parts", () => {
+    expect(existsSync(join(skillsRoot, REFERENCE))).toBe(true);
+    const md = read(REFERENCE);
+    expect(md).toContain("node scripts/tool-call.mjs");
+    expect(md).toContain("catalyst mcp status");
+    expect(md).toContain("one line");
+    for (const part of [/\bticket\b/i, /\btool\b/i, /\breason\b/i, /who can fix it/i])
+      expect(md, `the reference must name ${part}`).toMatch(part);
+    expect(md).toMatch(/newest 50/);
+    expect(md).toMatch(/inconclusive/i);
+  });
+
+  test("the fix is a gap, said in a clause, with the Connections page as a route and not as a command", () => {
+    const md = read(REFERENCE);
+    expect(md).toMatch(/no command/i);
+    expect(md).toContain("/settings/connections");
+    expect(md).toContain("catalyst mcp list");
+  });
+
+  test("the question-to-command table has a row for it", () => {
+    const md = read("whats-happening/references/reading-from-the-cloud.md");
+    const row = md.split("\n").find((l) => l.startsWith("|") && l.includes("node scripts/tool-call.mjs"));
+    expect(row, "reading-from-the-cloud.md must have a row whose command is node scripts/tool-call.mjs").toBeDefined();
+    expect(row?.split("|")[1] ?? "").toMatch(/tool call/i);
+  });
+
+  test("the steward's chase order uses the same read and the desk's reference for the line", () => {
+    const md = read("run-this-project/references/stalls-and-escalation.md");
+    expect(md).toContain("catalyst mcp status");
+    expect(md).toContain("why-a-tool-call-failed.md");
+  });
+
+  test("the desk's agent card and the README row carry the new question", () => {
+    expect(read("whats-happening/agents/openai.yaml")).toMatch(/tool call/i);
+    const row = readFileSync(join(pkgRoot, "README.md"), "utf8")
+      .split("\n")
+      .find((l) => l.startsWith("| `whats-happening`"));
+    expect(row).toMatch(/tool call/i);
+  });
+
+  // A person reads the portal's record or asks the desk; no skill text, script string or card tells
+  // anyone to open logs. The word alone is fine ("logs this machine in"); an instruction to read them is not.
+  const LOG_INSTRUCTION =
+    /\b(?:container|docker|runner|server|pod)\s+logs?\b|\b(?:check|read|look at|tail|open|inspect)\s+(?:the\s+)?(?:\w+\s+){0,2}logs?\b|\b(?:docker|kubectl)\s+logs\b/i;
+
+  test("positive control: the matcher catches the instructions it exists for and spares the word in other senses", () => {
+    for (const bad of [
+      "check the container logs",
+      "Tail the server logs for the error.",
+      "look at the logs",
+      "run docker logs workos",
+      "kubectl logs deploy/portal",
+      "open the runner log",
+    ])
+      expect(LOG_INSTRUCTION.test(bad), bad).toBe(true);
+    for (const fine of ["logs this machine in", "log in again", "a catalog of tools", "the approval expired"])
+      expect(LOG_INSTRUCTION.test(fine), fine).toBe(false);
+  });
+
+  test("no file under skills/ tells anyone to check, read or tail logs", () => {
+    const files = walk(skillsRoot).filter((f) => /\.(?:md|mjs|yaml|json)$/.test(f));
+    expect(files.length).toBeGreaterThan(0);
+    const offenders = files
+      .filter((f) => LOG_INSTRUCTION.test(readFileSync(f, "utf8")))
+      .map((f) => relative(pkgRoot, f));
+    expect(offenders).toEqual([]);
+  });
 });
