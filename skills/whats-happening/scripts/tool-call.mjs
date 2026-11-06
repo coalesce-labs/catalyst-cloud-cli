@@ -3,6 +3,7 @@
 // `catalyst mcp status <server> --json`, which reads the portal's record of the server's newest
 // tool calls. The script picks the newest failed call that matches --ticket / --tool and prints
 // the ticket, the tool, the reason as the cloud wrote it, and who can fix it.
+import { CONNECT_COMMAND } from "./lib/credential.mjs";
 import { parseFlags, printHelp, runCli } from "./lib/cli.mjs";
 
 const SPEC = {
@@ -12,6 +13,10 @@ const SPEC = {
 };
 const LIMIT = 50; // the verb reads the newest 50 calls, no further back
 const SERVER_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
+// Nothing the CLI wrote reaches a refusal: its words can hold a banned word, a route, an address or an instruction the
+// skill must not give. Each refusal is a fixed sentence that names the validated server and the CLI's exit code only.
+const NOT_CONNECTED = `not connected (this machine is not joined to a workspace) — run: ${CONNECT_COMMAND}`;
+
 // Who can fix a failure is not decided here. The explanation is free prose, and no rule over it is sound: negations,
 // restrictions, a second actor, "can retry" against "can fix" each beat the rule written for the last one. The line shows
 // the explanation as the cloud wrote it and says only what is true by construction: which listed roles the explanation
@@ -19,11 +24,8 @@ const SERVER_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 // Splitting on ROLE_MENTION keeps the article and the role as captures: [before, article, role, between, ..., after].
 const ROLE = "workspace owner or admin|workspace owner|workspace admin|account admin|owner or admin|admin|owner|operator";
 const ROLE_MENTION = new RegExp(`\\b(?:(an?|the|your)\\s+)?(${ROLE})\\b`, "i");
-// With no explanation at all the record names no one, and the one fact we hold is who manages MCP servers
-// (src/capabilities.ts: `mcp add|list|remove` needs an admin). With an explanation that mentions no role the line
-// adds no pointer, because the explanation may itself say the admin cannot help.
-const NO_ONE =
-  "the record names no one; a workspace owner or admin manages this workspace's MCP servers";
+// With no explanation at all, the one thing true by construction is that the record has none, so it names no one.
+const NO_ONE = "the record has no explanation, so it names no one";
 // With an explanation that mentions no listed role, the line says what this script found, not what the explanation means.
 const NONE_FOUND = "this script found no workspace owner, admin or operator in the explanation above; read it as written";
 
@@ -37,15 +39,6 @@ const isFailure = (c) => c.outcome !== "ok" && !IN_FLIGHT.has(c.outcome);
 const isUnfinished = (c) => IN_FLIGHT.has(c.outcome);
 
 const oneLine = (s) => s.replace(/\s+/g, " ").trim();
-/**
- * What the CLI said, before it goes into a refusal: one line, with every token that holds a "/" (a route, an address,
- * a path) replaced by "the portal", because skill-facing text never names a route. Linear in the length of the text.
- */
-const fromCli = (s) =>
-  oneLine(s)
-    .split(" ")
-    .map((token) => (token.includes("/") ? "the portal" : token))
-    .join(" ");
 const text = (v) => (typeof v === "string" && oneLine(v) ? oneLine(v) : null);
 /** A plain object: the only shape a recorded call, or its dispatch, can have. */
 const isRecord = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -192,19 +185,19 @@ try {
   const server = normaliseServer(positionals[0]);
   if (!SERVER_NAME.test(server)) fail(`"${positionals[0]}" is not a server name (lowercase letters, digits, - and _, starting with a letter)`);
 
-  const r = runCli(["mcp", "status", server, "--json"], { say: fromCli });
+  const r = runCli(["mcp", "status", server, "--json"], { say: () => NOT_CONNECTED });
   if (r.code === 3) {
     fail(
       `could not read MCP server ${server}: either this workspace registered it under another name or this Catalyst Cloud does not serve tool-call records yet. A workspace owner or admin can list the names with \`catalyst mcp list\`.`,
     );
   }
-  if (r.code !== 0) fail(`could not read MCP server ${server}: ${fromCli(r.stderr.split("\n").map(oneLine).find(Boolean) ?? `exit code ${r.code}`)}`);
+  if (r.code !== 0) fail(`could not read MCP server ${server}: \`catalyst mcp status ${server}\` refused the read (exit ${r.code}); run it in a terminal to see the reason.`);
 
   let status;
   try {
     status = JSON.parse(r.stdout.trim());
   } catch {
-    fail(`could not parse the MCP status as JSON: ${fromCli(r.stdout.trim().slice(0, 200))}`);
+    fail(`could not read MCP server ${server}: could not parse the answer of \`catalyst mcp status ${server}\` as JSON (exit ${r.code}); run it in a terminal to see what it says.`);
   }
   const calls = status?.calls?.calls;
   if (!Array.isArray(calls)) fail(`could not read MCP server ${server}: the status came back in a shape this script does not know`);
