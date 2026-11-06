@@ -183,7 +183,7 @@ describe("--json", () => {
 describe("who can fix it: the line says what the explanation mentions and decides nothing", () => {
   const MENTIONS = (roles: string) => `Who can fix it: see the explanation above, which mentions ${roles}; read it as written.`;
   const UNNAMED = "Who can fix it: this script found no workspace owner, admin or operator in the explanation above; read it as written.";
-  const NO_ONE_LINE = "Who can fix it: the record names no one; a workspace owner or admin manages this workspace's MCP servers.";
+  const NO_ONE_LINE = "Who can fix it: the record has no explanation, so it names no one.";
   interface Fixer { mentioned: string[]; basis: string | null }
   const fixerOf = (dir: string) => (JSON.parse(run(dir, ["workos", "--json"]).stdout) as { fixer: Fixer }).fixer;
   const say = (explanation: string) => {
@@ -208,7 +208,7 @@ describe("who can fix it: the line says what the explanation mentions and decide
     expect(r.stdout).toContain(PROVIDER_EXPLANATION);
     expect(r.stdout).toContain(UNNAMED);
     expect(r.stdout).not.toContain("manages this workspace");
-    expect(r.stdout).not.toContain("the record names no one");
+    expect(r.stdout).not.toContain("names no one");
     expect(fixerOf(dir)).toEqual({ mentioned: [], basis: "explanation names none" });
   });
 
@@ -218,6 +218,8 @@ describe("who can fix it: the line says what the explanation mentions and decide
       const r = run(dir, ["workos"]);
       expect(r.status).toBe(0);
       expect(r.stdout).toContain(NO_ONE_LINE);
+      // Nothing the record does not say: not who manages MCP servers, not a pointer to anyone.
+      expect(r.stdout).not.toMatch(/manages|owner or admin/);
       expect(fixerOf(dir)).toEqual({ mentioned: [], basis: "no explanation" });
     }
   });
@@ -874,15 +876,6 @@ describe("a read that fails", () => {
     expect(all).not.toMatch(/mirror/i);
   });
 
-  test("CLI exit 2 with a portal refusal is exit 1, not the desk's 'not connected', and carries the CLI's reason", () => {
-    const { dir } = setup({ code: 2, stderr: PORTAL_UNAVAILABLE });
-    const r = run(dir, ["workos"]);
-    expect(r.status).toBe(1);
-    const all = `${r.stdout}\n${r.stderr}`;
-    expect(all).toContain("could not read MCP server workos");
-    expect(all).toContain("app_origin_not_portal_fronted");
-  });
-
   test("a body that is not JSON is a failed check", () => {
     const { dir } = setup({ stdout: "this is not json" });
     const r = run(dir, ["workos"]);
@@ -898,69 +891,69 @@ describe("a read that fails", () => {
   });
 });
 
-// What the CLI said is not the script's to pass on if it names a route: a token that starts with "/" or with http:// or
-// https:// becomes "the portal", and the rest of the message is kept.
-describe("text the CLI wrote never puts a route or an address into a refusal", () => {
-  const ROUTE = "GET /api/v1/mcp/servers/workos/calls";
-  const URL_ = "https://portal.example/api/v1/x";
-  const CLI_SAYS = `${ROUTE} was refused with 403: see ${URL_} for the key`;
-  const MASKED = "GET the portal was refused with 403: see the portal for the key";
+// The script relays none of the CLI's words: what the CLI wrote can hold a banned word, a route, an address or an
+// instruction the skill must never give (check logs). Every refusal is a fixed sentence that names only the server it
+// validated and the CLI's exit code.
+describe("a refusal never relays a word the CLI wrote", () => {
+  const DIRTY = "the tenant contract refused this key; check container logs at GET /api/v1/mcp/servers/workos/calls or https://portal.example/api/v1/x";
+  const LEAKS = [/tenant/i, /container logs/i, /check .*logs/i, /\/api\//, /portal\.example/, /https?:\/\//, /refused this key/, /contract/];
+  const READ = (code: number) => `could not read MCP server workos: \`catalyst mcp status workos\` refused the read (exit ${code}); run it in a terminal to see the reason.\n`;
   const clean = (r: ReturnType<typeof run>, status: number) => {
     expect(r.status).toBe(status);
     expect(r.stdout).toBe("");
     expect(r.stderr).toMatch(ONE_LINE);
-    for (const leak of ["/api/", "portal.example", "https://", "http://", "/v1", "mcp/servers"]) expect(r.stderr, leak).not.toContain(leak);
+    for (const leak of LEAKS) expect(`${r.stdout}${r.stderr}`).not.toMatch(leak);
   };
 
-  test.each([1, 2])("a CLI that exits %i with a route and an address in its first line: both masked, the rest kept", (code) => {
-    const { dir } = setup({ code, stderr: CLI_SAYS });
+  test.each([1, 2, 4, 127])("a CLI that exits %i with those words on stderr and stdout: one fixed sentence, exit 1", (code) => {
+    const { dir } = setup({ code, stderr: DIRTY, stdout: DIRTY });
     const r = run(dir, ["workos"]);
     clean(r, 1);
-    expect(r.stderr).toBe(`could not read MCP server workos: ${MASKED}\n`);
+    expect(r.stderr).toBe(READ(code));
   });
 
-  test("a route in the middle of a word group, in quotes and in brackets, is masked whole", () => {
-    const { dir } = setup({ code: 1, stderr: `refused (/api/v1/x) and "/api/v1/y" and http://portal.example/z.` });
+  test("a CLI that exits 2 with a portal refusal is exit 1, not the desk's 'not connected', and relays none of its reason", () => {
+    const { dir } = setup({ code: 2, stderr: PORTAL_UNAVAILABLE });
     const r = run(dir, ["workos"]);
     clean(r, 1);
-    expect(r.stderr).toBe("could not read MCP server workos: refused the portal and the portal and the portal\n");
+    expect(r.stderr).toBe(READ(2));
+    expect(r.stderr).not.toContain("app_origin_not_portal_fronted");
   });
 
-  test("a CLI error on several lines: the first line is relayed, masked, and later lines are not", () => {
-    const { dir } = setup({ code: 1, stderr: `\n${CLI_SAYS}\nsecond line GET /api/v1/second` });
+  test("a CLI that exits 0 with an answer that is not JSON: one fixed sentence, no excerpt of the answer", () => {
+    const { dir } = setup({ code: 0, stdout: DIRTY });
     const r = run(dir, ["workos"]);
     clean(r, 1);
-    expect(r.stderr).toBe(`could not read MCP server workos: ${MASKED}\n`);
+    expect(r.stderr).toBe("could not read MCP server workos: could not parse the answer of `catalyst mcp status workos` as JSON (exit 0); run it in a terminal to see what it says.\n");
   });
 
-  test("a CLI that exits 2 saying the machine is not joined: the desk's exit 2, still one masked line", () => {
-    const { dir } = setup({ code: 2, stderr: `not joined to a workspace — ${CLI_SAYS}\nrun the join command` });
-    const r = run(dir, ["workos"]);
-    clean(r, 2);
-    expect(r.stderr).toBe(`not joined to a workspace — ${MASKED} run the join command\n`);
-  });
-
-  test("a status body that is not JSON and names a route: the excerpt is masked and the line is still one", () => {
-    const { dir } = setup({ stdout: `Cannot ${ROUTE}\n<a href="${URL_}">x</a>` });
+  test("a CLI that exits 3: the fixed older-cloud sentence, none of the CLI's words, no route", () => {
+    const { dir } = setup({ code: 3, stderr: DIRTY, stdout: DIRTY });
     const r = run(dir, ["workos"]);
     clean(r, 1);
-    expect(r.stderr).toBe("could not parse the MCP status as JSON: Cannot GET the portal <a the portal\n");
-  });
-
-  test("a body longer than the excerpt that has a route at the cut is masked, not cut through", () => {
-    const { dir } = setup({ stdout: `${"x ".repeat(98)}/api/v1/mcp/servers/workos/calls` });
-    const r = run(dir, ["workos"]);
-    clean(r, 1);
-    expect(r.stderr).toBe(`could not parse the MCP status as JSON: ${"x ".repeat(98)}the portal\n`);
-  });
-
-  test("CLI exit 3: the fixed sentence has no route and none of the CLI's words", () => {
-    const { dir } = setup({ code: 3, stderr: `${CLI_SAYS}` });
-    const r = run(dir, ["workos"]);
-    clean(r, 1);
-    expect(r.stderr).not.toContain("403");
     expect(r.stderr).not.toMatch(/\/\S/);
     expect(r.stderr).toContain("catalyst mcp list");
+  });
+
+  test("a CLI that exits 2 saying the machine is not connected: the desk's exit 2 with one fixed sentence that says how to connect", () => {
+    const { dir } = setup({ code: 2, stderr: `not connected: ${DIRTY}\nrun the join command`, stdout: DIRTY });
+    const r = run(dir, ["workos"]);
+    expect(r.status).toBe(2);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toMatch(ONE_LINE);
+    for (const leak of LEAKS) expect(r.stderr).not.toMatch(leak);
+    expect(r.stderr).toMatch(/^not connected \([^)]*\) — run: npx -p @catalyst-cloud\/cli catalyst login/);
+    expect(r.stderr).not.toContain("join command");
+  });
+
+  test("a CLI error on several lines, and one far longer than a pipe holds, is still one fixed line", () => {
+    const long = "the portal refused the key ".repeat(8000).trim();
+    for (const stderr of ["first\n\nsecond\r\nthird", long]) {
+      const { dir } = setup({ code: 1, stderr });
+      const r = run(dir, ["workos"]);
+      clean(r, 1);
+      expect(r.stderr).toBe(READ(1));
+    }
   });
 });
 
@@ -975,7 +968,8 @@ describe("a refusal is one line on stderr, whole, and nothing on stdout", () => 
     const { dir } = setup({ stdout: "this is\nnot json\r\nat all" });
     const r = run(dir, ["workos"]);
     oneStderrLine(r);
-    expect(r.stderr).toContain("could not parse the MCP status as JSON: this is not json at all");
+    expect(r.stderr).toContain("could not parse the answer of `catalyst mcp status workos` as JSON");
+    expect(r.stderr).not.toContain("this is not json");
   });
 
   test("a name that is not a server name and has a line break in it", () => {
@@ -983,16 +977,6 @@ describe("a refusal is one line on stderr, whole, and nothing on stdout", () => 
     const r = run(dir, ["9\n!"]);
     oneStderrLine(r);
     expect(r.stderr).toContain("is not a server name");
-  });
-
-  test("a CLI error with line breaks, and one far longer than a pipe holds, is one whole line", () => {
-    const long = "the portal refused the key ".repeat(8000).trim();
-    for (const stderr of [`first\n\nsecond\r\nthird`, long]) {
-      const { dir } = setup({ code: 1, stderr });
-      const r = run(dir, ["workos"]);
-      oneStderrLine(r);
-      expect(r.stderr).toContain(`could not read MCP server workos: ${stderr.startsWith("first") ? "first" : long}`);
-    }
   });
 
   test("a status that is not the shape the script knows", () => {
