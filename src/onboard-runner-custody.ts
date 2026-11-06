@@ -25,6 +25,12 @@ export interface DarwinThoughtsInstallResult {
   readonly authority: Authority; readonly envAuthority: string;
   readonly requestsRoot: string; readonly responsesRoot: string;
   readonly configPath: string; readonly serviceLabel: string;
+  /** Set when this run re-pinned a Docker CLI that Docker Desktop updated (CTC-9745). */
+  readonly dockerRepin?: DockerRepin;
+}
+/** A Docker CLI re-pin: both hashes are lowercase SHA-256 hex, the signer is the verified team id. */
+export interface DockerRepin {
+  readonly oldSha256: string; readonly newSha256: string; readonly teamIdentifier: string;
 }
 interface Principal {
   readonly platform: string; readonly uid: number; readonly euid: number;
@@ -68,7 +74,12 @@ interface Ports {
   readonly engineIdentity: (input: EngineInput) => Promise<EngineIdentity>;
   readonly service: (input: ServiceInput) => Promise<void>;
   readonly receiveBootstrap: (input: BootstrapInput) => Promise<BootstrapReceipt>;
+  /** The strictly verified code-signing team id of the executable, or undefined when it does not verify.
+   * Absent means unverified, so a fixture that omits it fails closed. */
+  readonly verifyDockerSignature?: (input: { path: string; deadlineMs: number; signal?: AbortSignal }) => Promise<string | undefined>;
 }
+/** Docker Inc's Apple developer team id. TO BE CONFIRMED on a host with `codesign -dv` on the Docker CLI before push. */
+export const DOCKER_TEAM_IDENTIFIER = "9BNSXJN65R";
 const LABEL = "dev.catalystcloud.runner.darwin-thoughts-custody";
 const vendor = resolve(dirname(fileURLToPath(import.meta.url)), "../vendor/self-host/darwin-thoughts-custody");
 class CustodyInstallError extends Error {
@@ -81,6 +92,7 @@ export function darwinThoughtsInstallRefusal(error: unknown): string | undefined
 /** What a person changes for a create refusal that names its cause; other refusals have no advice. */
 const CREATE_REFUSAL_ADVICE: Readonly<Record<string, string>> = {
   bootstrap_create_mount_refused: "Docker Desktop refused to share a storage folder with the check container. In Docker Desktop, open Settings, then Resources, then File sharing, make sure your home folder is listed, apply, and run setup again.",
+  docker_executable_signature_unverified: "The Docker command on this Mac changed since private storage was set up, and its signature could not be verified as Docker's. Update or reinstall Docker Desktop, or run catalyst onboard --runner to enroll again.",
 };
 export function darwinThoughtsInstallAdvice(error: unknown): string | undefined {
   const reason = darwinThoughtsInstallRefusal(error);
@@ -266,6 +278,7 @@ function factory(ports: Ports) {
       const dockerHash = executable(executables.dockerExecutable, principal, roots);
       let authority: Authority | undefined;
       let enrolledSupervisorImage: string | undefined;
+      let repin: DockerRepin | undefined;
       if (existing) {
         custody.walk(state, false, 0o700, true);
         const runtime = record(parse(custody.read(join(state, "runtime.json"), 4096)),
@@ -275,12 +288,31 @@ function factory(ports: Ports) {
         const row = record(parse(custody.read(configPath, 16384)),
           ["version", "authority", "privateKeyFile", "supervisorImage", "dockerExecutable", "dockerExecutableSha256"]);
         authority = parseDarwinThoughtsAuthority(row.authority);
+        // Every field except the Docker hash must match exactly (CTC-9745). Only the hash may move.
         if (row.version !== 1 || authority.nativeUid !== principal.uid || authority.nativeGid !== principal.gid ||
             authority.nativeHome !== principal.home || authority.thoughtsRoot !== thoughtsRoot ||
             authority.locksRoot !== locksRoot || authority.requestsRoot !== requestsRoot ||
             authority.responsesRoot !== responsesRoot || row.privateKeyFile !== privateKeyFile ||
             row.dockerExecutable !== executables.dockerExecutable ||
-            row.dockerExecutableSha256 !== dockerHash) fail("existing_authority_mismatch");
+            typeof row.dockerExecutableSha256 !== "string" ||
+            !/^[a-f0-9]{64}$/.test(row.dockerExecutableSha256)) fail("existing_authority_mismatch");
+        if (row.dockerExecutableSha256 !== dockerHash) {
+          // The Docker CLI at the same recorded path changed, as Docker Desktop does when it updates.
+          // Re-pin it only after strict codesign proves it is Docker's; anything else fails closed.
+          // This runs before the Engine step, which would otherwise run the unproven binary.
+          alive();
+          let team: string | undefined;
+          try {
+            team = await ports.verifyDockerSignature?.({ path: executables.dockerExecutable,
+              deadlineMs: input.deadlineMs, signal });
+          } catch { team = undefined; }
+          alive();
+          // The bytes verified must be the bytes hashed.
+          if (team !== DOCKER_TEAM_IDENTIFIER ||
+              executable(executables.dockerExecutable, principal, roots) !== dockerHash)
+            fail("docker_executable_signature_unverified");
+          repin = { oldSha256: row.dockerExecutableSha256, newSha256: dockerHash, teamIdentifier: team };
+        }
         if (typeof row.supervisorImage !== "string") fail("existing_authority_mismatch");
         image(row.supervisorImage);
         if (row.supervisorImage.split("@sha256:")[0] !== input.supervisorImage.split("@sha256:")[0])
@@ -321,10 +353,11 @@ function factory(ports: Ports) {
           version: 1, authority, privateKeyFile, supervisorImage: input.supervisorImage,
           dockerExecutable: executables.dockerExecutable, dockerExecutableSha256: dockerHash,
         })));
-      } else if (enrolledSupervisorImage !== input.supervisorImage) {
+      } else if (enrolledSupervisorImage !== input.supervisorImage || repin !== undefined) {
         // Re-attest the enrolled producer on the current pinned helper, exactly as first
         // enrollment records it before proving it: same authority, key and executable pins,
         // same repository, cache-only, and the signed bootstrap below runs on the new pin.
+        // A verified Docker CLI re-pin rides in this same single write (CTC-9745).
         custody.replace(configPath, Buffer.from(canonicalDarwinThoughtsJson({
           version: 1, authority, privateKeyFile, supervisorImage: input.supervisorImage,
           dockerExecutable: executables.dockerExecutable, dockerExecutableSha256: dockerHash,
@@ -374,7 +407,7 @@ function factory(ports: Ports) {
         ...(receipt.engineGit ? { engineGit: receipt.engineGit as Observation } : {}) });
       custody.recheck();
       return { authority, envAuthority: canonicalDarwinThoughtsJson(authority), requestsRoot,
-        responsesRoot, configPath, serviceLabel: LABEL };
+        responsesRoot, configPath, serviceLabel: LABEL, ...(repin ? { dockerRepin: repin } : {}) };
     } finally { custody.close(); }
   }
   return { install };
@@ -397,7 +430,7 @@ function actualExecutables(): Executables {
   }
   return fail("docker_executable_unavailable");
 }
-interface CommandResult { readonly code: number; readonly stdout: string; readonly stderr: string; }
+export interface CommandResult { readonly code: number; readonly stdout: string; readonly stderr: string; }
 async function command(executable: string, args: string[], deadlineMs: number, maxBuffer = 16384, signal?: AbortSignal): Promise<CommandResult> {
   const budget = deadlineMs - Date.now();
   if (budget <= 0) fail("command_deadline_expired");
@@ -446,6 +479,26 @@ async function command(executable: string, args: string[], deadlineMs: number, m
       if (signal?.aborted) stop();
     }
   });
+}
+/** Strict codesign check of one executable. Returns its TeamIdentifier, or undefined when the signature
+ * does not verify or no single team id is printed. Absolute codesign path, no shell. */
+export async function verifyCodeSignatureTeam(
+  run: (executable: string, args: string[]) => Promise<CommandResult>, path: string,
+): Promise<string | undefined> {
+  const verified = await run("/usr/bin/codesign", ["--verify", "--strict", path]);
+  if (verified.code !== 0) return undefined;
+  const shown = await run("/usr/bin/codesign", ["--display", "--verbose=2", path]);
+  if (shown.code !== 0) return undefined;
+  const teams = new Set<string>();
+  for (const line of (shown.stderr + "\n" + shown.stdout).split("\n")) {
+    const match = /^TeamIdentifier=(\S+)$/.exec(line.trim());
+    if (match) teams.add(match[1]!);
+  }
+  return teams.size === 1 ? [...teams][0] : undefined;
+}
+function actualVerifyDockerSignature(input: { path: string; deadlineMs: number; signal?: AbortSignal }) {
+  return verifyCodeSignatureTeam(
+    (executable, args) => command(executable, args, input.deadlineMs, 16384, input.signal), input.path);
 }
 /** Internal receipt seam for controlled child-process fixtures; no production override. */
 export const receiveDarwinThoughtsCommandForTest = command;
@@ -687,5 +740,6 @@ export function installDarwinThoughtsCustody(input: DarwinThoughtsInstallInput, 
   validateInstallLayout(actualPrincipal().home, input.dir);
   return factory({ principal: actualPrincipal, now: Date.now, stat: (_path, stat) => stat,
     executables: actualExecutables, artifacts: actualArtifacts, engineIdentity: actualEngine,
-    service: actualService, receiveBootstrap: actualBootstrap }).install(input, signal);
+    service: actualService, receiveBootstrap: actualBootstrap,
+    verifyDockerSignature: actualVerifyDockerSignature }).install(input, signal);
 }

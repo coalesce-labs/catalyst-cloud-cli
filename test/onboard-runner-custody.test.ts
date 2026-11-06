@@ -3,7 +3,7 @@ import { createHash, createPrivateKey, generateKeyPairSync, sign } from "node:cr
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createDarwinThoughtsInstallerTestHarness, installDarwinThoughtsCustody } from "../src/onboard-runner-custody.js";
+import { createDarwinThoughtsInstallerTestHarness, installDarwinThoughtsCustody, verifyCodeSignatureTeam } from "../src/onboard-runner-custody.js";
 
 const PROCESS_UID = process.getuid?.();
 const PROCESS_GID = process.getgid?.();
@@ -48,6 +48,8 @@ describe("native Darwin custody installer", () => {
     let wrongSignature = false;
     let nonceCount = 0;
     let verifierBytes = "// vendored verifier";
+    let verifiedTeam: string | undefined = "9BNSXJN65R";
+    const verifyCalls: string[] = [];
     const harness = createDarwinThoughtsInstallerTestHarness({
       principal: () => principal, now: () => NOW,
       stat: (path: string, stat: fs.BigIntStats): fs.BigIntStats =>
@@ -65,6 +67,7 @@ describe("native Darwin custody installer", () => {
           cachedRunner: cached, runnerCustodyVersion };
       },
       service: async (input: Record<string, unknown>) => { calls.push({ kind: "service", ...input }); },
+      verifyDockerSignature: async (input: { path: string }) => { verifyCalls.push(input.path); return verifiedTeam; },
       receiveBootstrap: async input => {
         calls.push({ kind: "bootstrap", supervisorImage: input.supervisorImage, verifierPath: input.verifierPath });
         const config = JSON.parse(fs.readFileSync(input.configPath, "utf8"));
@@ -98,7 +101,10 @@ describe("native Darwin custody installer", () => {
       setCached: (value: boolean) => { cached = value; },
       setRunnerCustodyVersion: (value: string | undefined) => { runnerCustodyVersion = value; },
       setWrongSignature: () => { wrongSignature = true; },
-      setVerifier: (value: string) => { verifierBytes = value; } };
+      setVerifier: (value: string) => { verifierBytes = value; },
+      verifyCalls, setVerifiedTeam: (value: string | undefined) => { verifiedTeam = value; },
+      /** What Docker Desktop does on an update: new bytes at the same path. */
+      updateDocker: () => fs.writeFileSync(executables.dockerExecutable, "#!/bin/sh\nexit 7\n", { mode: 0o700 }) };
   }
   it("exports a closed production installer", () => { expect(installDarwinThoughtsCustody).toBeTypeOf("function"); });
   it("accepts ordinary native0755 intermediates without broadening private signer/channel leaves", async () => {
@@ -203,6 +209,71 @@ describe("native Darwin custody installer", () => {
     expect(fs.readFileSync(first.configPath)).toEqual(config); expect(fs.readFileSync(keyFile)).toEqual(key);
     expect(f.calls.filter(call => call.kind === "bootstrap")).toHaveLength(2);
   });
+  describe("CTC-9745: a Docker CLI that Docker Desktop updated", () => {
+    const sha = (path: string) => createHash("sha256").update(fs.readFileSync(path)).digest("hex");
+    it("re-pins the record and proceeds when the new binary verifies, at the same path", async () => {
+      const f = fixture(); const first = await f.harness.install(f.input);
+      const enrolled = JSON.parse(fs.readFileSync(first.configPath, "utf8"));
+      f.updateDocker(); f.calls.length = 0;
+      const second = await f.harness.install(f.input);
+      const row = JSON.parse(fs.readFileSync(first.configPath, "utf8"));
+      expect(row).toEqual({ ...enrolled, dockerExecutableSha256: sha(f.executables.dockerExecutable) });
+      expect(row.dockerExecutableSha256).not.toBe(enrolled.dockerExecutableSha256);
+      expect(fs.lstatSync(first.configPath).mode & 0o7777).toBe(0o600);
+      expect(f.verifyCalls).toEqual([f.executables.dockerExecutable]);
+      expect(second.authority).toEqual(first.authority);
+      expect(f.calls.map(call => call.kind)).toEqual(["engine", "service", "bootstrap"]);
+    });
+    it("returns the re-pin event with old hash, new hash and signer", async () => {
+      const f = fixture(); const first = await f.harness.install(f.input);
+      expect(first.dockerRepin).toBeUndefined();
+      const oldSha = sha(f.executables.dockerExecutable);
+      f.updateDocker();
+      const second = await f.harness.install(f.input);
+      expect(second.dockerRepin).toEqual({ oldSha256: oldSha, newSha256: sha(f.executables.dockerExecutable), teamIdentifier: "9BNSXJN65R" });
+      f.verifyCalls.length = 0;
+      const third = await f.harness.install(f.input);
+      expect(third.dockerRepin).toBeUndefined();
+      expect(f.verifyCalls).toEqual([]);
+    });
+    it("writes the record once when the helper image also changed", async () => {
+      const f = fixture(); const first = await f.harness.install(f.input);
+      const runtimeSupervisor = "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:" + "c".repeat(64);
+      f.updateDocker();
+      await f.harness.install({ ...f.input, supervisorImage: runtimeSupervisor });
+      const row = JSON.parse(fs.readFileSync(first.configPath, "utf8"));
+      expect(row.supervisorImage).toBe(runtimeSupervisor);
+      expect(row.dockerExecutableSha256).toBe(sha(f.executables.dockerExecutable));
+    });
+    it.each([["a different team id", "ABCDE12345"], ["a signature that does not verify", undefined]])("fails closed on %s and leaves the record byte-identical", async (_name, team) => {
+      const f = fixture(); const first = await f.harness.install(f.input);
+      const before = fs.readFileSync(first.configPath);
+      f.updateDocker(); f.setVerifiedTeam(team); f.calls.length = 0;
+      await expect(f.harness.install(f.input)).rejects.toThrow("docker_executable_signature_unverified");
+      expect(fs.readFileSync(first.configPath)).toEqual(before);
+      expect(f.calls).toEqual([]);
+    });
+    it("refuses a different path as before, and never verifies", async () => {
+      const f = fixture(); const first = await f.harness.install(f.input);
+      const config = JSON.parse(fs.readFileSync(first.configPath, "utf8"));
+      config.dockerExecutable = join(home, "elsewhere-docker");
+      fs.writeFileSync(first.configPath, canonical(config)); const before = fs.readFileSync(first.configPath);
+      f.updateDocker();
+      await expect(f.harness.install(f.input)).rejects.toThrow("existing_authority_mismatch");
+      expect(f.verifyCalls).toEqual([]);
+      expect(fs.readFileSync(first.configPath)).toEqual(before);
+    });
+    it("refuses another changed field alongside the Docker hash, and never verifies", async () => {
+      const f = fixture(); const first = await f.harness.install(f.input);
+      const config = JSON.parse(fs.readFileSync(first.configPath, "utf8"));
+      config.privateKeyFile = join(home, "other-key.der");
+      fs.writeFileSync(first.configPath, canonical(config)); const before = fs.readFileSync(first.configPath);
+      f.updateDocker();
+      await expect(f.harness.install(f.input)).rejects.toThrow("existing_authority_mismatch");
+      expect(f.verifyCalls).toEqual([]);
+      expect(fs.readFileSync(first.configPath)).toEqual(before);
+    });
+  });
   it("re-attests an older enrolled helper on the current pin, replacing only the recorded image", async () => {
     const f = fixture(); const first = await f.harness.install(f.input);
     const runtimeSupervisor = "ghcr.io/coalesce-labs/catalyst-supervisor@sha256:" + "c".repeat(64);
@@ -295,5 +366,38 @@ describe("native Darwin custody installer", () => {
     await expect(f.harness.install(f.input)).rejects.toThrow(/runner|custody|label/);
     expect(fs.existsSync(join(f.state, "private-key.der"))).toBe(false);
     expect(f.calls.map(call => call.kind)).toEqual(["engine"]);
+  });
+});
+
+describe("CTC-9745: the production codesign verifier", () => {
+  const ok = (stderr = "") => ({ code: 0, stdout: "", stderr });
+  const display = (team: string) => ok("Executable=/usr/local/bin/docker\nIdentifier=com.docker.cli\nTeamIdentifier=" + team + "\nSealed Resources=none");
+  function runner(responses: Array<ReturnType<typeof ok>>) {
+    const calls: Array<{ executable: string; args: string[] }> = [];
+    return { calls, run: async (executable: string, args: string[]) => { calls.push({ executable, args }); return responses.shift() ?? { code: 1, stdout: "", stderr: "" }; } };
+  }
+  it("runs strict verify then display on the absolute codesign, and returns the team id", async () => {
+    const r = runner([ok(), display("9BNSXJN65R")]);
+    expect(await verifyCodeSignatureTeam(r.run, "/usr/local/bin/docker")).toBe("9BNSXJN65R");
+    expect(r.calls).toEqual([
+      { executable: "/usr/bin/codesign", args: ["--verify", "--strict", "/usr/local/bin/docker"] },
+      { executable: "/usr/bin/codesign", args: ["--display", "--verbose=2", "/usr/local/bin/docker"] },
+    ]);
+  });
+  it("returns a different team id as read", async () => {
+    expect(await verifyCodeSignatureTeam(runner([ok(), display("ZZZZZZZZZZ")]).run, "/x")).toBe("ZZZZZZZZZZ");
+  });
+  it("returns undefined when no team id line is printed", async () => {
+    expect(await verifyCodeSignatureTeam(runner([ok(), ok("Executable=/x\nTeamIdentifier=not set")]).run, "/x")).toBeUndefined();
+    expect(await verifyCodeSignatureTeam(runner([ok(), ok("Executable=/x")]).run, "/x")).toBeUndefined();
+  });
+  it("returns undefined when verify fails, and does not display", async () => {
+    const r = runner([{ code: 1, stdout: "", stderr: "invalid signature" }, display("9BNSXJN65R")]);
+    expect(await verifyCodeSignatureTeam(r.run, "/x")).toBeUndefined();
+    expect(r.calls).toHaveLength(1);
+  });
+  it("returns undefined when display fails or prints two different team ids", async () => {
+    expect(await verifyCodeSignatureTeam(runner([ok(), { code: 1, stdout: "", stderr: "" }]).run, "/x")).toBeUndefined();
+    expect(await verifyCodeSignatureTeam(runner([ok(), ok("TeamIdentifier=9BNSXJN65R\nTeamIdentifier=ABCDE12345")]).run, "/x")).toBeUndefined();
   });
 });

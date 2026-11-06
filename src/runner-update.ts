@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { readManifest, type Ctx } from "./config.js";
 import { CliError } from "./errors.js";
 import { onboardStateRoot } from "./onboard.js";
-import { darwinThoughtsInstallRefusal } from "./onboard-runner-custody.js";
+import { darwinThoughtsInstallRefusal, type DockerRepin } from "./onboard-runner-custody.js";
 import {
   dockerRunnerEngine,
   parseEnvText,
@@ -410,7 +410,16 @@ export interface ServiceState {
 }
 
 /** A custody attestation: the authority it now holds, or the installer's fixed refusal reason (CTC-6914). */
-export type CustodyAttestation = { authority: string } | { refused: string };
+export type CustodyAttestation = { authority: string; dockerRepin?: DockerRepin } | { refused: string };
+
+/** The owner's log line for a Docker CLI re-pin (CTC-9745): full hashes and the verified signer. */
+export function dockerRepinLine(repin: DockerRepin): string {
+  return `Docker Desktop updated its command. Private thoughts storage pinned the new one after its code signature verified: signer ${repin.teamIdentifier}, old sha256 ${repin.oldSha256}, new sha256 ${repin.newSha256}.`;
+}
+/** The re-pin as a report detail token: short hex and a lowercase signer, inside the cloud's detail characters. */
+export function dockerRepinDetail(repin: DockerRepin): string {
+  return `docker_cli_repinned:${repin.oldSha256.slice(0, 12)}:${repin.newSha256.slice(0, 12)}:${repin.teamIdentifier.toLowerCase()}`;
+}
 
 /** Everything the update touches outside its own files. The docker one is below; tests use fakes. */
 export interface RunnerUpdateEngine {
@@ -801,8 +810,15 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   const envPath = join(dir, ".env");
   let state = readReleaseState(dir);
   const notices: string[] = [];
-  const done = (outcome: UpdateOutcome, detail: string, extra: Partial<UpdateResult> = {}): UpdateResult =>
-    ({ outcome, detail, generation: state.generation, exitCode: 0, ...extra });
+  // A Docker CLI re-pin this run made: printed in the update log and carried in the report detail.
+  let repinned: DockerRepin | null = null;
+  const withRepin = (detail: string) => repinned === null ? detail : `${detail},${dockerRepinDetail(repinned)}`;
+  const done = (outcome: UpdateOutcome, detail: string, extra: Partial<UpdateResult> = {}): UpdateResult => {
+    const have = extra.notices ?? [];
+    const shown = repinned === null || have.includes(dockerRepinLine(repinned)) ? have : [...have, dockerRepinLine(repinned)];
+    return { outcome, detail: withRepin(detail), generation: state.generation, exitCode: 0, ...extra,
+      ...(shown.length > 0 ? { notices: shown } : {}) };
+  };
 
   const read = await engine.desiredRelease(dir, signal, options.check ? undefined : updateReport(state, readManifest().version), fresh);
   const hostId = read.kind === "no_credential" ? "" : read.hostId;
@@ -866,7 +882,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     const journal = release.journalFormat === null ? null : { format: release.journalFormat, supervisor: target.supervisor };
     const pendingRemoval = [...new Set([...state.pendingRemoval, ...unremoved])].slice(-PENDING_REMOVAL_KEPT);
     writeReleaseState(dir, { ...state, generation: release.generation, releaseId: release.releaseId, appliedAtMs: now(), previous, kept: null, journal, pendingRemoval });
-    return { outcome, detail, generation: release.generation, exitCode: 0, ...tagged, ...(notices.length > 0 ? { notices } : {}) };
+    return { outcome, detail: withRepin(detail), generation: release.generation, exitCode: 0, ...tagged, ...(notices.length > 0 ? { notices } : {}) };
   };
 
   if (options.check)
@@ -923,6 +939,10 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
   const attestCustody = async (images: Images): Promise<string | null> => {
     const attested = await engine.custody(dir, images, signal);
     if ("refused" in attested) return attested.refused;
+    if (attested.dockerRepin && repinned === null) {
+      repinned = attested.dockerRepin;
+      notices.push(dockerRepinLine(attested.dockerRepin));
+    }
     return attested.authority === env.CATALYST_THOUGHTS_CUSTODY_AUTHORITY ? null : "authority_changed";
   };
   const restoreCustody = async (images: Images | null): Promise<string | null> =>
@@ -1023,7 +1043,10 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
 async function returnFromKept(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, state: ReleaseState, hostId: string, now: () => number): Promise<UpdateResult> {
   const { dir, signal } = options;
   const envPath = join(dir, ".env");
-  const result = (outcome: UpdateOutcome, detail: string, exitCode: number): UpdateResult => ({ outcome, detail, generation: state.generation, exitCode });
+  let repinned: DockerRepin | null = null;
+  const result = (outcome: UpdateOutcome, detail: string, exitCode: number): UpdateResult => ({
+    outcome, detail: repinned === null ? detail : `${detail},${dockerRepinDetail(repinned)}`,
+    generation: state.generation, exitCode, ...(repinned === null ? {} : { notices: [dockerRepinLine(repinned)] }) });
   let rollbackText: string;
   try {
     rollbackText = readFileSync(join(dir, PREVIOUS_ENV_FILE), "utf8");
@@ -1036,6 +1059,7 @@ async function returnFromKept(engine: RunnerUpdateEngine, options: RunnerUpdateO
     if (persistedCustody(dir, env) !== "installed") return null;
     const attested = await engine.custody(dir, rollbackImages, signal);
     if ("refused" in attested) return attested.refused;
+    if (attested.dockerRepin) repinned = attested.dockerRepin;
     return attested.authority === env.CATALYST_THOUGHTS_CUSTODY_AUTHORITY ? null : "authority_changed";
   };
   if (!(await engine.stopSupervisor(dir, signal))) {
@@ -1249,7 +1273,7 @@ export function dockerRunnerUpdateEngine(
       if (!setup.nativeThoughtsCustody) return { refused: "capability_missing" };
       try {
         const result = await setup.nativeThoughtsCustody({ dir, supervisorImage: images.supervisor, runnerImage: images.runner }, signal);
-        return { authority: result.envAuthority };
+        return { authority: result.envAuthority, ...(result.dockerRepin ? { dockerRepin: result.dockerRepin } : {}) };
       } catch (error) {
         // Only the installer's fixed reasons are recorded; other exception text can carry credentials.
         return { refused: darwinThoughtsInstallRefusal(error) ?? "unclassified" };
