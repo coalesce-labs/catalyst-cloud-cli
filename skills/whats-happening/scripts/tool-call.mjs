@@ -96,12 +96,10 @@ function readCall(c) {
 /** The answer for one read: the fields of the call it rests on, a verdict, and the reason as the verb prints it. */
 function answer(server, ticket, tool, calls) {
   const base = { server, ticket: ticket ?? null, phase: null, tool: null, outcome: null, reason: null, explanation: null, at: null };
-  const window = { read: calls.length, limit: LIMIT };
-  const kept = calls
-    .map(readCall)
-    .filter(
+  const readable = calls.map(readCall).filter((c) => c !== null);
+  const window = { read: calls.length, limit: LIMIT, unreadable: calls.length - readable.length };
+  const kept = readable.filter(
       (c) =>
-        c !== null &&
         (!ticket || (c.ticket ?? "").toLowerCase() === ticket.toLowerCase()) &&
         (!tool || c.tool.toLowerCase().includes(tool.toLowerCase())),
     );
@@ -125,18 +123,27 @@ function answer(server, ticket, tool, calls) {
   return { a, why: [call.denied, call.explanation].filter(Boolean).join(": ") };
 }
 
-/** The one line the desk replies with. */
-function render({ a, why }, ticket, tool, n) {
+/** The one line the desk replies with. Records the script could not read are counted, and no sentence speaks for them. */
+function render({ a, why }, ticket, tool) {
+  const { read, unreadable } = a.window;
+  const calls = (n, adjective = "") => `${n} ${adjective}recorded call${n === 1 ? "" : "s"}`;
   const matching = tool ? ` matching ${tool}` : "";
   if (a.verdict === "not-in-window") {
-    const subject = ticket ? `${ticket} has no call to ${a.server}` : `there is no call to ${a.server}`;
-    return `${subject}${matching} among the newest ${LIMIT} this workspace recorded, so the record cannot say why; this read sees no further back.`;
+    const none = unreadable ? "no readable call" : "no call";
+    const subject = ticket ? `${ticket} has ${none} to ${a.server}` : `there is ${none} to ${a.server}`;
+    const cannot = unreadable ? `, and ${calls(unreadable)} could not be read, so the record cannot say why` : ", so the record cannot say why";
+    return `${subject}${matching} among the newest ${LIMIT} this workspace recorded${cannot}; this read sees no further back.`;
   }
   if (a.verdict === "no-failure") {
-    return `no failed call to ${a.server}${ticket ? ` on ${ticket}` : ""}${matching} in its newest ${n} recorded call${n === 1 ? "" : "s"}; the newest was ok at ${a.at ?? "an unrecorded time"}.`;
+    const seen = unreadable ? `the ${read - unreadable} readable of its newest ${calls(read)}` : `its newest ${calls(read)}`;
+    const newest = ticket || tool ? "the newest one that matches" : unreadable ? "the newest readable one" : "the newest";
+    const rest = unreadable ? `; ${calls(unreadable)} could not be read, so this may not be the whole picture` : "";
+    return `no failed call to ${a.server}${ticket ? ` on ${ticket}` : ""}${matching} in ${seen}; ${newest} was ok at ${a.at ?? "an unrecorded time"}${rest}.`;
   }
   const slot = a.ticket ? `${a.ticket} ${a.phase ?? ""}`.trim() : "no ticket";
-  return `${slot}: ${a.tool} on ${a.server} failed (${a.outcome}) — ${sentence(why || "the record gives no reason")} Who can fix it: ${a.fixer.who ?? (a.explanation ? NOT_NAMED : NO_ONE)}.`;
+  const who = a.fixer.who ?? (a.explanation ? NOT_NAMED : NO_ONE);
+  const skipped = unreadable ? ` ${calls(unreadable, "other ")} could not be read, so this may not be the newest failure.` : "";
+  return `${slot}: ${a.tool} on ${a.server} failed (${a.outcome}) — ${sentence(why || "the record gives no reason")} Who can fix it: ${who}.${skipped}`;
 }
 
 function fail(message) {
@@ -171,5 +178,5 @@ if (!Array.isArray(calls)) fail(`could not read MCP server ${server}: the status
 
 const result = answer(server, flags.ticket, flags.tool, calls);
 // The line is collapsed whole, so no value in it (a flag, a recorded ticket, phase, tool or outcome) can break it in two.
-process.stdout.write(`${flags.json ? JSON.stringify(result.a) : oneLine(render(result, flags.ticket, flags.tool, calls.length))}\n`);
+process.stdout.write(`${flags.json ? JSON.stringify(result.a) : oneLine(render(result, flags.ticket, flags.tool))}\n`);
 process.exit(0);
