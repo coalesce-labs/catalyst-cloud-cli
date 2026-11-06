@@ -3,7 +3,7 @@
 // `catalyst mcp status <server> --json`, which reads the portal's record of the server's newest
 // tool calls. The script picks the newest failed call that matches --ticket / --tool and prints
 // the ticket, the tool, the reason as the cloud wrote it, and who can fix it.
-import { parseFlags, parseJson, printHelp, runCli } from "./lib/cli.mjs";
+import { parseFlags, printHelp, runCli } from "./lib/cli.mjs";
 
 const SPEC = {
   ticket: { value: true, help: "keep calls dispatched for this ticket (the KEY-123 shape)" },
@@ -164,10 +164,18 @@ function render({ a, why, newer }, ticket, tool) {
   return `${slot}: ${a.tool} on ${a.server} failed (${a.outcome}) — ${sentence(why || "the record gives no reason")} Who can fix it: ${who}.${later}${skipped}`;
 }
 
-function fail(message) {
-  process.stderr.write(`${message}\n`);
-  process.exit(1);
-}
+/** A refusal: one line, however the message was built. It is written once, at the end, and the process then ends on its own. */
+class Refusal extends Error {}
+const fail = (message) => {
+  throw new Refusal(oneLine(message));
+};
+// A reader that closes early (`| head -c 20`) is not an error. On stderr the exit code is left as it was.
+process.stdout.on("error", (err) => {
+  if (err.code !== "EPIPE") throw err;
+  process.exit(0);
+});
+process.stderr.on("error", () => {});
+
 
 const { help, flags, positionals } = parseFlags(process.argv.slice(2), SPEC);
 if (help || positionals.length === 0) {
@@ -180,21 +188,33 @@ if (help || positionals.length === 0) {
   process.exit(help ? 0 : 1);
 }
 
-const server = normaliseServer(positionals[0]);
-if (!SERVER_NAME.test(server)) fail(`"${positionals[0]}" is not a server name (lowercase letters, digits, - and _, starting with a letter)`);
+try {
+  const server = normaliseServer(positionals[0]);
+  if (!SERVER_NAME.test(server)) fail(`"${positionals[0]}" is not a server name (lowercase letters, digits, - and _, starting with a letter)`);
 
-const r = runCli(["mcp", "status", server, "--json"]);
-if (r.code === 3) {
-  fail(
-    `could not read MCP server ${server}: either this workspace registered it under another name or this Catalyst Cloud does not serve tool-call records yet. A workspace owner or admin can list the names with \`catalyst mcp list\`.`,
-  );
+  const r = runCli(["mcp", "status", server, "--json"]);
+  if (r.code === 3) {
+    fail(
+      `could not read MCP server ${server}: either this workspace registered it under another name or this Catalyst Cloud does not serve tool-call records yet. A workspace owner or admin can list the names with \`catalyst mcp list\`.`,
+    );
+  }
+  if (r.code !== 0) fail(`could not read MCP server ${server}: ${r.stderr.split("\n").map(oneLine).find(Boolean) ?? `exit code ${r.code}`}`);
+
+  let status;
+  try {
+    status = JSON.parse(r.stdout.trim());
+  } catch {
+    fail(`could not parse the MCP status as JSON: ${r.stdout.trim().slice(0, 200)}`);
+  }
+  const calls = status?.calls?.calls;
+  if (!Array.isArray(calls)) fail(`could not read MCP server ${server}: the status came back in a shape this script does not know`);
+
+  const result = answer(server, flags.ticket, flags.tool, calls);
+  // The line is collapsed whole, so no value in it (a flag, a recorded ticket, phase, tool or outcome) can break it in two.
+  // No process.exit() after the write: on a pipe it cuts a large write short, and the record's own words are kept whole.
+  process.stdout.write(`${flags.json ? JSON.stringify(result.a) : oneLine(render(result, flags.ticket, flags.tool))}\n`);
+} catch (err) {
+  if (!(err instanceof Refusal)) throw err;
+  process.stderr.write(`${err.message}\n`);
+  process.exitCode = 1;
 }
-if (r.code !== 0) fail(`could not read MCP server ${server}: ${r.stderr.split("\n").map(oneLine).find(Boolean) ?? `exit code ${r.code}`}`);
-
-const calls = parseJson(r.stdout, "the MCP status")?.calls?.calls;
-if (!Array.isArray(calls)) fail(`could not read MCP server ${server}: the status came back in a shape this script does not know`);
-
-const result = answer(server, flags.ticket, flags.tool, calls);
-// The line is collapsed whole, so no value in it (a flag, a recorded ticket, phase, tool or outcome) can break it in two.
-// No process.exit() after the write: on a pipe it cuts a large write short, and the record's own words are kept whole.
-process.stdout.write(`${flags.json ? JSON.stringify(result.a) : oneLine(render(result, flags.ticket, flags.tool))}\n`);
