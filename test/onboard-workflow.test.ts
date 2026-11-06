@@ -275,9 +275,9 @@ function assertInstalledPinnedSdk() {
     !declaration.dependencies ||
     typeof declaration.dependencies !== "object" ||
     !("@catalyst-cloud/sdk" in declaration.dependencies) ||
-    declaration.dependencies["@catalyst-cloud/sdk"] !== "0.16.19"
+    declaration.dependencies["@catalyst-cloud/sdk"] !== "0.16.24"
   )
-    throw new Error("CLI must declare the exact SDK 0.16.19 dependency");
+    throw new Error("CLI must declare the exact SDK 0.16.24 dependency");
   const require = createRequire(import.meta.url);
   const entry = require.resolve("@catalyst-cloud/sdk");
   const pkg: unknown = JSON.parse(
@@ -287,9 +287,9 @@ function assertInstalledPinnedSdk() {
     !pkg ||
     typeof pkg !== "object" ||
     !("version" in pkg) ||
-    pkg.version !== "0.16.19"
+    pkg.version !== "0.16.24"
   )
-    throw new Error("actual installed SDK 0.16.19 required");
+    throw new Error("actual installed SDK 0.16.24 required");
 }
 
 describe("existing workflow wire truth", () => {
