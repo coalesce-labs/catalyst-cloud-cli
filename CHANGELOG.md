@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.16.47
+
+`catalyst env shell` now gives each checkout of each repository its own home volume, so repositories on the same image no longer share `/home/catalyst`. Your first shell in each checkout starts with a fresh home, so toolchains download again and shell history starts over. A moved checkout also gets a fresh home, and a directory with no `.git`, or a checkout on a filesystem that reports no creation time, gets a home that is removed when the shell exits.
+
+The old shared volumes stay on your machine and are never mounted again. To remove them, run `docker volume ls --filter name=catalyst-env-home-` and `docker volume rm` each name that ends after 12 hex characters.
+
+`catalyst env shell` could print part of the short-lived download credential your workspace issued when an image download failed, and no longer does. That credential expires on its own. An error with terminal control codes now shows as `docker pull failed`.
+
+The first image download in `catalyst env shell` now works through a named Docker context that uses TLS, whether you set `DOCKER_CONTEXT` or ran `docker context use`.
+
+`catalyst env shell` in a git worktree now keeps its relative `.git` pointers valid inside the container.
+
 ## 0.16.46
 
 `catalyst runner update` on a Mac keeps working after Docker Desktop updates its `docker` command. Private thoughts storage records which `docker` command it trusts, and until now a changed one stopped every update until the machine was set up again with `catalyst onboard --runner`. The update now checks the new command's code signature. When Docker signed it (team ID `9BNSXJN65R`), the update records the new command and goes on, and its log names the old and new SHA-256 and the signer. A command with any other signature, or none, is still refused.
