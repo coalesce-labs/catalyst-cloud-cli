@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CUSTODY_UNATTESTED_LINE, DRAIN_AFTER_MS, DRAIN_SOFT_LIMIT_MS, lastProblemLines, readReleaseState, RELEASE_STATE_FILE, releaseLock,
-  releaseUpdateDrain, runRunnerUpdate, takeLock, updateResultLines, writeReleaseState, type UpdateResult } from "../src/runner-update";
+import { CUSTODY_UNATTESTED_LINE, DRAIN_AFTER_MS, dockerRepinLine, DRAIN_SOFT_LIMIT_MS, lastProblemLines, readReleaseState, RELEASE_STATE_FILE, releaseLock,
+  releaseUpdateDrain, runRunnerUpdate, takeLock, updateReport, updateResultLines, writeReleaseState, type UpdateResult } from "../src/runner-update";
 import { main } from "../src/cli";
 import { canonicalDarwinThoughtsJson } from "../vendor/self-host/darwin-thoughts-custody/verifier.mjs";
 import { makeCtx, tempHome } from "./helpers";
@@ -632,5 +632,45 @@ describe("CTC-7749: a drain's soft limit never ends a running phase", () => {
     const second = fakeEngine(dir, { read: offered(), phases: () => 1, drain: cloud.call });
     const resumed = await runRunnerUpdate(second.engine, { dir, drain: true, now: time.now, sleep: async () => secondAbort.abort(), signal: secondAbort.signal });
     expect(resumed.outcome).toBe("draining_for_update");
+  });
+});
+
+describe("CTC-9745: an update that re-pins a Docker CLI says so", () => {
+  const repin = { oldSha256: "a1".repeat(32), newSha256: "b2".repeat(32), teamIdentifier: "9BNSXJN65R" };
+  it("prints old hash, new hash and signer in the update log, and carries them in the report detail", async () => {
+    const { dir, authority } = custodyMachine();
+    const time = clock(A);
+    const fake = fakeEngine(dir, { read: offered(), custody: () => ({ authority, dockerRepin: repin }) });
+    const result = await runRunnerUpdate(fake.engine, { dir, now: time.now, sleep: time.sleep, readyDeadlineMs: 20_000 });
+    expect(result.outcome).toBe("updated");
+    const lines = updateResultLines(result).join("\n");
+    expect(lines).toContain(repin.oldSha256);
+    expect(lines).toContain(repin.newSha256);
+    expect(lines).toContain("9BNSXJN65R");
+    expect(result.notices).toContain(dockerRepinLine(repin));
+    expect(result.detail).toContain("docker_cli_repinned:a1a1a1a1a1a1:b2b2b2b2b2b2:9bnsxjn65r");
+    const report = JSON.parse(updateReport(readReleaseState(dir), "0.1.0")!) as { detail: string };
+    expect(report.detail).toContain("docker_cli_repinned:a1a1a1a1a1a1:b2b2b2b2b2b2:9bnsxjn65r");
+  });
+  it("keeps the re-pin line and the waiting line when the new release waits out a preparation stop", async () => {
+    const { dir, authority } = custodyMachine();
+    const time = clock(A);
+    const fake = fakeEngine(dir, { read: offered(), ready: () => false, preparationStop: () => true, custody: () => ({ authority, dockerRepin: repin }) });
+    const result = await runRunnerUpdate(fake.engine, { dir, scheduled: true, now: time.now, sleep: time.sleep, readyDeadlineMs: 20_000 });
+    expect(result.outcome).toBe("retained");
+    expect(result.detail).toBe("waiting_preparation_stop,docker_cli_repinned:a1a1a1a1a1a1:b2b2b2b2b2b2:9bnsxjn65r");
+    expect(result.notices).toContain(dockerRepinLine(repin));
+    const lines = updateResultLines(result);
+    expect(lines[0]).toContain("goes back to the previous release after 45 minutes");
+    expect(lines.join("\n")).toContain(repin.newSha256);
+  });
+  it("says nothing about a re-pin when the Docker CLI did not change", async () => {
+    const { dir, authority } = custodyMachine();
+    const time = clock(A);
+    const fake = fakeEngine(dir, { read: offered(), custody: () => authority });
+    const result = await runRunnerUpdate(fake.engine, { dir, now: time.now, sleep: time.sleep, readyDeadlineMs: 20_000 });
+    expect(result.outcome).toBe("updated");
+    expect(result.detail).not.toContain("docker_cli_repinned");
+    expect(updateResultLines(result).join("\n")).not.toContain("Docker Desktop updated");
   });
 });
