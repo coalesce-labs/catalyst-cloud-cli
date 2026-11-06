@@ -22,7 +22,7 @@ const TOOLCHAINS = [
 const base = {
   image: IMAGE,
   root: "/Users/ana/src/web",
-  rootIdentity: "4242:1700000000000000000",
+  rootIdentity: "4242:1700000000000000000:4243:1700000000000000001",
   gitCommonDir: null,
   toolchains: TOOLCHAINS,
   passNames: ["DATABASE_URL", "STRIPE_SECRET_KEY"],
@@ -30,9 +30,9 @@ const base = {
 };
 
 test("homeVolumeFor names the volume by the image digest's first 12 hex and the checkout path's sha256", () => {
-  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", base.rootIdentity)).toBe("catalyst-env-home-a19f7b0859a9-4076c8137440206d8962b5e6");
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", base.rootIdentity)).toBe("catalyst-env-home-a19f7b0859a9-7f66f77abfe74a62e0443947");
   expect(homeVolumeFor("not-pinned", "/Users/ana/src/web", base.rootIdentity)).toMatch(
-    /^catalyst-env-home-[0-9a-f]{12}-4076c8137440206d8962b5e6$/,
+    /^catalyst-env-home-[0-9a-f]{12}-7f66f77abfe74a62e0443947$/,
   );
 });
 
@@ -48,18 +48,23 @@ test("two repositories on one image get different home volumes; one repository k
 });
 
 test("the same path with a different directory identity gets a different home volume (CTC-6155)", () => {
-  const first = homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000000");
-  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000001")).not.toBe(first);
-  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000000")).toBe(first);
-  expect(homeVolumeFor(IMAGE, "/Users/ana/src/api", "4242:1700000000000000000")).not.toBe(first);
+  const first = homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000000:4243:1700000000000000001");
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000000:4243:1700000000000000002")).not.toBe(first);
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000000:4243:1700000000000000001")).toBe(first);
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/api", "4242:1700000000000000000:4243:1700000000000000001")).not.toBe(first);
 });
 
-test("the checkout identity ignores the change time, so adding entries at the root keeps the volume (CTC-6155)", () => {
-  const fresh = identityFromStat({ ino: 5n, birthtimeNs: 100n });
-  expect(fresh).toBe("5:100");
-  expect(identityFromStat({ ino: 5n, birthtimeNs: 100n })).toBe(fresh);
-  expect(identityFromStat({ ino: 5n, birthtimeNs: 101n })).not.toBe(fresh);
-  expect(identityFromStat({ ino: 5n, birthtimeNs: 0n })).toBeNull();
+test("the checkout identity is the root's and its .git entry's inode and birth time; no birth time or no .git is none (CTC-6155)", () => {
+  const root = { ino: 5n, birthtimeNs: 100n };
+  const gitDir = { ino: 6n, birthtimeNs: 200n };
+  const identity = identityFromStat(root, gitDir);
+  expect(identity).toBe("5:100:6:200");
+  expect(identityFromStat({ ...root }, { ...gitDir })).toBe(identity);
+  expect(identityFromStat(root, { ino: 6n, birthtimeNs: 201n })).not.toBe(identity);
+  expect(identityFromStat({ ino: 5n, birthtimeNs: 101n }, gitDir)).not.toBe(identity);
+  expect(identityFromStat(root, null)).toBeNull();
+  expect(identityFromStat({ ino: 5n, birthtimeNs: 0n }, gitDir)).toBeNull();
+  expect(identityFromStat(root, { ino: 6n, birthtimeNs: 0n })).toBeNull();
 });
 
 test("with no directory identity the home is an anonymous volume: no name, so no other run can mount it (CTC-6155)", () => {
@@ -74,7 +79,7 @@ test("with no directory identity the home is an anonymous volume: no name, so no
 test("the home volume name is a valid Docker volume name of fixed length for any root", () => {
   for (const root of ["/Users/ana/src/web", "/home/a b/ünï=code", `/${"x".repeat(400)}`, "C:\\Users\\ana\\web"]) {
     for (const image of [IMAGE, "not-pinned"]) {
-      const name = homeVolumeFor(image, root, "9:1700000000000000000");
+      const name = homeVolumeFor(image, root, "9:1700000000000000000:10:1700000000000000000");
       expect(name).toMatch(/^catalyst-env-home-[0-9a-f]{12}-[0-9a-f]{24}$/);
       expect(name).toMatch(/^[A-Za-z0-9][A-Za-z0-9_.-]+$/);
       expect(name).toHaveLength(55);
@@ -91,7 +96,7 @@ test("shell mode on a terminal: the whole argv, pinned", () => {
     "run", "--rm", "--pull", "never", "-i", "-t",
     "--user", "10001:10001",
     "--mount", "type=bind,src=/Users/ana/src/web,dst=/workspace",
-    "--mount", "type=volume,src=catalyst-env-home-a19f7b0859a9-4076c8137440206d8962b5e6,dst=/home/catalyst",
+    "--mount", "type=volume,src=catalyst-env-home-a19f7b0859a9-7f66f77abfe74a62e0443947,dst=/home/catalyst",
     "-w", "/workspace",
     "-e", "HOME=/home/catalyst",
     "-e", "MISE_SYSTEM_DATA_DIR=/opt/catalyst/toolchain",
