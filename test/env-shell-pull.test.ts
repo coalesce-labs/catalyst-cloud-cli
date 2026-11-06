@@ -2,6 +2,8 @@
 // Credential-free first; only on a refusal, and only for a signed-in person whose contract serves the
 // route, it asks the workspace (the fixture cloud) for a short-lived credential, checks it covers the
 // image, and pulls once more with it. Docker is a hand-written fake that records every pull.
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   CREDENTIAL_FREE_CONFIG,
@@ -11,7 +13,7 @@ import {
   pullCredentialRoute,
   registryOf,
 } from "../src/env/shell-pull";
-import type { DockerConfigJson, EnvShellDocker, EnvShellEndpoint } from "../src/env/shell-docker";
+import { spawnEnvShellDocker, type DockerConfigJson, type EnvShellDocker, type EnvShellEndpoint } from "../src/env/shell-docker";
 import { RUNNER_HOST_IMAGES } from "../src/onboard-runner";
 import { buildFixtureContract, FIXTURE_ROUTE_PREFIX } from "./fixture-contract";
 import { startMeFixture, type FixtureServer } from "./fixture";
@@ -308,6 +310,148 @@ describe("downloadImage", () => {
       expect(line).not.toContain(PASSWORD);
       expect(line).not.toContain(EXPECTED_AUTH);
     }
+  });
+});
+
+// CTC-6157 — the same refusal, but through the real docker adapter and a scripted `docker`, so Docker's
+// error line goes through `lastLine`'s 400-character cut. The in-process fake above returns its detail
+// verbatim and never reaches that cut, which is why the redaction test above could not see the leak.
+describe("downloadImage with the real docker adapter (CTC-6157)", () => {
+  const LEAD = "Error response from daemon: unauthorized: ";
+
+  /** One error line that holds `secret` at index `at`, so the 400-character cut falls inside it. */
+  function straddling(secret: string, at: number): string {
+    const line = LEAD + "a".repeat(at - LEAD.length) + secret + " rejected";
+    expect(line.indexOf(secret)).toBe(at);
+    expect(at + secret.length).toBeGreaterThan(400);
+    return line;
+  }
+
+  /** `secret` with `gap` after its first half, as Docker might echo it. */
+  function broken(secret: string, gap: string): string {
+    const at = Math.floor(secret.length / 2);
+    return secret.slice(0, at) + gap + secret.slice(at);
+  }
+
+  /** No fragment of either secret: not its first 4 characters, and not its last 4 either. None of these
+   *  four strings occurs in the refusal's own text (REF, the lead, the notes), so any hit is a credential. */
+  function expectNoSecretFragment(text: string) {
+    expect(text).not.toContain(PASSWORD.slice(0, 4)); // "ctcp"
+    expect(text).not.toContain(PASSWORD.slice(-4)); // "E123"
+    expect(text).not.toContain(EXPECTED_AUTH.slice(0, 4)); // "eC1j"
+    expect(text).not.toContain(EXPECTED_AUTH.slice(-4)); // "MjM="
+  }
+
+  /** The real adapter over a `docker` that prints $FAKE_PULL_ERR to stderr and exits 1. Its env is
+   *  PATH and HOME only: never a copy of process.env. */
+  function scriptedDocker(pullError: string): EnvShellDocker {
+    const bin = join(home, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "docker"), `#!/bin/sh\nprintf '%s\\n' "$FAKE_PULL_ERR" >&2\nexit 1\n`);
+    chmodSync(join(bin, "docker"), 0o755);
+    return spawnEnvShellDocker({
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: home, FAKE_PULL_ERR: pullError },
+      tmpdir: () => home,
+    });
+  }
+
+  test.each([
+    ["password at 390", PASSWORD, 390],
+    ["auth at 390", EXPECTED_AUTH, 390],
+    ["auth at 370", EXPECTED_AUTH, 370],
+  ] as const)(
+    "Docker echoes the credential across the 400-character cut (%s) → the refusal holds no fragment of it",
+    async (_name, secret, at) => {
+      const docker = scriptedDocker(`progress line\n${straddling(secret, at)}`);
+      await signIn();
+      server.pullCredential = { status: 200, body: issuedBody() };
+      const refusal = refusalOf(await download(docker));
+      expect(refusal.code).toBe("image_download_refused");
+      expectNoSecretFragment(refusal.message);
+      expectNoSecretFragment(JSON.stringify(refusal));
+      expect(
+        refusal.message.startsWith(`Could not download ${REF} with the credential your workspace issued: ${LEAD}`),
+      ).toBe(true);
+      expect(refusal.message).toContain("[redacted]");
+      expect(refusal.message.endsWith(".")).toBe(true);
+      expect(notes.length).toBeGreaterThan(0);
+      for (const line of notes) expectNoSecretFragment(line);
+    },
+  );
+
+  test.each([
+    ["a CRLF in the password", PASSWORD, "\r\n"],
+    ["a line feed in the auth value", EXPECTED_AUTH, "\n"],
+  ] as const)(
+    "Docker breaks the credential up with %s → the refusal holds none of it",
+    async (_name, secret, gap) => {
+      const docker = scriptedDocker(`progress line\n${LEAD}${broken(secret, gap)} rejected`);
+      await signIn();
+      server.pullCredential = { status: 200, body: issuedBody() };
+      const refusal = refusalOf(await download(docker));
+      expect(refusal.code).toBe("image_download_refused");
+      expectNoSecretFragment(refusal.message);
+      expectNoSecretFragment(JSON.stringify(refusal));
+      expect(notes.length).toBeGreaterThan(0);
+      for (const line of notes) expectNoSecretFragment(line);
+      expect(refusal.message).toBe(
+        `Could not download ${REF} with the credential your workspace issued: ${LEAD}[redacted] rejected.`,
+      );
+    },
+  );
+
+  const WITHHELD = [
+    ["an ANSI colour sequence", "\x1b[31m"],
+    ["an OSC ended by BEL", "\x1b]0;title\x07"],
+    ["an OSC ended by ST", "\x1b]0;title\x1b\\"],
+    ["an unterminated OSC", "\x1b]0;title"],
+    ["a DCS ended by ST", "\x1bPq\x1b\\"],
+    ["a charset designation", "\x1b(B"],
+    ["an 8-bit CSI", "\x9b31m"],
+    ["an 8-bit OSC ended by 0x9C", "\x9d0;title\x9c"],
+  ] as const;
+
+  test.each(
+    WITHHELD.flatMap(([name, gap]) =>
+      ([PASSWORD, EXPECTED_AUTH] as const).flatMap((secret) =>
+        ([0, 395 - LEAD.length] as const).map((pad) => [name, secret, gap, pad] as const),
+      ),
+    ),
+  )(
+    "CTC-6157: Docker breaks the credential up with %s (secret %#, pad before it %#) → the detail is withheld",
+    async (_name, secret, gap, pad) => {
+      const docker = scriptedDocker(`progress line\n${LEAD}${"a".repeat(pad)}${broken(secret, gap)} rejected`);
+      await signIn();
+      server.pullCredential = { status: 200, body: issuedBody() };
+      const refusal = refusalOf(await download(docker));
+      expect(refusal.code).toBe("image_download_refused");
+      expectNoSecretFragment(JSON.stringify(refusal));
+      for (const line of notes) expectNoSecretFragment(line);
+      expect(refusal.message).toBe(
+        `Could not download ${REF} with the credential your workspace issued: docker pull failed.`,
+      );
+    },
+  );
+
+  test("CTC-6157: a low-entropy password and a coloured error that only mentions the word → withheld, not half-redacted", async () => {
+    const docker = scriptedDocker("\x1b[31mwrong password for user\x1b[0m");
+    await signIn();
+    server.pullCredential = { status: 200, body: issuedBody({ password: "password123" }) };
+    const refusal = refusalOf(await download(docker));
+    expect(refusal.message).toBe(
+      `Could not download ${REF} with the credential your workspace issued: docker pull failed.`,
+    );
+    expect(refusal.message).not.toContain("[redacted]");
+  });
+
+  test("CTC-6157: the same password and an escape-free error that mentions the word → shown as it is", async () => {
+    const docker = scriptedDocker("wrong password for user");
+    await signIn();
+    server.pullCredential = { status: 200, body: issuedBody({ password: "password123" }) };
+    const refusal = refusalOf(await download(docker));
+    expect(refusal.message).toBe(
+      `Could not download ${REF} with the credential your workspace issued: wrong password for user.`,
+    );
   });
 });
 

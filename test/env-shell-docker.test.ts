@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { main } from "../src/cli";
-import { exitCodeOf, lastLine, spawnEnvShellDocker } from "../src/env/shell-docker";
+import { exitCodeOf, lastLine, redactSecrets, spawnEnvShellDocker } from "../src/env/shell-docker";
 import { makeCtx } from "./helpers";
 
 // The real spawn wrapper, driven against a scripted `docker` placed first on PATH. The fake records
@@ -175,6 +175,35 @@ function lastCall(): Call {
 
 const pullDirs = () => readdirSync(pullTmp).filter((name) => name.startsWith("catalyst-env-pull-"));
 
+// CTC-6157 — a download credential Docker echoes back must be redacted before its error line is cut
+// to 400 characters, or a cut inside the secret leaves a prefix that matches nothing.
+const PASSWORD = "ctcpull_SECRETVALUE123";
+const EXPECTED_AUTH = Buffer.from(`x-catalyst-pull:${PASSWORD}`).toString("base64");
+const CRED_CONFIG = { auths: { "registry.example.dev": { auth: EXPECTED_AUTH } } };
+const LEAD = "Error response from daemon: unauthorized: ";
+
+/** One error line that holds `secret` at index `at`, so the 400-character cut falls inside it. */
+function straddling(secret: string, at = 390): string {
+  const line = LEAD + "a".repeat(at - LEAD.length) + secret + " rejected";
+  expect(line.indexOf(secret)).toBe(at);
+  expect(at + secret.length).toBeGreaterThan(400);
+  return line;
+}
+
+/** `secret` with `gap` after its first `at` characters (default: in the middle), as Docker might echo it. */
+function broken(secret: string, gap: string, at = Math.floor(secret.length / 2)): string {
+  return secret.slice(0, at) + gap + secret.slice(at);
+}
+
+/** No fragment of either secret: not its first 4 characters, and not its last 4 either. None of these
+ *  four strings occurs in the fixtures' own text, so any hit is a piece of a credential. */
+function expectNoSecretFragment(text: string) {
+  expect(text).not.toContain(PASSWORD.slice(0, 4)); // "ctcp"
+  expect(text).not.toContain(PASSWORD.slice(-4)); // "E123"
+  expect(text).not.toContain(EXPECTED_AUTH.slice(0, 4)); // "eC1j"
+  expect(text).not.toContain(EXPECTED_AUTH.slice(-4)); // "MjM="
+}
+
 describe("server", () => {
   test("server(): ENOENT → missing; exit 1 → not_running; 'windows' → not_linux; 'linux' → ok", async () => {
     expect(await spawnEnvShellDocker({ env: { ...baseEnv(), PATH: emptyDir } }).server()).toEqual({ state: "missing" });
@@ -327,6 +356,287 @@ describe("pull", () => {
     const docker = spawnEnvShellDocker({ env: { ...baseEnv(), PATH: emptyDir }, tmpdir: () => pullTmp });
     expect(await docker.pull(REF, { host: HOST }, CONFIG)).toEqual({ ok: false, detail: "docker is not installed" });
     expect(pullDirs()).toEqual([]);
+  });
+
+  test.each([
+    ["password at 390", PASSWORD, 390],
+    ["auth at 390", EXPECTED_AUTH, 390],
+    ["auth at 370", EXPECTED_AUTH, 370],
+  ] as const)(
+    "pull() CTC-6157: Docker echoes the credential across the 400-character cut (%s) → no fragment of it comes back",
+    async (_name, secret, at) => {
+      const docker = spawnEnvShellDocker({
+        env: baseEnv({ FAKE_PULL_EXIT: "1", FAKE_PULL_ERR: `progress line\n${straddling(secret, at)}` }),
+        tmpdir: () => pullTmp,
+      });
+      const result = await docker.pull(REF, { host: HOST }, CRED_CONFIG);
+      expect(result.ok).toBe(false);
+      expectNoSecretFragment(result.detail);
+      expect(result.detail.startsWith(LEAD)).toBe(true);
+      expect(result.detail).toContain("[redacted]");
+      expect(result.detail.length).toBeLessThanOrEqual(400);
+      expect(pullDirs()).toEqual([]);
+    },
+  );
+
+  test("pull() CTC-6157: the catch path (the temp directory cannot be made) redacts the credential its error message names", async () => {
+    // mkdtemp's ENOENT message carries the path, and the path here holds the password.
+    const docker = spawnEnvShellDocker({ env: baseEnv(), tmpdir: () => join(root, `missing-${PASSWORD}`) });
+    const result = await docker.pull(REF, { host: HOST }, CRED_CONFIG);
+    expect(result.ok).toBe(false);
+    // The message is short, so nothing is cut: the temp root's random name is the only other text in it
+    // that is not fixed, so it is taken out before looking for a fragment of a credential.
+    expectNoSecretFragment(result.detail.replaceAll(root, "<root>"));
+    expect(result.detail.startsWith("ENOENT")).toBe(true);
+    expect(result.detail).toContain("[redacted]");
+  });
+
+  test.each([
+    ["a CRLF in the password", PASSWORD, "\r\n"],
+    ["a line feed in the auth value", EXPECTED_AUTH, "\n"],
+  ] as const)(
+    "pull() CTC-6157: Docker breaks the credential up with %s → none of it comes back",
+    async (_name, secret, gap) => {
+      const docker = spawnEnvShellDocker({
+        env: baseEnv({ FAKE_PULL_EXIT: "1", FAKE_PULL_ERR: `progress line\n${LEAD}${broken(secret, gap)} rejected` }),
+        tmpdir: () => pullTmp,
+      });
+      const result = await docker.pull(REF, { host: HOST }, CRED_CONFIG);
+      expectNoSecretFragment(result.detail);
+      expect(result).toEqual({ ok: false, detail: `${LEAD}[redacted] rejected` });
+      expect(pullDirs()).toEqual([]);
+    },
+  );
+
+  test.each(
+    [
+      ["an ANSI colour sequence", "\x1b[31m"],
+      ["an OSC ended by BEL", "\x1b]0;title\x07"],
+      ["an unterminated OSC", "\x1b]0;title"],
+      ["a charset designation", "\x1b(B"],
+      ["an 8-bit CSI", "\x9b31m"],
+    ].flatMap(([name, gap]) =>
+      [PASSWORD, EXPECTED_AUTH].flatMap((secret) =>
+        [0, 395 - LEAD.length].map((pad) => [name, secret, gap, pad] as const),
+      ),
+    ),
+  )("pull() CTC-6157: %s in a secret (secret %#, pad %#) → escape-bearing text is withheld", async (_name, secret, gap, pad) => {
+    const docker = spawnEnvShellDocker({
+      env: baseEnv({
+        FAKE_PULL_EXIT: "1",
+        FAKE_PULL_ERR: `progress line\n${LEAD}${"a".repeat(pad)}${broken(secret, gap)} rejected`,
+      }),
+      tmpdir: () => pullTmp,
+    });
+    const result = await docker.pull(REF, { host: HOST }, CRED_CONFIG);
+    expect(result).toEqual({ ok: false, detail: "" });
+    expect(pullDirs()).toEqual([]);
+  });
+});
+
+describe("pull through a named context (CTC-6154)", () => {
+  const REF = "docker.io/library/alpine:3.20";
+  const HOST_TLS = "tcp://remote.example:2376";
+  const CONFIG = { auths: { "https://index.docker.io/v1/": {} } };
+  const PEMS = { "ca.pem": "CA-remote-tls", "cert.pem": "CERT-remote-tls", "key.pem": "KEY-remote-tls" };
+  const PEM_NAMES = "ca.pem cert.pem key.pem";
+
+  /** Writes a context the way `docker context create` does: meta/<sha256(name)>/meta.json and tls/<id>/docker/*.pem. */
+  function writeContext(
+    configDir: string,
+    name: string,
+    host: string,
+    opts: { skipTLSVerify?: boolean; pems?: Record<string, string> } = {},
+  ): { tlsDir: string } {
+    const id = createHash("sha256").update(name).digest("hex");
+    const metaDir = join(configDir, "contexts", "meta", id);
+    const tlsDir = join(configDir, "contexts", "tls", id, "docker");
+    mkdirSync(metaDir, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(metaDir, "meta.json"),
+      JSON.stringify({ Name: name, Metadata: {}, Endpoints: { docker: { Host: host, SkipTLSVerify: opts.skipTLSVerify === true } } }),
+      { mode: 0o600 },
+    );
+    mkdirSync(tlsDir, { recursive: true, mode: 0o700 });
+    for (const [file, content] of Object.entries(opts.pems ?? {})) writeFileSync(join(tlsDir, file), content, { mode: 0o600 });
+    return { tlsDir };
+  }
+
+  /** `endpoint()` then `pull()`, the way `catalyst env shell` calls them. */
+  async function endpointThenPull(env: NodeJS.ProcessEnv, config = CONFIG) {
+    const docker = spawnEnvShellDocker({ env, tmpdir: () => pullTmp });
+    const endpoint = await docker.endpoint();
+    if (!endpoint.ok) throw new Error(`endpoint() refused: ${endpoint.reason}`);
+    return { endpoint, pulled: await docker.pull(REF, endpoint, config) };
+  }
+
+  function expectTlsPull(): void {
+    const call = lastCall();
+    expect(call.vars.eff_err).toBe("");
+    expect(call.vars.eff_host).toBe(HOST_TLS);
+    expect(call.vars.eff_tls).toBe("verify");
+    expect(call.vars.eff_pems).toBe(PEM_NAMES);
+    expect(call.vars.eff_ca).toBe("CA-remote-tls");
+  }
+
+  function expectIsolatedConfig(): void {
+    const call = lastCall();
+    expect(call.vars.config).toBe(JSON.stringify(CONFIG));
+    expect(call.vars.config_mode).toBe("600");
+    expect(call.vars.dir_mode).toBe("700");
+    expect(call.vars.DOCKER_AUTH_CONFIG).toBe("<unset>");
+  }
+
+  function expectStoreIntact(tlsDir: string): void {
+    for (const [file, content] of Object.entries(PEMS)) expect(readFileSync(join(tlsDir, file), "utf8")).toBe(content);
+  }
+
+  let home: string;
+
+  beforeEach(() => {
+    home = join(root, "home");
+    mkdirSync(home);
+  });
+
+  test("DOCKER_CONTEXT names a TLS context: the pull reaches the context's engine with the context's own TLS files", async () => {
+    const { tlsDir } = writeContext(join(home, ".docker"), "remote-tls", HOST_TLS, { pems: PEMS });
+    const env = baseEnv({ HOME: home, DOCKER_CONTEXT: "remote-tls", FAKE_CONTEXT_NAME: "remote-tls", FAKE_CONTEXT_HOST: HOST_TLS });
+
+    const { endpoint, pulled } = await endpointThenPull(env);
+    expect(endpoint).toEqual({ ok: true, host: HOST_TLS, context: "remote-tls" });
+    expect(pulled.ok).toBe(true);
+
+    expectTlsPull();
+    expectIsolatedConfig();
+    const call = lastCall();
+    expect(call.argv.slice(0, 2)).toEqual(["--context", "remote-tls"]);
+    expect(call.argv).not.toContain("--host");
+    expect(call.vars.DOCKER_CONTEXT).toBe("<unset>");
+    expect(pullDirs()).toEqual([]);
+    expectStoreIntact(tlsDir);
+  });
+
+  test("the developer also exports DOCKER_TLS_VERIFY=1: the context's files are used, not $HOME/.docker's", async () => {
+    const { tlsDir } = writeContext(join(home, ".docker"), "remote-tls", HOST_TLS, { pems: PEMS });
+    const env = baseEnv({
+      HOME: home,
+      DOCKER_CONTEXT: "remote-tls",
+      DOCKER_TLS_VERIFY: "1",
+      FAKE_CONTEXT_NAME: "remote-tls",
+      FAKE_CONTEXT_HOST: HOST_TLS,
+    });
+
+    const { pulled } = await endpointThenPull(env);
+    expect(pulled.ok).toBe(true);
+    expectTlsPull();
+    expect(pullDirs()).toEqual([]);
+    expectStoreIntact(tlsDir);
+  });
+
+  test("`docker context use` (no DOCKER_CONTEXT) with the store under DOCKER_CONFIG: the store is found through DOCKER_CONFIG, not HOME", async () => {
+    const configDir = join(root, "cfg");
+    const { tlsDir } = writeContext(configDir, "remote-tls", HOST_TLS, { pems: PEMS });
+    const env = baseEnv({ HOME: home, DOCKER_CONFIG: configDir, FAKE_CONTEXT_NAME: "remote-tls", FAKE_CONTEXT_HOST: HOST_TLS });
+
+    const { endpoint, pulled } = await endpointThenPull(env);
+    expect(endpoint).toEqual({ ok: true, host: HOST_TLS, context: "remote-tls" });
+    expect(calls()[0]?.argv).toEqual(["context", "inspect", "--format", '{{.Name}}{{"\\t"}}{{(index .Endpoints "docker").Host}}']);
+    expect(pulled.ok).toBe(true);
+
+    expectTlsPull();
+    expectIsolatedConfig();
+    expect(lastCall().vars.DOCKER_CONFIG).not.toBe(configDir);
+    expect(pullDirs()).toEqual([]);
+    expectStoreIntact(tlsDir);
+  });
+
+  test("a SkipTLSVerify context with no TLS files: TLS stays on, unverified", async () => {
+    writeContext(join(home, ".docker"), "remote-tls", HOST_TLS, { skipTLSVerify: true });
+    const env = baseEnv({ HOME: home, DOCKER_CONTEXT: "remote-tls", FAKE_CONTEXT_NAME: "remote-tls", FAKE_CONTEXT_HOST: HOST_TLS });
+
+    const { pulled } = await endpointThenPull(env);
+    expect(pulled.ok).toBe(true);
+    const call = lastCall();
+    expect(call.vars.eff_err).toBe("");
+    expect(call.vars.eff_host).toBe(HOST_TLS);
+    expect(call.vars.eff_tls).toBe("noverify");
+    expect(pullDirs()).toEqual([]);
+  });
+
+  test("a failed pull still removes the throwaway directory and leaves the developer's context store intact", async () => {
+    const { tlsDir } = writeContext(join(home, ".docker"), "remote-tls", HOST_TLS, { pems: PEMS });
+    const env = baseEnv({
+      HOME: home,
+      DOCKER_CONTEXT: "remote-tls",
+      FAKE_CONTEXT_NAME: "remote-tls",
+      FAKE_CONTEXT_HOST: HOST_TLS,
+      FAKE_PULL_EXIT: "1",
+      FAKE_PULL_ERR: "Error response from daemon: denied",
+    });
+
+    const { pulled } = await endpointThenPull(env);
+    expect(pulled).toEqual({ ok: false, detail: "Error response from daemon: denied" });
+    expectTlsPull();
+    expect(pullDirs()).toEqual([]);
+    expectStoreIntact(tlsDir);
+    expect(existsSync(join(home, ".docker", "contexts", "meta"))).toBe(true);
+  });
+
+  test("a context the store does not hold is refused by Docker, and nothing is left behind", async () => {
+    const env = baseEnv({ HOME: home });
+    const pulled = await spawnEnvShellDocker({ env, tmpdir: () => pullTmp }).pull(REF, { host: HOST_TLS, context: "gone" }, CONFIG);
+    expect(pulled).toEqual({ ok: false, detail: 'context "gone" does not exist' });
+    expect(pullDirs()).toEqual([]);
+  });
+
+  test("no docker on PATH with a context endpoint → not installed, and the directory is still removed", async () => {
+    const { tlsDir } = writeContext(join(home, ".docker"), "remote-tls", HOST_TLS, { pems: PEMS });
+    const docker = spawnEnvShellDocker({ env: { ...baseEnv({ HOME: home }), PATH: emptyDir }, tmpdir: () => pullTmp });
+    expect(await docker.pull(REF, { host: HOST_TLS, context: "remote-tls" }, CONFIG)).toEqual({
+      ok: false,
+      detail: "docker is not installed",
+    });
+    expect(pullDirs()).toEqual([]);
+    expectStoreIntact(tlsDir);
+  });
+
+  // End to end through `catalyst env shell`, whose signature did not change: no docker port is injected, so the
+  // CLI builds the real one over ctx.env. The image is missing, and the anonymous pull succeeds, so what decides the
+  // test is the TLS outcome the fake records for that one pull.
+  describe("catalyst env shell, no injected docker", () => {
+    async function shellWith(extra: NodeJS.ProcessEnv): Promise<number> {
+      const repo = join(root, "repo");
+      mkdirSync(join(repo, ".catalyst"), { recursive: true });
+      writeFileSync(join(repo, ".catalyst", "catalyst.toml"), '[environment]\ntoolchains = [{ name = "node", version = "22" }]\n');
+      const ctx = makeCtx(home, {
+        env: baseEnv({ HOME: home, CATALYST_SKILLS_OFFLINE: "1", FAKE_VERSION_OS: "linux", FAKE_INSPECT_EXIT: "1", ...extra }),
+      });
+      return main(["env", "shell", "--root", repo], ctx, {
+        env: { shell: { isTty: () => true, platform: "darwin", uid: 501, readRepositoryName: async () => "acme/web", gitCommonDir: async () => null } },
+      });
+    }
+
+    function expectContextTls(): void {
+      const pull = calls().find((call) => call.vars.eff_tls !== undefined);
+      if (!pull) throw new Error("the fake docker never saw a pull");
+      expect(pull.vars.eff_err).toBe("");
+      expect(pull.vars.eff_host).toBe(HOST_TLS);
+      expect(pull.vars.eff_tls).toBe("verify");
+      expect(pull.vars.eff_pems).toBe(PEM_NAMES);
+      expect(pull.vars.eff_ca).toBe("CA-remote-tls");
+    }
+
+    test("DOCKER_CONTEXT names a TLS context: the first image download carries the context's TLS files", async () => {
+      writeContext(join(home, ".docker"), "remote-tls", HOST_TLS, { pems: PEMS });
+      expect(await shellWith({ DOCKER_CONTEXT: "remote-tls", FAKE_CONTEXT_NAME: "remote-tls", FAKE_CONTEXT_HOST: HOST_TLS })).toBe(0);
+      expectContextTls();
+    });
+
+    test("the current context is a TLS context (no DOCKER_CONTEXT): the first image download carries its TLS files", async () => {
+      writeContext(join(home, ".docker"), "remote-tls", HOST_TLS, { pems: PEMS });
+      expect(await shellWith({ FAKE_CONTEXT_NAME: "remote-tls", FAKE_CONTEXT_HOST: HOST_TLS })).toBe(0);
+      expectContextTls();
+    });
   });
 });
 
@@ -578,5 +888,172 @@ describe("exitCodeOf and lastLine", () => {
     expect(lastLine("first\nsecond\n\n")).toBe("second");
     expect(lastLine("first\r\nsecond\r\n")).toBe("second");
     expect(lastLine("")).toBe("");
+  });
+
+  test("lastLine CTC-6157: a secret that crosses the 400-character cut is redacted before the cut, not left as a prefix", () => {
+    expect(lastLine("a".repeat(390) + PASSWORD + " rejected", [PASSWORD])).toBe("a".repeat(390) + "[redacted]");
+    expect(lastLine("a".repeat(390) + EXPECTED_AUTH + " rejected", [EXPECTED_AUTH])).toBe("a".repeat(390) + "[redacted]");
+  });
+
+  test("lastLine CTC-6157: the longest secret goes first, so one secret inside another does not split it", () => {
+    expect(lastLine("denied abcXYZ12345def", ["XYZ12345", "abcXYZ12345def"])).toBe("denied [redacted]");
+  });
+
+  test("lastLine CTC-6157: an empty secret is ignored", () => {
+    expect(lastLine("denied", [""])).toBe("denied");
+  });
+
+  // What Docker's echo may put inside a credential: line breaks and plain control characters (text
+  // with an escape or a C1 control is withheld, tested below). Whatever sits between the characters, none of the credential comes back.
+  const BREAKS = [
+    ["a CRLF", "\r\n"],
+    ["a line feed", "\n"],
+    ["a carriage return", "\r"],
+    ["a NUL", "\x00"],
+    ["a bell", "\x07"],
+    ["a DEL", "\x7f"],
+    ["a non-ASCII character", "\u00e9"],
+  ] as const;
+
+  const BROKEN_CREDENTIALS = BREAKS.flatMap(([name, gap]) => [
+    [`${name} in the password`, PASSWORD, gap] as const,
+    [`${name} in the auth value`, EXPECTED_AUTH, gap] as const,
+  ]);
+
+  test.each(BROKEN_CREDENTIALS)("lastLine CTC-6157: %s → the whole credential is redacted", (_name, secret, gap) => {
+    const shown = lastLine(`progress\n${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH]);
+    expectNoSecretFragment(shown);
+    expect(shown).toBe(`${LEAD}[redacted] rejected`);
+  });
+
+  test.each([
+    ["after its first character", 1],
+    ["before its last character", PASSWORD.length - 1],
+  ])("lastLine CTC-6157: a line break %s still redacts the password", (_name, at) => {
+    const echo = `${LEAD}${broken(PASSWORD, "\r\n", at)} rejected`;
+    expect(lastLine(echo, [PASSWORD])).toBe(`${LEAD}[redacted] rejected`);
+  });
+
+  test("lastLine CTC-6157: a control character between every pair of characters of the credential still redacts it", () => {
+    for (const secret of [PASSWORD, EXPECTED_AUTH]) {
+      const echo = `${LEAD}${[...secret].join("\x00")} rejected`;
+      expect(lastLine(echo, [PASSWORD, EXPECTED_AUTH])).toBe(`${LEAD}[redacted] rejected`);
+    }
+  });
+
+  test("lastLine CTC-6157: a break and the 400-character cut together: the cut falls after the redaction", () => {
+    const echo = "a".repeat(395) + broken(PASSWORD, "\x07") + " rejected";
+    expect(lastLine(echo, [PASSWORD])).toBe("a".repeat(395) + "[reda");
+    const crlf = "a".repeat(395) + broken(EXPECTED_AUTH, "\r\n") + " rejected";
+    expect(lastLine(crlf, [EXPECTED_AUTH])).toBe("a".repeat(395) + "[reda");
+  });
+
+  test.each([
+    ["longest first", ["XYZ12345", "abcXYZ12345def"]],
+    ["shortest first", ["abcXYZ12345def", "XYZ12345"]],
+  ])("lastLine CTC-6157: one secret inside another (%s), with a break inside both", (_name, secrets) => {
+    expect(lastLine("denied abc\x00XYZ12345def", secrets)).toBe("denied [redacted]");
+    expect(lastLine("denied abcXYZ\r\n12345def", secrets)).toBe("denied [redacted]");
+  });
+
+  test("lastLine CTC-6157: an empty secret beside a real one changes nothing about it", () => {
+    expect(lastLine(`denied ${broken(PASSWORD, "\r\n")}`, ["", PASSWORD])).toBe("denied [redacted]");
+    expect(lastLine(`denied \x1b[31mred\x1b[0m`, [""])).toBe("denied [31mred[0m");
+  });
+
+  test("lastLine CTC-6157: a secret is matched as written, so regex metacharacters in it are not special", () => {
+    const secret = "a.b*c+(d)[e]{1}|f^$\\g";
+    expect(lastLine(`x ${broken(secret, "\x00")} y aXb*c+(d)[e]{1}|f^$\\g`, [secret])).toBe(
+      "x [redacted] y aXb*c+(d)[e]{1}|f^$\\g",
+    );
+  });
+
+  test("lastLine CTC-6157: text that mimics the credential over and over is handled in linear time", () => {
+    const hostile = "ctcpull_\x1b[".repeat(100_000);
+    const started = performance.now();
+    const shown = lastLine(hostile, [PASSWORD, EXPECTED_AUTH]);
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(shown.length).toBeLessThanOrEqual(400);
+  });
+});
+
+// CTC-6157 (review): every complete ECMA-48 escape or control sequence, 7-bit and 8-bit.
+const SEQUENCES = [
+  ["an OSC ended by BEL", "\x1b]0;title\x07"],
+  ["an OSC ended by ST", "\x1b]0;title\x1b\\"],
+  ["a DCS ended by ST", "\x1bPq#0;2;0;0;0\x1b\\"],
+  ["a SOS ended by BEL", "\x1bXnote\x07"],
+  ["a PM ended by ST", "\x1b^note\x1b\\"],
+  ["an APC ended by BEL", "\x1b_note\x07"],
+  ["an 8-bit OSC ended by 0x9C", "\x9d0;title\x9c"],
+  ["an 8-bit DCS ended by BEL", "\x90qdata\x07"],
+  ["an 8-bit SOS ended by 0x9C", "\x98note\x9c"],
+  ["an 8-bit PM ended by 0x9C", "\x9enote\x9c"],
+  ["an 8-bit APC ended by 0x9C", "\x9fnote\x9c"],
+  ["a 7-bit OSC ended by 0x9C", "\x1b]0;title\x9c"],
+  ["a charset designation (ESC ( B)", "\x1b(B"],
+  ["a save-cursor escape (ESC 7)", "\x1b7"],
+  ["a two-intermediate escape (ESC SP F)", "\x1b F"],
+  ["an 8-bit CSI", "\x9b31m"],
+  ["an 8-bit CSI with parameters", "\x9b38;5;196m"],
+] as const;
+
+const SEQUENCE_CASES = SEQUENCES.flatMap(([name, gap]) => [
+  [`${name} in the password`, PASSWORD, gap] as const,
+  [`${name} in the auth value`, EXPECTED_AUTH, gap] as const,
+]);
+
+describe("lastLine CTC-6157: text with an escape or a C1 control is withheld", () => {
+  test.each(SEQUENCE_CASES)("%s → the detail is withheld", (_name, secret, gap) => {
+    const shown = lastLine(`progress\n${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH]);
+    expect(shown).toBe("");
+  });
+
+  test.each(SEQUENCE_CASES)("%s straddling the 400-character cut → withheld", (_name, secret, gap) => {
+    const line = LEAD + "a".repeat(395 - LEAD.length) + broken(secret, gap) + " rejected";
+    expect(lastLine(line, [PASSWORD, EXPECTED_AUTH])).toBe("");
+  });
+
+  test.each(SEQUENCE_CASES)("%s → redactSecrets (the second layer) withholds it too", (_name, secret, gap) => {
+    expect(redactSecrets(`${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH])).toBe("");
+  });
+
+  test("an OSC with no terminator inside a secret is withheld", () => {
+    for (const secret of [PASSWORD, EXPECTED_AUTH]) {
+      for (const gap of ["\x1b]0;title", "\x9d0;title", "\x1bPdata"]) {
+        expect(lastLine(`${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH])).toBe("");
+      }
+    }
+  });
+
+  test("an unterminated OSC inside the password straddling the cut is withheld", () => {
+    const line = LEAD + "a".repeat(390 - LEAD.length) + broken(PASSWORD, "\x1b]0;title") + " rejected";
+    expect(lastLine(line, [PASSWORD, EXPECTED_AUTH])).toBe("");
+  });
+
+  test("a low-entropy password: coloured text that only mentions the word is withheld, never half-redacted", () => {
+    const shown = lastLine("\x1b[31mwrong password for user\x1b[0m", ["password123", "cGFzc3dvcmQxMjM="]);
+    expect(shown).toBe("");
+  });
+
+  test("escape-free text that mentions the word stays as it was", () => {
+    expect(lastLine("wrong password for user", ["password123"])).toBe("wrong password for user");
+    expect(redactSecrets("wrong password for user", ["password123"])).toBe("wrong password for user");
+  });
+
+  test("text with no secret in it, even with sequences, comes out as before", () => {
+    expect(lastLine("denied \x1b]0;title\x07 \x1b(B \x9b31m end")).toBe(
+      "denied ]0;title (B 31m end",
+    );
+    expect(redactSecrets("plain \x1b[31mctcpull_\x1b[0m only", [""])).toBe("plain \x1b[31mctcpull_\x1b[0m only");
+    expect(redactSecrets("plain \x1b[31m only", [])).toBe("plain \x1b[31m only");
+  });
+
+  test("hostile unterminated control strings are handled in linear time", () => {
+    const hostile = "ctcpull_\x1b]".repeat(100_000);
+    const started = performance.now();
+    const shown = lastLine(hostile, [PASSWORD, EXPECTED_AUTH]);
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(shown.length).toBeLessThanOrEqual(400);
   });
 });
