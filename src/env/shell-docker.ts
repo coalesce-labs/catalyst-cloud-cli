@@ -88,21 +88,69 @@ export function exitCodeOf(status: number | null, signal: NodeJS.Signals | null)
   return signal ? 128 + (constants.signals[signal] ?? 0) : 1;
 }
 
-/** Every occurrence of each non-empty secret, longest first, becomes "[redacted]". */
+/** What can sit between two characters of an echoed secret without showing on a terminal. The first
+ *  list entry is every character outside printable ASCII, line breaks included; the second adds the
+ *  ANSI CSI sequences (`ESC [`, parameters, one final byte), whose printable remainder `[31m` the first
+ *  would leave behind. A malformed sequence can swallow a secret character, so both are tried. */
+const BREAKS = [/[^\x20-\x7e]/g, /\x1b\[[0-?]*[ -/]*[@-~]|[^\x20-\x7e]/g];
+
+/** `text` without every match of `breaks`, and where each character that is left sat in `text`. */
+function withoutBreaks(text: string, breaks: RegExp): { kept: string; at: number[] } {
+  const gone = new Uint8Array(text.length);
+  for (const hit of text.matchAll(breaks)) gone.fill(1, hit.index, hit.index + hit[0].length);
+  let kept = "";
+  const at: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (gone[i]) continue;
+    kept += text[i];
+    at.push(i);
+  }
+  return { kept, at };
+}
+
+/** Every occurrence of each non-empty secret becomes "[redacted]", also when Docker broke it up with
+ *  control characters, a line break or an ANSI sequence (CTC-6157): the whole stretch from its first
+ *  character to its last is replaced. Occurrences that overlap, such as one secret inside another,
+ *  become one marker. This is a plain `indexOf` over the text with the breaks taken out, never a
+ *  pattern built from a secret, so it cannot backtrack and needs no escaping. The secrets here are
+ *  printable ASCII: a password is `\x21-\x7e` and an `auth` value is base64. */
 export function redactSecrets(text: string, secrets: readonly string[]): string {
-  return secrets
-    .filter((secret) => secret !== "")
-    .sort((a, b) => b.length - a.length)
-    .reduce((out, secret) => out.split(secret).join("[redacted]"), text);
+  const wanted = secrets.filter((secret) => secret !== "");
+  if (wanted.length === 0) return text;
+  // covered[i] counts the occurrences that start at or before i and have not ended yet.
+  const covered = new Int32Array(text.length + 1);
+  let found = false;
+  for (const breaks of BREAKS) {
+    const { kept, at } = withoutBreaks(text, breaks);
+    for (const secret of wanted) {
+      for (let i = kept.indexOf(secret); i >= 0; i = kept.indexOf(secret, i + 1)) {
+        covered[at[i]]++;
+        covered[at[i + secret.length - 1] + 1]--;
+        found = true;
+      }
+    }
+  }
+  if (!found) return text;
+  let out = "";
+  let depth = 0;
+  let inside = false;
+  for (let i = 0; i < text.length; i++) {
+    depth += covered[i];
+    if (depth === 0) out += text[i];
+    else if (!inside) out += "[redacted]";
+    inside = depth > 0;
+  }
+  return out;
 }
 
 /** Docker's last non-empty error line, printable characters only. The secrets are redacted from the
- *  whole stripped line before it is cut to 400 characters, so the cut can fall inside "[redacted]"
- *  but never inside a secret and leave a prefix that no replacement matches (CTC-6157). */
+ *  whole raw text, before it is split into lines and stripped and before it is cut to 400 characters,
+ *  so neither a break inside a secret nor the cut can leave a fragment that no replacement matches
+ *  (CTC-6157). The cut can still fall inside "[redacted]". */
 export function lastLine(text: string, secrets: readonly string[] = []): string {
-  const lines = text
+  const lines = redactSecrets(text, secrets)
     .split(/\r?\n/)
-    .map((line) => redactSecrets(line.replace(/[^\x20-\x7e]/g, "").trim(), secrets))
+    .map((line) => line.replace(/[^\x20-\x7e]/g, "").trim())
     .filter((line) => line !== "");
   return (lines.at(-1) ?? "").slice(0, 400);
 }

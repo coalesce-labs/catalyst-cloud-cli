@@ -308,10 +308,19 @@ describe("downloadImage with the real docker adapter (CTC-6157)", () => {
     return line;
   }
 
-  /** No prefix of 4+ characters of either secret, i.e. not even its first 4 characters. */
-  function expectNoSecretPrefix(text: string) {
+  /** `secret` with `gap` after its first half, as Docker might echo it. */
+  function broken(secret: string, gap: string): string {
+    const at = Math.floor(secret.length / 2);
+    return secret.slice(0, at) + gap + secret.slice(at);
+  }
+
+  /** No fragment of either secret: not its first 4 characters, and not its last 4 either. None of these
+   *  four strings occurs in the refusal's own text (REF, the lead, the notes), so any hit is a credential. */
+  function expectNoSecretFragment(text: string) {
     expect(text).not.toContain(PASSWORD.slice(0, 4)); // "ctcp"
+    expect(text).not.toContain(PASSWORD.slice(-4)); // "E123"
     expect(text).not.toContain(EXPECTED_AUTH.slice(0, 4)); // "eC1j"
+    expect(text).not.toContain(EXPECTED_AUTH.slice(-4)); // "MjM="
   }
 
   /** The real adapter over a `docker` that prints $FAKE_PULL_ERR to stderr and exits 1. Its env is
@@ -332,22 +341,45 @@ describe("downloadImage with the real docker adapter (CTC-6157)", () => {
     ["auth at 390", EXPECTED_AUTH, 390],
     ["auth at 370", EXPECTED_AUTH, 370],
   ] as const)(
-    "Docker echoes the credential across the 400-character cut (%s) → the refusal holds no prefix of it",
+    "Docker echoes the credential across the 400-character cut (%s) → the refusal holds no fragment of it",
     async (_name, secret, at) => {
       const docker = scriptedDocker(`progress line\n${straddling(secret, at)}`);
       await signIn();
       server.pullCredential = { status: 200, body: issuedBody() };
       const refusal = refusalOf(await download(docker));
       expect(refusal.code).toBe("image_download_refused");
-      expectNoSecretPrefix(refusal.message);
-      expectNoSecretPrefix(JSON.stringify(refusal));
+      expectNoSecretFragment(refusal.message);
+      expectNoSecretFragment(JSON.stringify(refusal));
       expect(
         refusal.message.startsWith(`Could not download ${REF} with the credential your workspace issued: ${LEAD}`),
       ).toBe(true);
       expect(refusal.message).toContain("[redacted]");
       expect(refusal.message.endsWith(".")).toBe(true);
       expect(notes.length).toBeGreaterThan(0);
-      for (const line of notes) expectNoSecretPrefix(line);
+      for (const line of notes) expectNoSecretFragment(line);
+    },
+  );
+
+  test.each([
+    ["an ANSI colour sequence in the password", PASSWORD, "\x1b[31m"],
+    ["a CRLF in the password", PASSWORD, "\r\n"],
+    ["an ANSI colour sequence in the auth value", EXPECTED_AUTH, "\x1b[31m"],
+    ["a line feed in the auth value", EXPECTED_AUTH, "\n"],
+  ] as const)(
+    "Docker breaks the credential up with %s → the refusal holds none of it",
+    async (_name, secret, gap) => {
+      const docker = scriptedDocker(`progress line\n${LEAD}${broken(secret, gap)} rejected`);
+      await signIn();
+      server.pullCredential = { status: 200, body: issuedBody() };
+      const refusal = refusalOf(await download(docker));
+      expect(refusal.code).toBe("image_download_refused");
+      expectNoSecretFragment(refusal.message);
+      expectNoSecretFragment(JSON.stringify(refusal));
+      expect(notes.length).toBeGreaterThan(0);
+      for (const line of notes) expectNoSecretFragment(line);
+      expect(refusal.message).toBe(
+        `Could not download ${REF} with the credential your workspace issued: ${LEAD}[redacted] rejected.`,
+      );
     },
   );
 });
