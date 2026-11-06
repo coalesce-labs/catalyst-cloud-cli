@@ -183,7 +183,7 @@ if (help || positionals.length === 0) {
 
 try {
   const server = normaliseServer(positionals[0]);
-  if (!SERVER_NAME.test(server)) fail(`"${positionals[0]}" is not a server name (lowercase letters, digits, - and _, starting with a letter)`);
+  if (!SERVER_NAME.test(server)) fail("that is not a server name (lowercase letters, digits, - and _, starting with a letter)");
 
   const r = runCli(["mcp", "status", server, "--json"], { say: () => NOT_CONNECTED });
   if (r.code === 3) {

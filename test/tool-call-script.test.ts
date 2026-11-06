@@ -1000,6 +1000,15 @@ describe("a reader that closes the pipe early", () => {
 });
 
 describe("arguments", () => {
+  test("an invalid server argument is never echoed in the refusal", () => {
+    const { dir, calls } = withCalls([]);
+    const r = run(dir, ["9 /admin/ tenant"]);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toBe("that is not a server name (lowercase letters, digits, - and _, starting with a letter)\n");
+    expect(calls()).toEqual([]);
+  });
+
   test("a name that is not a server name is refused before the CLI runs", () => {
     const { dir, calls } = withCalls([]);
     const r = run(dir, ["9!"]);
