@@ -12,31 +12,16 @@ const SPEC = {
 };
 const LIMIT = 50; // the verb reads the newest 50 calls, no further back
 const SERVER_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
-// Free text is parsed only where that is safe by construction, and the parse fails closed: when unsure, no role is
-// named. A role is named only when all of these hold across the WHOLE explanation, which is never split into sentences:
-//   1. it holds no negation or restriction word anywhere (an "only" that directly governs a role, as in
-//      "Only a workspace admin can re-approve it", names that role and does not count);
-//   2. every mention of a listed role is the same kind of actor (owner, admin or operator), else it is ambiguous;
-//   3. some mention is affirmative: the role directly followed by a modal and then a fix verb, or directly preceded
-//      by ask/contact/tell/notify/message and followed by "to", "for" or the end of the sentence;
-//   4. that mention is not possessive ("the upstream server's owner" is not the workspace's).
+// Who can fix a failure is not decided here. The explanation is free prose, and no rule over it is sound: negations,
+// restrictions, a second actor, "can retry" against "can fix" each beat the rule written for the last one. The line shows
+// the explanation as the cloud wrote it and says only what is true by construction: which listed roles the explanation
+// mentions, that it mentions none, or that there is no explanation.
 // Splitting on ROLE_MENTION keeps the article and the role as captures: [before, article, role, between, ..., after].
 const ROLE = "workspace owner or admin|workspace owner|workspace admin|account admin|owner or admin|admin|owner|operator";
 const ROLE_MENTION = new RegExp(`\\b(?:(an?|the|your)\\s+)?(${ROLE})\\b`, "i");
-const KINDS = ["owner", "admin", "operator"];
-const FIX =
-  "fix|resolve|restore|approve|re-approve|reapprove|grant|re-grant|retry|reconnect|renew|re-authorize|reauthorize|reconfigure|unblock|register|enable|update|change|reset|rotate|release|clear|allow|lift";
-const CAN_FIX = new RegExp(`^\\s+(?:can|could|should|must|may|will|needs\\s+to|has\\s+to)\\s+(?:${FIX})\\b`, "i");
-const TURN_TO = /\b(?:ask|contact|tell|notify|message)\s+$/i;
-const TURN_END = /^\s*(?:$|[.!?;]|(?:to|for)\b)/i;
-const POSSESSIVE = /['\u2019]s\s+$/i;
-const NEGATED = new RegExp(
-  `\\b(?:not|no|none|nobody|never|cannot|unable|unless|without|except|instead|neither|nor)\\b|n['\\u2019]t\\b|\\bonly\\b(?!\\s+(?:(?:an?|the|your)\\s+)?(?:${ROLE})\\b)`,
-  "i",
-);
 // With no explanation at all the record names no one, and the one fact we hold is who manages MCP servers
-// (src/capabilities.ts: `mcp add|list|remove` needs an admin). With an explanation that names no role the
-// explanation may itself say the admin cannot help, so the line adds no pointer.
+// (src/capabilities.ts: `mcp add|list|remove` needs an admin). With an explanation that mentions no role the line
+// adds no pointer, because the explanation may itself say the admin cannot help.
 const NO_ONE =
   "the record names no one; a workspace owner or admin manages this workspace's MCP servers";
 const NOT_NAMED = "the explanation does not name one";
@@ -60,22 +45,17 @@ const sentence = (s) => (/[.!?]$/.test(s) ? s : `${s}.`);
 const normaliseServer = (raw) =>
   raw.trim().toLowerCase().replace(/[\s.]+/g, "-").replace(/[^a-z0-9_-]/g, "");
 
-/** The role the explanation says can fix the failure, with its article ("a workspace admin"), or null. */
-function actorIn(explanation) {
-  if (!explanation || NEGATED.test(explanation)) return null;
-  const parts = explanation.split(ROLE_MENTION);
-  const mentions = [];
+/** The listed roles the explanation mentions, each once, in order of first mention, as written ("a workspace admin"). */
+function rolesIn(explanation) {
+  const parts = (explanation ?? "").split(ROLE_MENTION);
+  const roles = [];
   for (let i = 2; i < parts.length; i += 3) {
     const role = parts[i].toLowerCase();
-    mentions.push({
-      kinds: KINDS.filter((k) => role.includes(k)).join(),
-      affirmed: !POSSESSIVE.test(parts[i - 2]) && (CAN_FIX.test(parts[i + 1]) || (TURN_TO.test(parts[i - 2]) && TURN_END.test(parts[i + 1]))),
-      who: `${parts[i - 1]?.toLowerCase() ?? (/^[aeiou]/.test(role) ? "an" : "a")} ${role}`,
-    });
+    if (!roles.some((r) => r.endsWith(` ${role}`))) roles.push(`${parts[i - 1]?.toLowerCase() ?? (/^[aeiou]/.test(role) ? "an" : "a")} ${role}`);
   }
-  const first = mentions.find((m) => m.affirmed);
-  return first && mentions.every((m) => m.kinds === first.kinds) ? first.who : null;
+  return roles;
 }
+const list = (items) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`);
 
 // Only a numeric timestamp counts, as in the verb: new Date(null) is the epoch, and the line must not print it.
 const when = (at) => (typeof at === "number" && Number.isFinite(new Date(at).getTime()) ? new Date(at).toISOString() : null);
@@ -108,6 +88,12 @@ function readCall(c) {
   };
 }
 
+/** What the answer says about who can fix it: only what the explanation mentions, and why that is all it says. */
+function fixer(explanation, roles, failed) {
+  const basis = !failed ? null : roles.length ? "mentioned in the explanation" : explanation ? "explanation names none" : "no explanation";
+  return { named: roles.length > 0, who: roles[0] ?? null, roles, basis };
+}
+
 /** The answer for one read: the fields of the call it rests on, a verdict, and the reason as the verb prints it. */
 function answer(server, ticket, tool, calls) {
   const base = { server, ticket: ticket ?? null, phase: null, tool: null, outcome: null, reason: null, explanation: null, at: null };
@@ -120,8 +106,8 @@ function answer(server, ticket, tool, calls) {
     );
   const failed = kept.find(isFailure);
   const call = failed ?? kept[0];
-  if (!call) return { a: { ...base, fixer: { named: false, who: null }, window, verdict: "not-in-window" } };
-  const who = failed ? actorIn(call.explanation) : null;
+  if (!call) return { a: { ...base, fixer: fixer(null, [], false), window, verdict: "not-in-window" } };
+  const roles = failed ? rolesIn(call.explanation) : [];
   const a = {
     ...base,
     ticket: call.ticket,
@@ -131,7 +117,7 @@ function answer(server, ticket, tool, calls) {
     reason: failed ? (call.denied ?? text(call.outcome)) : null,
     explanation: failed ? call.explanation : null,
     at: call.at,
-    fixer: { named: who !== null, who },
+    fixer: fixer(failed ? call.explanation : null, roles, failed !== undefined),
     window,
     verdict: failed ? "failed" : "no-failure",
   };
@@ -158,7 +144,9 @@ function render({ a, why, newer }, ticket, tool) {
     return `no failed call to ${a.server}${ticket ? ` on ${ticket}` : ""}${matching} in ${seen}; ${newest} ${state}${rest}.`;
   }
   const slot = a.ticket ? `${a.ticket} ${a.phase ?? ""}`.trim() : "no ticket";
-  const who = a.fixer.who ?? (a.explanation ? NOT_NAMED : NO_ONE);
+  const who = a.fixer.named
+    ? `see the explanation above, which mentions ${list(a.fixer.roles)}; read it as written`
+    : a.explanation ? NOT_NAMED : NO_ONE;
   const later = newer ? ` A newer call is still ${newer}, so it has not finished.` : "";
   const skipped = unreadable ? ` ${calls(unreadable, "other ")} could not be read, so this may not be the newest failure.` : "";
   return `${slot}: ${a.tool} on ${a.server} failed (${a.outcome}) — ${sentence(why || "the record gives no reason")} Who can fix it: ${who}.${later}${skipped}`;
@@ -175,7 +163,6 @@ process.stdout.on("error", (err) => {
   process.exit(0);
 });
 process.stderr.on("error", () => {});
-
 
 const { help, flags, positionals } = parseFlags(process.argv.slice(2), SPEC);
 if (help || positionals.length === 0) {
