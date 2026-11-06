@@ -12,10 +12,26 @@ const SPEC = {
 };
 const LIMIT = 50; // the verb reads the newest 50 calls, no further back
 const SERVER_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
-const ACTOR =
-  /\b(?:(an?|the|your)\s+)?(workspace owner or admin|workspace owner|workspace admin|account admin|admin|owner|operator)\b/i;
+// The roles an explanation can name, longest first. Splitting a sentence on ROLE_MENTION keeps the article and the
+// role as captures: [before, article, role, between, article, role, ..., after].
+const ROLE = "workspace owner or admin|workspace owner|workspace admin|account admin|owner or admin|admin|owner|operator";
+const ROLE_MENTION = new RegExp(`\\b(?:(an?|the|your)\\s+)?(${ROLE})\\b`, "i");
+const KINDS = ["owner", "admin", "operator"];
+// A role is named when the sentence says it can act (the text after it) or says to turn to it (the text before it).
+const CAN = /^\s+(?:can|could|should|must|may|will|needs?\s+to|has\s+to|have\s+to|is\s+able\s+to)\b/i;
+const TURN_TO = /\b(?:ask|contact|tell|have|notify|message)\s+$/i;
+// A negation or a restriction anywhere in the sentence takes the role out. "Only an owner can ..." restricts
+// to the owner, so an "only" that directly governs a role does not count.
+const NEGATED = new RegExp(
+  `\\b(?:not|no|none|nobody|never|cannot|unable|unless|without|except|instead|neither|nor)\\b|n['\\u2019]t\\b|\\bonly\\b(?!\\s+(?:(?:an?|the|your)\\s+)?(?:${ROLE})\\b)`,
+  "i",
+);
+// With no explanation at all the record names no one, and the one fact we hold is who manages MCP servers
+// (src/capabilities.ts: `mcp add|list|remove` needs an admin). With an explanation that names no role the
+// explanation may itself say the admin cannot help, so the line adds no pointer.
 const NO_ONE =
   "the record names no one; a workspace owner or admin manages this workspace's MCP servers";
+const NOT_NAMED = "the explanation does not name one";
 
 const oneLine = (s) => s.replace(/\s+/g, " ").trim();
 const text = (v) => (typeof v === "string" && oneLine(v) ? oneLine(v) : null);
@@ -27,12 +43,27 @@ const sentence = (s) => (/[.!?]$/.test(s) ? s : `${s}.`);
 const normaliseServer = (raw) =>
   raw.trim().toLowerCase().replace(/[\s.]+/g, "-").replace(/[^a-z0-9_-]/g, "");
 
-/** The first actor the explanation names, with its article ("a workspace admin"), or null. */
+/**
+ * The first role the explanation affirms can fix the failure, with its article ("a workspace admin"), or null.
+ * A sentence that holds a negation or a restriction names no role, and a role mentioned in any such sentence
+ * is never named, whatever other sentences say about it.
+ */
 function actorIn(explanation) {
-  const m = (explanation ?? "").match(ACTOR);
-  if (!m) return null;
-  const actor = m[2].toLowerCase();
-  return `${m[1]?.toLowerCase() ?? (/^[aeiou]/.test(actor) ? "an" : "a")} ${actor}`;
+  if (!explanation) return null;
+  const barred = new Set();
+  const stated = [];
+  for (const sentence of explanation.split(/[.!?;]+/)) {
+    const negated = NEGATED.test(sentence);
+    const parts = sentence.split(ROLE_MENTION);
+    for (let i = 2; i < parts.length; i += 3) {
+      const role = parts[i].toLowerCase();
+      const kinds = KINDS.filter((k) => role.includes(k));
+      if (negated) for (const k of kinds) barred.add(k);
+      else if (CAN.test(parts[i + 1]) || TURN_TO.test(parts[i - 2]))
+        stated.push({ kinds, who: `${parts[i - 1]?.toLowerCase() ?? (/^[aeiou]/.test(role) ? "an" : "a")} ${role}` });
+    }
+  }
+  return stated.find((r) => !r.kinds.some((k) => barred.has(k)))?.who ?? null;
 }
 
 // Only a numeric timestamp counts, as in the verb: new Date(null) is the epoch, and the line must not print it.
@@ -105,7 +136,7 @@ function render({ a, why }, ticket, tool, n) {
     return `no failed call to ${a.server}${ticket ? ` on ${ticket}` : ""}${matching} in its newest ${n} recorded call${n === 1 ? "" : "s"}; the newest was ok at ${a.at ?? "an unrecorded time"}.`;
   }
   const slot = a.ticket ? `${a.ticket} ${a.phase ?? ""}`.trim() : "no ticket";
-  return `${slot}: ${a.tool} on ${a.server} failed (${a.outcome}) — ${sentence(why || "the record gives no reason")} Who can fix it: ${a.fixer.who ?? NO_ONE}.`;
+  return `${slot}: ${a.tool} on ${a.server} failed (${a.outcome}) — ${sentence(why || "the record gives no reason")} Who can fix it: ${a.fixer.who ?? (a.explanation ? NOT_NAMED : NO_ONE)}.`;
 }
 
 function fail(message) {
