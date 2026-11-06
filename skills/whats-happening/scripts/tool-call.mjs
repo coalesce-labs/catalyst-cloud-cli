@@ -108,5 +108,6 @@ const calls = parseJson(r.stdout, "the MCP status")?.calls?.calls;
 if (!Array.isArray(calls)) fail(`could not read MCP server ${server}: the status came back in a shape this script does not know`);
 
 const result = answer(server, flags.ticket, flags.tool, calls);
-process.stdout.write(`${flags.json ? JSON.stringify(result.a) : render(result, flags.ticket, flags.tool, calls.length)}\n`);
+// The line is collapsed whole, so no value in it (a flag, a recorded ticket, phase, tool or outcome) can break it in two.
+process.stdout.write(`${flags.json ? JSON.stringify(result.a) : oneLine(render(result, flags.ticket, flags.tool, calls.length))}\n`);
 process.exit(0);
