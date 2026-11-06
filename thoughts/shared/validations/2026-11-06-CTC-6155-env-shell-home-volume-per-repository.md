@@ -55,11 +55,26 @@ Main has not moved since the plan (plan merge base equals the main SHA), so ther
 ✓ `npx vitest run` exit 0, 5635 passed, 2 skipped (1 file skipped)
 Not run: `test:coverage` (the plan checks it; the full suite passes), a lint script (none in `package.json`).
 
-### Code Review Findings
+### Type-safety gate (`validate-type-safety`, with `scan-reward-hacking`)
 
-- Matches plan: signature change, one call site, comments, four pinned names and the new tests.
-- Deviations: none found.
-- Potential issues: old shared `catalyst-env-home-<12 hex>` volumes stay on disk, unused (a decision the plan made explicit). The worktree common-dir mount is a separate write path the plan assigned to a follow-up ticket.
+Verdict PASS, run at base `2f11ab3a73810d7f1972ae9c8603374e4df2e8f1`.
+- Step 0, tsconfig: `"strict": true` is set (`tsconfig.json:9`); the branch changes no tsconfig.
+- Step 1, type check: `npm run typecheck` (`tsc --noEmit`) exit 0.
+- Step 2, `scan-reward-hacking` with `--base` over `src/env/shell-plan.ts`, `test/env-shell-plan.test.ts` and `test/env-shell.test.ts`: PASS. None of the 12 patterns matches any added line (no `as any`, `as unknown as`, `@ts-*` directive, non-null assertion, `forEach(async`, lint suppression, `.skip` or `.only`, or tsconfig change). Zero findings.
+- Step 3, test inclusion: no tsconfig excludes tests.
+- Step 4, tests: `npx vitest run` exit 0, 5635 passed, 2 skipped. PR 618 checks at the head are all passing or skipped as optional (`check`, `check (node 26)`, `matrix`, CodeQL).
+- Step 5, lint: SKIPPED, no linter configured (no `.trunk/`, biome or eslint config).
+
+### Code Review Findings (`review-code`)
+
+Verdict PASS. Scope: base `2f11ab3a73810d7f1972ae9c8603374e4df2e8f1`, ancestry proven, 3 code files reviewed (`src/env/shell-plan.ts`, `test/env-shell-plan.test.ts`, `test/env-shell.test.ts`). All five lenses ran: guidelines (the repo has no CLAUDE.md or AGENTS.md; `.agents/rules/public-text.md` scopes to README and skills only), diff bugs, history, prior review comments (PR 618 has no review comments) and in-code guidance. No finding at confidence 80 or above.
+- Matches plan: `src/env/shell-plan.ts:42-46` and its one call site `src/env/shell-plan.ts:84`, with no other caller of `homeVolumeFor`.
+- Deviations: none.
+- Potential issues: none from the skill. Plan-declared, not defects: old shared volumes stay on disk unused, and the same host path later reused for a different repository keeps its volume.
+
+### Security review (`review-security`)
+
+Verdict PASS, no confirmed or informational findings. The input is `root`, a `realpathSync` result from `--root` or git (`src/env/shell.ts:106-111`). It reaches the volume name only through a sha256 hex digest (`src/env/shell-plan.ts:44-45`), so the name is fixed-length hex and cannot inject into the `--mount` argument or the docker argv. The change removes the cross-repository shared writable home that the ticket reports. The common-dir mount remains a separate path that the plan assigns to a follow-up ticket; it is not introduced by this diff.
 
 ### Manual Testing Required
 
@@ -73,9 +88,9 @@ Not run: `test:coverage` (the plan checks it; the full suite passes), a lint scr
 ```catalyst-validation-ladder
 {"version":1,"steps":[
   {"step":"plan-conformance","verdict":"PASS","materiality":"plan-only","detail":"single phase implemented as planned; no undeclared deviations; tests fail at a1126ea9 and at 2f11ab3 src, pass at head"},
-  {"step":"type-safety","verdict":"PASS","detail":"tsc --noEmit exit 0; vitest full suite 5635 passed; no lint script in this repo; no type escapes in the diff"},
-  {"step":"code-review","verdict":"PASS","detail":"manual diff read: no defects found"},
-  {"step":"security-review","verdict":"PASS","detail":"manual read: path hashed with sha256, fixed-length hex name, no injection; fix closes the cross-repo home sharing"},
+  {"step":"type-safety","verdict":"PASS","detail":"validate-type-safety (with scan-reward-hacking --base 2f11ab3): tsc --noEmit exit 0, 0 reward-hacking matches, no test exclusion, vitest 5635 passed, lint skipped (none configured); PR checks green"},
+  {"step":"code-review","verdict":"PASS","detail":"review-code skill: no findings at >=80 across 5 lenses; 3 code files reviewed against 2f11ab3"},
+  {"step":"security-review","verdict":"PASS","detail":"review-security skill: no findings; root reaches the volume name only as a sha256 hex digest"},
   {"step":"security-audit","verdict":"SKIPPED","detail":"no dependency changes in the diff; no audit run"}
 ]}
 ```
