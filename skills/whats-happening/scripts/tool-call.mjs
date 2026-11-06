@@ -24,7 +24,8 @@ const ROLE_MENTION = new RegExp(`\\b(?:(an?|the|your)\\s+)?(${ROLE})\\b`, "i");
 // adds no pointer, because the explanation may itself say the admin cannot help.
 const NO_ONE =
   "the record names no one; a workspace owner or admin manages this workspace's MCP servers";
-const NOT_NAMED = "the explanation does not name one";
+// With an explanation that mentions no listed role, the line says what this script found, not what the explanation means.
+const NONE_FOUND = "this script found no workspace owner, admin or operator in the explanation above; read it as written";
 
 // The verb treats ok as the only success and never classifies the rest, so the script does: ok is success, these
 // outcomes mean the call has not finished (compared exactly, as the verb compares ok), and any other outcome is a failure.
@@ -88,10 +89,13 @@ function readCall(c) {
   };
 }
 
-/** What the answer says about who can fix it: only what the explanation mentions, and why that is all it says. */
-function fixer(explanation, roles, failed) {
-  const basis = !failed ? null : roles.length ? "mentioned in the explanation" : explanation ? "explanation names none" : "no explanation";
-  return { named: roles.length > 0, who: roles[0] ?? null, roles, basis };
+/**
+ * What the answer says about who can fix it: the roles the explanation mentions, as written, and why that is all it
+ * says. Nothing here names a role as the one that can fix it; that is for the reader of the explanation to decide.
+ */
+function fixer(explanation, mentioned, failed) {
+  const basis = !failed ? null : mentioned.length ? "mentioned in the explanation" : explanation ? "explanation names none" : "no explanation";
+  return { mentioned, basis };
 }
 
 /** The answer for one read: the fields of the call it rests on, a verdict, and the reason as the verb prints it. */
@@ -144,9 +148,9 @@ function render({ a, why, newer }, ticket, tool) {
     return `no failed call to ${a.server}${ticket ? ` on ${ticket}` : ""}${matching} in ${seen}; ${newest} ${state}${rest}.`;
   }
   const slot = a.ticket ? `${a.ticket} ${a.phase ?? ""}`.trim() : "no ticket";
-  const who = a.fixer.named
-    ? `see the explanation above, which mentions ${list(a.fixer.roles)}; read it as written`
-    : a.explanation ? NOT_NAMED : NO_ONE;
+  const who = a.fixer.mentioned.length
+    ? `see the explanation above, which mentions ${list(a.fixer.mentioned)}; read it as written`
+    : a.explanation ? NONE_FOUND : NO_ONE;
   const later = newer ? ` A newer call is still ${newer}, so it has not finished.` : "";
   const skipped = unreadable ? ` ${calls(unreadable, "other ")} could not be read, so this may not be the newest failure.` : "";
   return `${slot}: ${a.tool} on ${a.server} failed (${a.outcome}) — ${sentence(why || "the record gives no reason")} Who can fix it: ${who}.${later}${skipped}`;
