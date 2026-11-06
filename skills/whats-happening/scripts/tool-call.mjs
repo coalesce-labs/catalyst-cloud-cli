@@ -93,9 +93,13 @@ function readCall(c) {
   const outcome = str(c.outcome);
   if (!tool || !outcome) return null;
   const dispatch = isRecord(c.dispatch) ? c.dispatch : {};
+  // The route sends dispatch as null (not dispatched) or an object with a string ticket. Anything else does not tell
+  // which ticket the call is for, and a --ticket answer must not read that as "a different ticket".
+  const ticketKnown = c.dispatch == null || (isRecord(c.dispatch) && str(c.dispatch.ticket) !== null);
   return {
     tool,
     outcome,
+    ticketKnown,
     ticket: str(dispatch.ticket),
     phase: str(dispatch.phase),
     denied: text(c.denied_reason),
@@ -107,7 +111,7 @@ function readCall(c) {
 /** The answer for one read: the fields of the call it rests on, a verdict, and the reason as the verb prints it. */
 function answer(server, ticket, tool, calls) {
   const base = { server, ticket: ticket ?? null, phase: null, tool: null, outcome: null, reason: null, explanation: null, at: null };
-  const readable = calls.map(readCall).filter((c) => c !== null);
+  const readable = calls.map(readCall).filter((c) => c !== null && (!ticket || c.ticketKnown));
   const window = { read: calls.length, limit: LIMIT, unreadable: calls.length - readable.length };
   const kept = readable.filter(
       (c) =>
