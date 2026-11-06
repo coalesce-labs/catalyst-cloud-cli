@@ -922,21 +922,22 @@ describe("a refusal never relays a word the CLI wrote", () => {
 
   // The cloud wrote the reason inside these sentences (src/mcp-status.ts), so a reason that says "not configured" or
   // "not connected" is still a portal refusal, never the machine's own "not connected".
-  const PORTAL_REFUSALS = ["not configured", "not connected"].flatMap((phrase) => [
-    `mcp status cannot reach this workspace's MCP portal: the cloud publishes no portal.url (portal ${phrase}). Ask your operator to configure the portal host.`,
-    `GET /api/v1/mcp/servers/workos/calls failed (403): the MCP portal refused this key (workspace ${phrase}). It admits an active member's personal key, or an account key scoped portal:access.`,
+  // Byte for byte what the CLI writes: src/cli.ts prints every CliError as `catalyst: ${message}` plus a newline.
+  const PORTAL_REFUSALS = ["not configured", "not connected", "x\nnot connected", "x\ncatalyst: not connected yet — run: y"].flatMap((reason) => [
+    `catalyst: mcp status cannot reach this workspace's MCP portal: the cloud publishes no portal.url (${reason}). Ask your operator to configure the portal host.\n`,
+    `catalyst: GET /api/v1/mcp/servers/workos/calls failed (403): the MCP portal refused this key (${reason}). It admits an active member's personal key, or an account key scoped portal:access.\n`,
   ]);
-  test.each(PORTAL_REFUSALS)("a CLI exit 2 portal refusal whose reason says not configured or not connected is exit 1: %s", (stderr) => {
-    const { dir } = setup({ code: 2, stderr });
+  test.each(PORTAL_REFUSALS)("a CLI exit 2 portal refusal whose reason says not configured or not connected is exit 1: %j", (stderr) => {
+    const { dir } = setup({ code: 2, stderr: stderr.replace(/\n$/, "") });
     const r = run(dir, ["workos"]);
     clean(r, 1);
     expect(r.stderr).toBe(READ(2));
   });
 
   test.each([
-    "not connected yet — run: npx @catalyst-cloud/cli login (keyless; or pass --key / set CATALYST_CLOUD_TOKEN for a key)",
-    "this machine is not connected — run: catalyst login",
-  ])("the CLI's own not-connected line is still the desk's exit 2: %s", (stderr) => {
+    "catalyst: not connected yet — run: npx @catalyst-cloud/catalyst-skills login (keyless; or pass --key / set CATALYST_CLOUD_TOKEN for a key)",
+    "catalyst: this machine is not connected — run: catalyst login",
+  ])("the CLI's own not-connected line is still the desk's exit 2: %j", (stderr) => {
     const { dir } = setup({ code: 2, stderr });
     const r = run(dir, ["workos"]);
     expect(r.status).toBe(2);
