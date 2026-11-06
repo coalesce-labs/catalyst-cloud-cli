@@ -12,16 +12,24 @@ const SPEC = {
 };
 const LIMIT = 50; // the verb reads the newest 50 calls, no further back
 const SERVER_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
-// The roles an explanation can name, longest first. Splitting a sentence on ROLE_MENTION keeps the article and the
-// role as captures: [before, article, role, between, article, role, ..., after].
+// Free text is parsed only where that is safe by construction, and the parse fails closed: when unsure, no role is
+// named. A role is named only when all of these hold across the WHOLE explanation, which is never split into sentences:
+//   1. it holds no negation or restriction word anywhere (an "only" that directly governs a role, as in
+//      "Only a workspace admin can re-approve it", names that role and does not count);
+//   2. every mention of a listed role is the same kind of actor (owner, admin or operator), else it is ambiguous;
+//   3. some mention is affirmative: the role directly followed by a modal and then a fix verb, or directly preceded
+//      by ask/contact/tell/notify/message and followed by "to", "for" or the end of the sentence;
+//   4. that mention is not possessive ("the upstream server's owner" is not the workspace's).
+// Splitting on ROLE_MENTION keeps the article and the role as captures: [before, article, role, between, ..., after].
 const ROLE = "workspace owner or admin|workspace owner|workspace admin|account admin|owner or admin|admin|owner|operator";
 const ROLE_MENTION = new RegExp(`\\b(?:(an?|the|your)\\s+)?(${ROLE})\\b`, "i");
 const KINDS = ["owner", "admin", "operator"];
-// A role is named when the sentence says it can act (the text after it) or says to turn to it (the text before it).
-const CAN = /^\s+(?:can|could|should|must|may|will|needs?\s+to|has\s+to|have\s+to|is\s+able\s+to)\b/i;
-const TURN_TO = /\b(?:ask|contact|tell|have|notify|message)\s+$/i;
-// A negation or a restriction anywhere in the sentence takes the role out. "Only an owner can ..." restricts
-// to the owner, so an "only" that directly governs a role does not count.
+const FIX =
+  "fix|resolve|restore|approve|re-approve|reapprove|grant|re-grant|retry|reconnect|renew|re-authorize|reauthorize|reconfigure|unblock|register|enable|update|change|reset|rotate|release|clear|allow|lift";
+const CAN_FIX = new RegExp(`^\\s+(?:can|could|should|must|may|will|needs\\s+to|has\\s+to)\\s+(?:${FIX})\\b`, "i");
+const TURN_TO = /\b(?:ask|contact|tell|notify|message)\s+$/i;
+const TURN_END = /^\s*(?:$|[.!?;]|(?:to|for)\b)/i;
+const POSSESSIVE = /['\u2019]s\s+$/i;
 const NEGATED = new RegExp(
   `\\b(?:not|no|none|nobody|never|cannot|unable|unless|without|except|instead|neither|nor)\\b|n['\\u2019]t\\b|\\bonly\\b(?!\\s+(?:(?:an?|the|your)\\s+)?(?:${ROLE})\\b)`,
   "i",
@@ -43,27 +51,21 @@ const sentence = (s) => (/[.!?]$/.test(s) ? s : `${s}.`);
 const normaliseServer = (raw) =>
   raw.trim().toLowerCase().replace(/[\s.]+/g, "-").replace(/[^a-z0-9_-]/g, "");
 
-/**
- * The first role the explanation affirms can fix the failure, with its article ("a workspace admin"), or null.
- * A sentence that holds a negation or a restriction names no role, and a role mentioned in any such sentence
- * is never named, whatever other sentences say about it.
- */
+/** The role the explanation says can fix the failure, with its article ("a workspace admin"), or null. */
 function actorIn(explanation) {
-  if (!explanation) return null;
-  const barred = new Set();
-  const stated = [];
-  for (const sentence of explanation.split(/[.!?;]+/)) {
-    const negated = NEGATED.test(sentence);
-    const parts = sentence.split(ROLE_MENTION);
-    for (let i = 2; i < parts.length; i += 3) {
-      const role = parts[i].toLowerCase();
-      const kinds = KINDS.filter((k) => role.includes(k));
-      if (negated) for (const k of kinds) barred.add(k);
-      else if (CAN.test(parts[i + 1]) || TURN_TO.test(parts[i - 2]))
-        stated.push({ kinds, who: `${parts[i - 1]?.toLowerCase() ?? (/^[aeiou]/.test(role) ? "an" : "a")} ${role}` });
-    }
+  if (!explanation || NEGATED.test(explanation)) return null;
+  const parts = explanation.split(ROLE_MENTION);
+  const mentions = [];
+  for (let i = 2; i < parts.length; i += 3) {
+    const role = parts[i].toLowerCase();
+    mentions.push({
+      kinds: KINDS.filter((k) => role.includes(k)).join(),
+      affirmed: !POSSESSIVE.test(parts[i - 2]) && (CAN_FIX.test(parts[i + 1]) || (TURN_TO.test(parts[i - 2]) && TURN_END.test(parts[i + 1]))),
+      who: `${parts[i - 1]?.toLowerCase() ?? (/^[aeiou]/.test(role) ? "an" : "a")} ${role}`,
+    });
   }
-  return stated.find((r) => !r.kinds.some((k) => barred.has(k)))?.who ?? null;
+  const first = mentions.find((m) => m.affirmed);
+  return first && mentions.every((m) => m.kinds === first.kinds) ? first.who : null;
 }
 
 // Only a numeric timestamp counts, as in the verb: new Date(null) is the epoch, and the line must not print it.
