@@ -1,7 +1,7 @@
 // env-shell.test.ts — CTC-3550: `catalyst env shell [--check]` end to end through main(), against a
 // recording Docker port and, for the credential fallback, the fixture cloud. No Docker engine runs.
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -537,6 +537,91 @@ describe("catalyst env shell (interactive)", () => {
     } finally {
       rmSync(common, { recursive: true, force: true });
     }
+  });
+
+  const homeOf = (port: ReturnType<typeof recordingPort>) =>
+    port.rec.runs[0]?.argv.find((word) => word.startsWith("type=volume,")) ?? "";
+  const NAMED_HOME = /^type=volume,src=catalyst-env-home-[0-9a-f]{12}-[0-9a-f]{24},dst=\/home\/catalyst$/;
+  const ANONYMOUS_HOME = "type=volume,dst=/home/catalyst";
+  const tick = () => new Promise((done) => setTimeout(done, 25));
+  const homeFor = async (args: string[] = [], over: Partial<EnvShellDeps> = {}) => {
+    const port = recordingPort();
+    const withRoot = args.includes("--root") ? args : ["--root", repo, ...args];
+    expect(await main(["env", "shell", ...withRoot], ctx, deps(port.docker, over))).toBe(0);
+    return homeOf(port);
+  };
+
+  test("two checkouts with the same origin name and common dir get different home volumes; --check shares the shell's (CTC-6155)", async () => {
+    const other = realpathSync(mkdtempSync(join(tmpdir(), "catalyst-env-other-")));
+    const common = realpathSync(mkdtempSync(join(tmpdir(), "catalyst-env-common-")));
+    try {
+      writeDeclaration(other, OAKMONT);
+      mkdirSync(join(other, ".git"));
+      mkdirSync(join(repo, ".git"));
+      const over = { readRepositoryName: async () => "oakmont-labs/web", gitCommonDir: async () => common };
+      const a = await homeFor([], over);
+      expect(await homeFor(["--root", other], over)).not.toBe(a);
+      expect(await homeFor(["--check"], over)).toBe(a);
+      expect(a).toMatch(NAMED_HOME);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+      rmSync(common, { recursive: true, force: true });
+    }
+  });
+
+  test("a different repository cloned to a deleted repository's path gets its own home volume (CTC-6155)", async () => {
+    mkdirSync(join(repo, ".git"));
+    const first = await homeFor();
+    expect(await homeFor(["--check"])).toBe(first);
+    await tick();
+    rmSync(repo, { recursive: true, force: true });
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    writeDeclaration(repo, OAKMONT);
+    expect(await homeFor()).not.toBe(first);
+  });
+
+  test("repository B put into repository A's emptied root directory gets its own home volume (CTC-6155)", async () => {
+    mkdirSync(join(repo, ".git"));
+    const first = await homeFor();
+    await tick();
+    for (const entry of readdirSync(repo)) rmSync(join(repo, entry), { recursive: true, force: true });
+    mkdirSync(join(repo, ".git"));
+    writeDeclaration(repo, OAKMONT);
+    const replaced = await homeFor();
+    expect(replaced).toMatch(NAMED_HOME);
+    expect(replaced).not.toBe(first);
+  });
+
+  test("a .git symlink planted in the checkout cannot reach another checkout's home volume (CTC-6155)", async () => {
+    const other = realpathSync(mkdtempSync(join(tmpdir(), "catalyst-env-victim-")));
+    try {
+      writeDeclaration(other, OAKMONT);
+      mkdirSync(join(other, ".git"));
+      const victim = await homeFor(["--root", other]);
+      symlinkSync(join(other, ".git"), join(repo, ".git"));
+      const planted = await homeFor();
+      expect(planted).not.toBe(victim);
+      expect(existsSync(join(other, ".git", "planted"))).toBe(false);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  test("a checkout with no .git gets an anonymous home that no other run can name (CTC-6155)", async () => {
+    expect(await homeFor()).toBe(ANONYMOUS_HOME);
+    expect(await homeFor(["--check"])).toBe(ANONYMOUS_HOME);
+  });
+
+  test("one checkout keeps its home volume when entries at its root or inside .git change (CTC-6155)", async () => {
+    mkdirSync(join(repo, ".git"));
+    const before = await homeFor();
+    writeFileSync(join(repo, "later.txt"), "x");
+    writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
+    mkdirSync(join(repo, ".git", "objects"));
+    writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/other\n");
+    rmSync(join(repo, "later.txt"));
+    expect(await homeFor()).toBe(before);
+    expect(await homeFor(["--check"])).toBe(before);
   });
 
   /** Plan the shell for `feature` through the real CLI path, then run git in the planned container. */

@@ -1,7 +1,7 @@
 // shell-plan.ts — the container `catalyst env shell` starts: the one `docker run` argv, the in-image
-// start script, the home volume's name and the reader for `--check`'s report. Pure: nothing here
-// spawns, reads a file or sees a variable's value. Values reach the container only as bare `-e NAME`
-// words, which Docker fills from the client process's environment.
+// start script, the home volume's name (per image and checkout) and the reader for `--check`'s report.
+// Pure: nothing here spawns, reads a file or sees a variable's value. Values reach the container only as
+// bare `-e NAME` words, which Docker fills from the client process's environment.
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import type { ShellToolchain } from "./shell-declaration.js";
@@ -42,10 +42,17 @@ export const ENV_SHELL_START_SCRIPT = [
   "exec bash -l",
 ].join("\n");
 
-/** One home volume per image digest: downloaded toolchains and history persist, a new image starts fresh. */
-export function homeVolumeFor(image: string): string {
-  const digest = /@sha256:([0-9a-f]{12})/.exec(image)?.[1];
-  return `catalyst-env-home-${digest ?? createHash("sha256").update(image).digest("hex").slice(0, 12)}`;
+/** One home volume per image digest and checkout: downloaded toolchains and history persist for this
+ *  repository folder, a new image starts fresh, and no other repository's shell ever mounts it (CTC-6155).
+ *  Keyed on the host path mounted at /workspace plus `identity`, the directory's own inode and birth time
+ *  (`checkoutIdentity`), so a different repository later cloned to a reused path gets a fresh volume instead of
+ *  inheriting the old one's ~/.bash_profile. Both are fixed on the host before Docker starts; nothing inside the
+ *  container can set a directory's birth time or inode, and the name never uses the origin URL or git common
+ *  dir, which the checkout's own files decide. */
+export function homeVolumeFor(image: string, root: string, identity: string): string {
+  const digest = /@sha256:([0-9a-f]{12})/.exec(image)?.[1] ?? createHash("sha256").update(image).digest("hex").slice(0, 12);
+  const checkout = createHash("sha256").update(`${root}\0${identity}`).digest("hex").slice(0, 24);
+  return `catalyst-env-home-${digest}-${checkout}`;
 }
 
 export function toolchainSpecs(toolchains: readonly ShellToolchain[]): string[] {
@@ -57,6 +64,8 @@ export interface ShellRunInput {
   image: string;
   /** The repository's real path, mounted at /workspace. */
   root: string;
+  /** `checkoutIdentity(root)`: tells a directory apart from a later one created at the same path; null when the filesystem reports no birth time. */
+  rootIdentity: string | null;
   /** A worktree's shared git directory outside `root`, mounted at the same path, and also where a relative
    *  `gitdir:` pointer in /workspace/.git resolves; null otherwise. */
   gitCommonDir: string | null;
@@ -108,7 +117,9 @@ export function shellRunArgs(input: ShellRunInput): string[] {
     `type=bind,src=${input.root},dst=${ENV_SHELL_WORKSPACE}`,
     ...(input.gitCommonDir ? gitCommonDirMounts(input.root, input.gitCommonDir) : []),
     "--mount",
-    `type=volume,src=${homeVolumeFor(input.image)},dst=${HOME}`,
+    input.rootIdentity === null
+      ? `type=volume,dst=${HOME}` // no identity: an anonymous volume, removed by --rm, that no other run can name
+      : `type=volume,src=${homeVolumeFor(input.image, input.root, input.rootIdentity)},dst=${HOME}`,
     "-w",
     ENV_SHELL_WORKSPACE,
     "-e",

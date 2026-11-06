@@ -11,6 +11,7 @@ import {
   START_EXIT_TOOLCHAIN,
   toolchainSpecs,
 } from "../src/env/shell-plan";
+import { identityFromStat } from "../src/env/shell";
 
 const IMAGE =
   "ghcr.io/coalesce-labs/catalyst-runner@sha256:a19f7b0859a9814740935f7aadd8fe5c5c9c5974f9a5956a057b983ada16ea01";
@@ -21,15 +22,69 @@ const TOOLCHAINS = [
 const base = {
   image: IMAGE,
   root: "/Users/ana/src/web",
+  rootIdentity: "4242:1700000000000000000:4243:1700000000000000001",
   gitCommonDir: null,
   toolchains: TOOLCHAINS,
   passNames: ["DATABASE_URL", "STRIPE_SECRET_KEY"],
   checkNames: [],
 };
 
-test("homeVolumeFor names the volume by the image digest's first 12 hex", () => {
-  expect(homeVolumeFor(IMAGE)).toBe("catalyst-env-home-a19f7b0859a9");
-  expect(homeVolumeFor("not-pinned")).toMatch(/^catalyst-env-home-[0-9a-f]{12}$/);
+test("homeVolumeFor names the volume by the image digest's first 12 hex and the checkout path's sha256", () => {
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", base.rootIdentity)).toBe("catalyst-env-home-a19f7b0859a9-7f66f77abfe74a62e0443947");
+  expect(homeVolumeFor("not-pinned", "/Users/ana/src/web", base.rootIdentity)).toMatch(
+    /^catalyst-env-home-[0-9a-f]{12}-7f66f77abfe74a62e0443947$/,
+  );
+});
+
+const homeMount = (argv: string[]) => argv.find((word) => word.startsWith("type=volume,")) ?? "";
+
+test("two repositories on one image get different home volumes; one repository keeps its own (CTC-6155)", () => {
+  const web = homeMount(shellRunArgs({ ...base, mode: "shell", tty: true }));
+  const api = homeMount(shellRunArgs({ ...base, root: "/Users/ana/src/api", mode: "shell", tty: true }));
+  expect(api).not.toBe(web);
+  expect(homeMount(shellRunArgs({ ...base, mode: "shell", tty: false }))).toBe(web);
+  expect(homeMount(shellRunArgs({ ...base, mode: "check", tty: false }))).toBe(web);
+  expect(homeMount(shellRunArgs({ ...base, mode: "shell", tty: true, gitCommonDir: "/Users/ana/src/api/.git" }))).toBe(web);
+});
+
+test("the same path with a different directory identity gets a different home volume (CTC-6155)", () => {
+  const first = homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000000:4243:1700000000000000001");
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000000:4243:1700000000000000002")).not.toBe(first);
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000000:4243:1700000000000000001")).toBe(first);
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/api", "4242:1700000000000000000:4243:1700000000000000001")).not.toBe(first);
+});
+
+test("the checkout identity is the root's and its .git entry's inode and birth time; no birth time or no .git is none (CTC-6155)", () => {
+  const root = { ino: 5n, birthtimeNs: 100n };
+  const gitDir = { ino: 6n, birthtimeNs: 200n };
+  const identity = identityFromStat(root, gitDir);
+  expect(identity).toBe("5:100:6:200");
+  expect(identityFromStat({ ...root }, { ...gitDir })).toBe(identity);
+  expect(identityFromStat(root, { ino: 6n, birthtimeNs: 201n })).not.toBe(identity);
+  expect(identityFromStat({ ino: 5n, birthtimeNs: 101n }, gitDir)).not.toBe(identity);
+  expect(identityFromStat(root, null)).toBeNull();
+  expect(identityFromStat({ ino: 5n, birthtimeNs: 0n }, gitDir)).toBeNull();
+  expect(identityFromStat(root, { ino: 6n, birthtimeNs: 0n })).toBeNull();
+});
+
+test("with no directory identity the home is an anonymous volume: no name, so no other run can mount it (CTC-6155)", () => {
+  for (const mode of ["shell", "check"] as const) {
+    const argv = shellRunArgs({ ...base, rootIdentity: null, mode, tty: false });
+    expect(homeMount(argv)).toBe("type=volume,dst=/home/catalyst");
+    expect(argv.some((word) => word.includes("catalyst-env-home-"))).toBe(false);
+    expect(homeMount(shellRunArgs({ ...base, rootIdentity: null, mode, tty: false }))).toBe(homeMount(argv));
+  }
+});
+
+test("the home volume name is a valid Docker volume name of fixed length for any root", () => {
+  for (const root of ["/Users/ana/src/web", "/home/a b/ünï=code", `/${"x".repeat(400)}`, "C:\\Users\\ana\\web"]) {
+    for (const image of [IMAGE, "not-pinned"]) {
+      const name = homeVolumeFor(image, root, "9:1700000000000000000:10:1700000000000000000");
+      expect(name).toMatch(/^catalyst-env-home-[0-9a-f]{12}-[0-9a-f]{24}$/);
+      expect(name).toMatch(/^[A-Za-z0-9][A-Za-z0-9_.-]+$/);
+      expect(name).toHaveLength(55);
+    }
+  }
 });
 
 test("toolchainSpecs joins name@version in declared order", () => {
@@ -41,7 +96,7 @@ test("shell mode on a terminal: the whole argv, pinned", () => {
     "run", "--rm", "--pull", "never", "-i", "-t",
     "--user", "10001:10001",
     "--mount", "type=bind,src=/Users/ana/src/web,dst=/workspace",
-    "--mount", "type=volume,src=catalyst-env-home-a19f7b0859a9,dst=/home/catalyst",
+    "--mount", "type=volume,src=catalyst-env-home-a19f7b0859a9-7f66f77abfe74a62e0443947,dst=/home/catalyst",
     "-w", "/workspace",
     "-e", "HOME=/home/catalyst",
     "-e", "MISE_SYSTEM_DATA_DIR=/opt/catalyst/toolchain",
@@ -78,7 +133,7 @@ test("check mode: neither -i nor -t; CATALYST_ENV_NAMES carries the declared nam
   expect(argv.slice(-4)).toEqual(["catalyst-env-shell", "check", "node@22", "bun@1.3.14"]);
 });
 
-const HOME_MOUNT = "type=volume,src=catalyst-env-home-a19f7b0859a9,dst=/home/catalyst";
+const homeMountForRoot = (root: string) => `type=volume,src=${homeVolumeFor(IMAGE, root, base.rootIdentity)},dst=/home/catalyst`;
 
 /** The `--mount` words of the shell argv for a checkout at `root` whose git common dir is `gitCommonDir`. */
 function mountsFor(root: string, gitCommonDir: string): string[] {
@@ -94,7 +149,7 @@ test("a worktree's git common dir outside the root is mounted at its absolute pa
     "type=bind,src=/Users/ana/src/web,dst=/workspace",
     "type=bind,src=/Users/ana/src/web-main/.git,dst=/Users/ana/src/web-main/.git",
     "type=bind,src=/Users/ana/src/web-main/.git,dst=/web-main/.git",
-    HOME_MOUNT,
+    homeMountForRoot("/Users/ana/src/web"),
   ]);
 });
 
@@ -104,7 +159,7 @@ test("CTC-6156: a sibling worktree's relative .git pointer finds the common dir 
     "type=bind,src=/repos/feature,dst=/workspace",
     "type=bind,src=/repos/main/.git,dst=/repos/main/.git",
     "type=bind,src=/repos/main/.git,dst=/main/.git",
-    HOME_MOUNT,
+    homeMountForRoot("/repos/feature"),
   ]);
 });
 
@@ -127,7 +182,7 @@ test.each([
   expect(mountsFor(root, gitCommonDir)).toEqual([
     `type=bind,src=${root},dst=/workspace`,
     `type=bind,src=${gitCommonDir},dst=${gitCommonDir}`,
-    HOME_MOUNT,
+    homeMountForRoot(root),
   ]);
 });
 
@@ -136,7 +191,7 @@ test("CTC-6156: a destination inside a system directory is allowed when it cover
     "type=bind,src=/x/feature,dst=/workspace",
     "type=bind,src=/x/etc/repo/.git,dst=/x/etc/repo/.git",
     "type=bind,src=/x/etc/repo/.git,dst=/etc/repo/.git",
-    HOME_MOUNT,
+    homeMountForRoot("/x/feature"),
   ]);
 });
 
