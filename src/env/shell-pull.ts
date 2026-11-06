@@ -10,7 +10,7 @@ import type { TenantContract } from "../contract-types.js";
 import { RUNNER_HOST_IMAGES } from "../onboard-runner.js";
 import { readLocalRepositoryName } from "../onboard-settings-context.js";
 import { apiClient } from "../transport.js";
-import type { DockerConfigJson, EnvShellDocker } from "./shell-docker.js";
+import { redactSecrets, type DockerConfigJson, type EnvShellDocker } from "./shell-docker.js";
 
 export interface ShellRefusal {
   code: string;
@@ -171,7 +171,8 @@ export async function downloadImage(input: {
     notify("  Downloaded.");
     return { ok: true, credential: "issued" };
   }
-  const detail = withoutStop(issued.detail.split(credential.password).join("[redacted]").split(auth).join("[redacted]"));
+  // The adapter already redacted before its cut; this second layer covers any other EnvShellDocker.
+  const detail = withoutStop(redactSecrets(issued.detail, [credential.password, auth]));
   return refuse(
     "image_download_refused",
     `Could not download ${ref} with the credential your workspace issued: ${detail || "docker pull failed"}.`,

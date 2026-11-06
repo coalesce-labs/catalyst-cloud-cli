@@ -2,6 +2,8 @@
 // Credential-free first; only on a refusal, and only for a signed-in person whose contract serves the
 // route, it asks the workspace (the fixture cloud) for a short-lived credential, checks it covers the
 // image, and pulls once more with it. Docker is a hand-written fake that records every pull.
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   CREDENTIAL_FREE_CONFIG,
@@ -11,7 +13,7 @@ import {
   pullCredentialRoute,
   registryOf,
 } from "../src/env/shell-pull";
-import type { DockerConfigJson, EnvShellDocker } from "../src/env/shell-docker";
+import { spawnEnvShellDocker, type DockerConfigJson, type EnvShellDocker } from "../src/env/shell-docker";
 import { RUNNER_HOST_IMAGES } from "../src/onboard-runner";
 import { buildFixtureContract, FIXTURE_ROUTE_PREFIX } from "./fixture-contract";
 import { startMeFixture, type FixtureServer } from "./fixture";
@@ -290,6 +292,64 @@ describe("downloadImage", () => {
       expect(line).not.toContain(EXPECTED_AUTH);
     }
   });
+});
+
+// CTC-6157 — the same refusal, but through the real docker adapter and a scripted `docker`, so Docker's
+// error line goes through `lastLine`'s 400-character cut. The in-process fake above returns its detail
+// verbatim and never reaches that cut, which is why the redaction test above could not see the leak.
+describe("downloadImage with the real docker adapter (CTC-6157)", () => {
+  const LEAD = "Error response from daemon: unauthorized: ";
+
+  /** One error line that holds `secret` at index `at`, so the 400-character cut falls inside it. */
+  function straddling(secret: string, at: number): string {
+    const line = LEAD + "a".repeat(at - LEAD.length) + secret + " rejected";
+    expect(line.indexOf(secret)).toBe(at);
+    expect(at + secret.length).toBeGreaterThan(400);
+    return line;
+  }
+
+  /** No prefix of 4+ characters of either secret, i.e. not even its first 4 characters. */
+  function expectNoSecretPrefix(text: string) {
+    expect(text).not.toContain(PASSWORD.slice(0, 4)); // "ctcp"
+    expect(text).not.toContain(EXPECTED_AUTH.slice(0, 4)); // "eC1j"
+  }
+
+  /** The real adapter over a `docker` that prints $FAKE_PULL_ERR to stderr and exits 1. Its env is
+   *  PATH and HOME only: never a copy of process.env. */
+  function scriptedDocker(pullError: string): EnvShellDocker {
+    const bin = join(home, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "docker"), `#!/bin/sh\nprintf '%s\\n' "$FAKE_PULL_ERR" >&2\nexit 1\n`);
+    chmodSync(join(bin, "docker"), 0o755);
+    return spawnEnvShellDocker({
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: home, FAKE_PULL_ERR: pullError },
+      tmpdir: () => home,
+    });
+  }
+
+  test.each([
+    ["password at 390", PASSWORD, 390],
+    ["auth at 390", EXPECTED_AUTH, 390],
+    ["auth at 370", EXPECTED_AUTH, 370],
+  ] as const)(
+    "Docker echoes the credential across the 400-character cut (%s) → the refusal holds no prefix of it",
+    async (_name, secret, at) => {
+      const docker = scriptedDocker(`progress line\n${straddling(secret, at)}`);
+      await signIn();
+      server.pullCredential = { status: 200, body: issuedBody() };
+      const refusal = refusalOf(await download(docker));
+      expect(refusal.code).toBe("image_download_refused");
+      expectNoSecretPrefix(refusal.message);
+      expectNoSecretPrefix(JSON.stringify(refusal));
+      expect(
+        refusal.message.startsWith(`Could not download ${REF} with the credential your workspace issued: ${LEAD}`),
+      ).toBe(true);
+      expect(refusal.message).toContain("[redacted]");
+      expect(refusal.message.endsWith(".")).toBe(true);
+      expect(notes.length).toBeGreaterThan(0);
+      for (const line of notes) expectNoSecretPrefix(line);
+    },
+  );
 });
 
 describe("registryOf / credentialCovers", () => {

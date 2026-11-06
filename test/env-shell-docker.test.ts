@@ -115,6 +115,27 @@ function lastCall(): Call {
 
 const pullDirs = () => readdirSync(pullTmp).filter((name) => name.startsWith("catalyst-env-pull-"));
 
+// CTC-6157 — a download credential Docker echoes back must be redacted before its error line is cut
+// to 400 characters, or a cut inside the secret leaves a prefix that matches nothing.
+const PASSWORD = "ctcpull_SECRETVALUE123";
+const EXPECTED_AUTH = Buffer.from(`x-catalyst-pull:${PASSWORD}`).toString("base64");
+const CRED_CONFIG = { auths: { "registry.example.dev": { auth: EXPECTED_AUTH } } };
+const LEAD = "Error response from daemon: unauthorized: ";
+
+/** One error line that holds `secret` at index `at`, so the 400-character cut falls inside it. */
+function straddling(secret: string, at = 390): string {
+  const line = LEAD + "a".repeat(at - LEAD.length) + secret + " rejected";
+  expect(line.indexOf(secret)).toBe(at);
+  expect(at + secret.length).toBeGreaterThan(400);
+  return line;
+}
+
+/** No prefix of 4+ characters of either secret, i.e. not even its first 4 characters. */
+function expectNoSecretPrefix(text: string) {
+  expect(text).not.toContain(PASSWORD.slice(0, 4)); // "ctcp"
+  expect(text).not.toContain(EXPECTED_AUTH.slice(0, 4)); // "eC1j"
+}
+
 describe("server", () => {
   test("server(): ENOENT → missing; exit 1 → not_running; 'windows' → not_linux; 'linux' → ok", async () => {
     expect(await spawnEnvShellDocker({ env: { ...baseEnv(), PATH: emptyDir } }).server()).toEqual({ state: "missing" });
@@ -247,6 +268,37 @@ describe("pull", () => {
     expect(await docker.pull(REF, HOST, CONFIG)).toEqual({ ok: false, detail: "docker is not installed" });
     expect(pullDirs()).toEqual([]);
   });
+
+  test.each([
+    ["password at 390", PASSWORD, 390],
+    ["auth at 390", EXPECTED_AUTH, 390],
+    ["auth at 370", EXPECTED_AUTH, 370],
+  ] as const)(
+    "pull() CTC-6157: Docker echoes the credential across the 400-character cut (%s) → no prefix of it comes back",
+    async (_name, secret, at) => {
+      const docker = spawnEnvShellDocker({
+        env: baseEnv({ FAKE_PULL_EXIT: "1", FAKE_PULL_ERR: `progress line\n${straddling(secret, at)}` }),
+        tmpdir: () => pullTmp,
+      });
+      const result = await docker.pull(REF, HOST, CRED_CONFIG);
+      expect(result.ok).toBe(false);
+      expectNoSecretPrefix(result.detail);
+      expect(result.detail.startsWith(LEAD)).toBe(true);
+      expect(result.detail).toContain("[redacted]");
+      expect(result.detail.length).toBeLessThanOrEqual(400);
+      expect(pullDirs()).toEqual([]);
+    },
+  );
+
+  test("pull() CTC-6157: the catch path (the temp directory cannot be made) redacts the credential its error message names", async () => {
+    // mkdtemp's ENOENT message carries the path, and the path here holds the password.
+    const docker = spawnEnvShellDocker({ env: baseEnv(), tmpdir: () => join(root, `missing-${PASSWORD}`) });
+    const result = await docker.pull(REF, HOST, CRED_CONFIG);
+    expect(result.ok).toBe(false);
+    expectNoSecretPrefix(result.detail);
+    expect(result.detail.startsWith("ENOENT")).toBe(true);
+    expect(result.detail).toContain("[redacted]");
+  });
 });
 
 describe("run", () => {
@@ -291,5 +343,18 @@ describe("exitCodeOf and lastLine", () => {
     expect(lastLine("first\nsecond\n\n")).toBe("second");
     expect(lastLine("first\r\nsecond\r\n")).toBe("second");
     expect(lastLine("")).toBe("");
+  });
+
+  test("lastLine CTC-6157: a secret that crosses the 400-character cut is redacted before the cut, not left as a prefix", () => {
+    expect(lastLine("a".repeat(390) + PASSWORD + " rejected", [PASSWORD])).toBe("a".repeat(390) + "[redacted]");
+    expect(lastLine("a".repeat(390) + EXPECTED_AUTH + " rejected", [EXPECTED_AUTH])).toBe("a".repeat(390) + "[redacted]");
+  });
+
+  test("lastLine CTC-6157: the longest secret goes first, so one secret inside another does not split it", () => {
+    expect(lastLine("denied abcXYZ12345def", ["XYZ12345", "abcXYZ12345def"])).toBe("denied [redacted]");
+  });
+
+  test("lastLine CTC-6157: an empty secret is ignored", () => {
+    expect(lastLine("denied", [""])).toBe("denied");
   });
 });

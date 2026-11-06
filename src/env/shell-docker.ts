@@ -88,13 +88,32 @@ export function exitCodeOf(status: number | null, signal: NodeJS.Signals | null)
   return signal ? 128 + (constants.signals[signal] ?? 0) : 1;
 }
 
-/** Docker's last non-empty error line, printable characters only. */
-export function lastLine(text: string): string {
+/** Every occurrence of each non-empty secret, longest first, becomes "[redacted]". */
+export function redactSecrets(text: string, secrets: readonly string[]): string {
+  return secrets
+    .filter((secret) => secret !== "")
+    .sort((a, b) => b.length - a.length)
+    .reduce((out, secret) => out.split(secret).join("[redacted]"), text);
+}
+
+/** Docker's last non-empty error line, printable characters only. The secrets are redacted from the
+ *  whole stripped line before it is cut to 400 characters, so the cut can fall inside "[redacted]"
+ *  but never inside a secret and leave a prefix that no replacement matches (CTC-6157). */
+export function lastLine(text: string, secrets: readonly string[] = []): string {
   const lines = text
     .split(/\r?\n/)
-    .map((line) => line.replace(/[^\x20-\x7e]/g, "").trim())
+    .map((line) => redactSecrets(line.replace(/[^\x20-\x7e]/g, "").trim(), secrets))
     .filter((line) => line !== "");
   return (lines.at(-1) ?? "").slice(0, 400);
+}
+
+/** The secrets a pull's config carries: each `auth` value and the password it encodes. */
+function secretsOf(config: DockerConfigJson): string[] {
+  return Object.values(config.auths).flatMap(({ auth }) => {
+    if (!auth) return [];
+    const decoded = Buffer.from(auth, "base64").toString("utf8");
+    return [auth, decoded.slice(decoded.indexOf(":") + 1)];
+  });
 }
 
 export function spawnEnvShellDocker(deps: { env: NodeJS.ProcessEnv; tmpdir?: () => string }): EnvShellDocker {
@@ -127,6 +146,8 @@ export function spawnEnvShellDocker(deps: { env: NodeJS.ProcessEnv; tmpdir?: () 
       return (await quiet(["image", "inspect", "--format", "{{.Id}}", ref])).code === 0;
     },
     async pull(ref, host, config) {
+      // The config is the only channel for the credential, so nothing it holds may come back in `detail`.
+      const secrets = secretsOf(config);
       let dir: string | undefined;
       try {
         // mkdtemp creates the directory 0700; the file is 0600 and holds nothing else.
@@ -147,9 +168,9 @@ export function spawnEnvShellDocker(deps: { env: NodeJS.ProcessEnv; tmpdir?: () 
           timeoutMs: 3_600_000,
         });
         if (result.missing) return { ok: false, detail: "docker is not installed" };
-        return { ok: result.code === 0, detail: lastLine(result.stderr) };
+        return { ok: result.code === 0, detail: lastLine(result.stderr, secrets) };
       } catch (error) {
-        return { ok: false, detail: error instanceof Error ? lastLine(error.message) : "the download could not start" };
+        return { ok: false, detail: error instanceof Error ? lastLine(error.message, secrets) : "the download could not start" };
       } finally {
         if (dir) rmSync(dir, { recursive: true, force: true });
       }
