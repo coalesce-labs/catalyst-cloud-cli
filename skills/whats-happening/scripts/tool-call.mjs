@@ -19,8 +19,10 @@ const NO_ONE =
 
 const oneLine = (s) => s.replace(/\s+/g, " ").trim();
 const text = (v) => (typeof v === "string" && oneLine(v) ? oneLine(v) : null);
-/** An element of `calls` the verb passed through unchecked: only a plain object can be a recorded call. */
+/** A plain object: the only shape a recorded call, or its dispatch, can have. */
 const isRecord = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+/** A string that says something, as the route sent it; any other type, and a blank string, is absent. */
+const str = (v) => (typeof v === "string" && v.trim() ? v : null);
 const sentence = (s) => (/[.!?]$/.test(s) ? s : `${s}.`);
 const normaliseServer = (raw) =>
   raw.trim().toLowerCase().replace(/[\s.]+/g, "-").replace(/[^a-z0-9_-]/g, "");
@@ -36,35 +38,60 @@ function actorIn(explanation) {
 // Only a numeric timestamp counts, as in the verb: new Date(null) is the epoch, and the line must not print it.
 const when = (at) => (typeof at === "number" && Number.isFinite(new Date(at).getTime()) ? new Date(at).toISOString() : null);
 
+/**
+ * One element of `calls` as the script reads it, or null when it is not a usable recorded call. The verb checks
+ * that `calls` is an array and nothing about its elements, so each field is read by type. A usable call is a
+ * plain object whose tool_name and outcome are non-empty strings; without them the line cannot name the tool or
+ * say whether the call failed. Every other field of the wrong type is absent. No value reaches String(), a
+ * template or a string method unless it is already a string.
+ */
+function readCall(c) {
+  if (!isRecord(c)) return null;
+  const tool = str(c.tool_name);
+  const outcome = str(c.outcome);
+  if (!tool || !outcome) return null;
+  const dispatch = isRecord(c.dispatch) ? c.dispatch : {};
+  return {
+    tool,
+    outcome,
+    ticket: str(dispatch.ticket),
+    phase: str(dispatch.phase),
+    denied: text(c.denied_reason),
+    explanation: text(c.explanation),
+    at: when(c.at),
+  };
+}
+
 /** The answer for one read: the fields of the call it rests on, a verdict, and the reason as the verb prints it. */
 function answer(server, ticket, tool, calls) {
   const base = { server, ticket: ticket ?? null, phase: null, tool: null, outcome: null, reason: null, explanation: null, at: null };
   const window = { read: calls.length, limit: LIMIT };
-  const kept = calls.filter(
-    (c) =>
-      isRecord(c) &&
-      (!ticket || String(c.dispatch?.ticket ?? "").toLowerCase() === ticket.toLowerCase()) &&
-      (!tool || String(c.tool_name ?? "").toLowerCase().includes(tool.toLowerCase())),
-  );
+  const kept = calls
+    .map(readCall)
+    .filter(
+      (c) =>
+        c !== null &&
+        (!ticket || (c.ticket ?? "").toLowerCase() === ticket.toLowerCase()) &&
+        (!tool || c.tool.toLowerCase().includes(tool.toLowerCase())),
+    );
   const failed = kept.find((c) => c.outcome !== "ok");
   const call = failed ?? kept[0];
   if (!call) return { a: { ...base, fixer: { named: false, who: null }, window, verdict: "not-in-window" } };
-  const explanation = text(call.explanation);
-  const who = failed ? actorIn(explanation) : null;
+  const who = failed ? actorIn(call.explanation) : null;
   const a = {
     ...base,
-    ticket: call.dispatch?.ticket ?? null,
-    phase: call.dispatch?.phase ?? null,
-    tool: call.tool_name ?? null,
-    outcome: call.outcome ?? null,
-    reason: failed ? (text(call.denied_reason) ?? text(call.outcome)) : null,
-    explanation: failed ? explanation : null,
-    at: when(call.at),
+    ticket: call.ticket,
+    phase: call.phase,
+    tool: call.tool,
+    outcome: call.outcome,
+    reason: failed ? (call.denied ?? text(call.outcome)) : null,
+    explanation: failed ? call.explanation : null,
+    at: call.at,
     fixer: { named: who !== null, who },
     window,
     verdict: failed ? "failed" : "no-failure",
   };
-  return { a, why: [text(call.denied_reason), explanation].filter(Boolean).join(": ") };
+  return { a, why: [call.denied, call.explanation].filter(Boolean).join(": ") };
 }
 
 /** The one line the desk replies with. */
