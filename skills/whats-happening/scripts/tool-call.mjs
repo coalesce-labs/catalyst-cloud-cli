@@ -19,6 +19,8 @@ const NO_ONE =
 
 const oneLine = (s) => s.replace(/\s+/g, " ").trim();
 const text = (v) => (typeof v === "string" && oneLine(v) ? oneLine(v) : null);
+/** An element of `calls` the verb passed through unchecked: only a plain object can be a recorded call. */
+const isRecord = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const sentence = (s) => (/[.!?]$/.test(s) ? s : `${s}.`);
 const normaliseServer = (raw) =>
   raw.trim().toLowerCase().replace(/[\s.]+/g, "-").replace(/[^a-z0-9_-]/g, "");
@@ -39,6 +41,7 @@ function answer(server, ticket, tool, calls) {
   const window = { read: calls.length, limit: LIMIT };
   const kept = calls.filter(
     (c) =>
+      isRecord(c) &&
       (!ticket || String(c.dispatch?.ticket ?? "").toLowerCase() === ticket.toLowerCase()) &&
       (!tool || String(c.tool_name ?? "").toLowerCase().includes(tool.toLowerCase())),
   );
