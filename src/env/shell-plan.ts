@@ -1,7 +1,7 @@
 // shell-plan.ts — the container `catalyst env shell` starts: the one `docker run` argv, the in-image
-// start script, the home volume's name and the reader for `--check`'s report. Pure: nothing here
-// spawns, reads a file or sees a variable's value. Values reach the container only as bare `-e NAME`
-// words, which Docker fills from the client process's environment.
+// start script, the home volume's name (per image and checkout) and the reader for `--check`'s report.
+// Pure: nothing here spawns, reads a file or sees a variable's value. Values reach the container only as
+// bare `-e NAME` words, which Docker fills from the client process's environment.
 import { createHash } from "node:crypto";
 import type { ShellToolchain } from "./shell-declaration.js";
 
@@ -35,10 +35,14 @@ export const ENV_SHELL_START_SCRIPT = [
   "exec bash -l",
 ].join("\n");
 
-/** One home volume per image digest: downloaded toolchains and history persist, a new image starts fresh. */
-export function homeVolumeFor(image: string): string {
-  const digest = /@sha256:([0-9a-f]{12})/.exec(image)?.[1];
-  return `catalyst-env-home-${digest ?? createHash("sha256").update(image).digest("hex").slice(0, 12)}`;
+/** One home volume per image digest and checkout: downloaded toolchains and history persist for this
+ *  repository folder, a new image starts fresh, and no other repository's shell ever mounts it (CTC-6155).
+ *  Keyed on the host path mounted at /workspace, which nothing inside the container can change; never on the
+ *  origin URL or git common dir, which the checkout's own files decide. */
+export function homeVolumeFor(image: string, root: string): string {
+  const digest = /@sha256:([0-9a-f]{12})/.exec(image)?.[1] ?? createHash("sha256").update(image).digest("hex").slice(0, 12);
+  const checkout = createHash("sha256").update(root).digest("hex").slice(0, 24);
+  return `catalyst-env-home-${digest}-${checkout}`;
 }
 
 export function toolchainSpecs(toolchains: readonly ShellToolchain[]): string[] {
@@ -77,7 +81,7 @@ export function shellRunArgs(input: ShellRunInput): string[] {
     `type=bind,src=${input.root},dst=${ENV_SHELL_WORKSPACE}`,
     ...(input.gitCommonDir ? ["--mount", `type=bind,src=${input.gitCommonDir},dst=${input.gitCommonDir}`] : []),
     "--mount",
-    `type=volume,src=${homeVolumeFor(input.image)},dst=${HOME}`,
+    `type=volume,src=${homeVolumeFor(input.image, input.root)},dst=${HOME}`,
     "-w",
     ENV_SHELL_WORKSPACE,
     "-e",

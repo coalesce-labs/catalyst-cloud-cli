@@ -27,9 +27,33 @@ const base = {
   checkNames: [],
 };
 
-test("homeVolumeFor names the volume by the image digest's first 12 hex", () => {
-  expect(homeVolumeFor(IMAGE)).toBe("catalyst-env-home-a19f7b0859a9");
-  expect(homeVolumeFor("not-pinned")).toMatch(/^catalyst-env-home-[0-9a-f]{12}$/);
+test("homeVolumeFor names the volume by the image digest's first 12 hex and the checkout path's sha256", () => {
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web")).toBe("catalyst-env-home-a19f7b0859a9-0e7676587a0a89966444e3c9");
+  expect(homeVolumeFor("not-pinned", "/Users/ana/src/web")).toMatch(
+    /^catalyst-env-home-[0-9a-f]{12}-0e7676587a0a89966444e3c9$/,
+  );
+});
+
+const homeMount = (argv: string[]) => argv.find((word) => word.startsWith("type=volume,")) ?? "";
+
+test("two repositories on one image get different home volumes; one repository keeps its own (CTC-6155)", () => {
+  const web = homeMount(shellRunArgs({ ...base, mode: "shell", tty: true }));
+  const api = homeMount(shellRunArgs({ ...base, root: "/Users/ana/src/api", mode: "shell", tty: true }));
+  expect(api).not.toBe(web);
+  expect(homeMount(shellRunArgs({ ...base, mode: "shell", tty: false }))).toBe(web);
+  expect(homeMount(shellRunArgs({ ...base, mode: "check", tty: false }))).toBe(web);
+  expect(homeMount(shellRunArgs({ ...base, mode: "shell", tty: true, gitCommonDir: "/Users/ana/src/api/.git" }))).toBe(web);
+});
+
+test("the home volume name is a valid Docker volume name of fixed length for any root", () => {
+  for (const root of ["/Users/ana/src/web", "/home/a b/ünï=code", `/${"x".repeat(400)}`, "C:\\Users\\ana\\web"]) {
+    for (const image of [IMAGE, "not-pinned"]) {
+      const name = homeVolumeFor(image, root);
+      expect(name).toMatch(/^catalyst-env-home-[0-9a-f]{12}-[0-9a-f]{24}$/);
+      expect(name).toMatch(/^[A-Za-z0-9][A-Za-z0-9_.-]+$/);
+      expect(name).toHaveLength(55);
+    }
+  }
 });
 
 test("toolchainSpecs joins name@version in declared order", () => {
@@ -41,7 +65,7 @@ test("shell mode on a terminal: the whole argv, pinned", () => {
     "run", "--rm", "--pull", "never", "-i", "-t",
     "--user", "10001:10001",
     "--mount", "type=bind,src=/Users/ana/src/web,dst=/workspace",
-    "--mount", "type=volume,src=catalyst-env-home-a19f7b0859a9,dst=/home/catalyst",
+    "--mount", "type=volume,src=catalyst-env-home-a19f7b0859a9-0e7676587a0a89966444e3c9,dst=/home/catalyst",
     "-w", "/workspace",
     "-e", "HOME=/home/catalyst",
     "-e", "MISE_SYSTEM_DATA_DIR=/opt/catalyst/toolchain",
@@ -84,7 +108,7 @@ test("a worktree's git common dir outside the root is mounted at the same absolu
   expect(mounts).toEqual([
     "type=bind,src=/Users/ana/src/web,dst=/workspace",
     "type=bind,src=/Users/ana/src/web-main/.git,dst=/Users/ana/src/web-main/.git",
-    "type=volume,src=catalyst-env-home-a19f7b0859a9,dst=/home/catalyst",
+    "type=volume,src=catalyst-env-home-a19f7b0859a9-0e7676587a0a89966444e3c9,dst=/home/catalyst",
   ]);
 });
 

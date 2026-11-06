@@ -464,6 +464,29 @@ describe("catalyst env shell (interactive)", () => {
       rmSync(common, { recursive: true, force: true });
     }
   });
+
+  test("two checkouts with the same origin name and common dir get different home volumes; --check shares the shell's (CTC-6155)", async () => {
+    const other = realpathSync(mkdtempSync(join(tmpdir(), "catalyst-env-other-")));
+    const common = realpathSync(mkdtempSync(join(tmpdir(), "catalyst-env-common-")));
+    try {
+      writeDeclaration(other, OAKMONT);
+      const over = { readRepositoryName: async () => "oakmont-labs/web", gitCommonDir: async () => common };
+      const homeOf = (port: ReturnType<typeof recordingPort>) =>
+        port.rec.runs[0]?.argv.find((word) => word.startsWith("type=volume,")) ?? "";
+      const a = recordingPort();
+      expect(await shell([], a.docker, over)).toBe(0);
+      const b = recordingPort();
+      expect(await main(["env", "shell", "--root", other], ctx, deps(b.docker, over))).toBe(0);
+      expect(homeOf(b)).not.toBe(homeOf(a));
+      const again = recordingPort();
+      expect(await shell(["--check"], again.docker, over)).toBe(0);
+      expect(homeOf(again)).toBe(homeOf(a));
+      expect(homeOf(a)).toMatch(/^type=volume,src=catalyst-env-home-[0-9a-f]{12}-[0-9a-f]{24},dst=\/home\/catalyst$/);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+      rmSync(common, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("signed in, credential fallback", () => {

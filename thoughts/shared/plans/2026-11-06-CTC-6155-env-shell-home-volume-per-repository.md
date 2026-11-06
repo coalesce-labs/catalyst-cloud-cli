@@ -219,12 +219,12 @@ None expected. If the inline `homeMount` helper is wanted in both test files, ke
 
 #### Automated Verification:
 
-- [ ] Red observed first: the new tests fail on `not.toBe` and on the format regex before `src/` changes.
-- [ ] `bunx vitest run test/env-shell-plan.test.ts test/env-shell.test.ts` passes.
-- [ ] `bun run typecheck` (`tsc --noEmit`, which covers `src` and `test`) passes.
-- [ ] `bun run test` passes in full.
-- [ ] `bun run test:coverage` stays at or above the thresholds in `vitest.config.ts`.
-- [ ] `git diff --stat origin/main` shows only `src/env/shell-plan.ts`, `test/env-shell-plan.test.ts` and `test/env-shell.test.ts`, plus this plan.
+- [x] Red observed first: the new tests fail on `not.toBe` and on the format regex before `src/` changes.
+- [x] `bunx vitest run test/env-shell-plan.test.ts test/env-shell.test.ts` passes.
+- [x] `bun run typecheck` (`tsc --noEmit`, which covers `src` and `test`) passes.
+- [x] `bun run test` passes in full.
+- [x] `bun run test:coverage` stays at or above the thresholds in `vitest.config.ts`.
+- [x] `git diff --stat origin/main` shows only `src/env/shell-plan.ts`, `test/env-shell-plan.test.ts` and `test/env-shell.test.ts`, plus this plan.
 
 #### Manual Verification:
 
