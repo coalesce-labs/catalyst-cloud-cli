@@ -37,6 +37,15 @@ const isFailure = (c) => c.outcome !== "ok" && !IN_FLIGHT.has(c.outcome);
 const isUnfinished = (c) => IN_FLIGHT.has(c.outcome);
 
 const oneLine = (s) => s.replace(/\s+/g, " ").trim();
+/**
+ * What the CLI said, before it goes into a refusal: one line, with every token that holds a "/" (a route, an address,
+ * a path) replaced by "the portal", because skill-facing text never names a route. Linear in the length of the text.
+ */
+const fromCli = (s) =>
+  oneLine(s)
+    .split(" ")
+    .map((token) => (token.includes("/") ? "the portal" : token))
+    .join(" ");
 const text = (v) => (typeof v === "string" && oneLine(v) ? oneLine(v) : null);
 /** A plain object: the only shape a recorded call, or its dispatch, can have. */
 const isRecord = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -183,19 +192,19 @@ try {
   const server = normaliseServer(positionals[0]);
   if (!SERVER_NAME.test(server)) fail(`"${positionals[0]}" is not a server name (lowercase letters, digits, - and _, starting with a letter)`);
 
-  const r = runCli(["mcp", "status", server, "--json"]);
+  const r = runCli(["mcp", "status", server, "--json"], { say: fromCli });
   if (r.code === 3) {
     fail(
       `could not read MCP server ${server}: either this workspace registered it under another name or this Catalyst Cloud does not serve tool-call records yet. A workspace owner or admin can list the names with \`catalyst mcp list\`.`,
     );
   }
-  if (r.code !== 0) fail(`could not read MCP server ${server}: ${r.stderr.split("\n").map(oneLine).find(Boolean) ?? `exit code ${r.code}`}`);
+  if (r.code !== 0) fail(`could not read MCP server ${server}: ${fromCli(r.stderr.split("\n").map(oneLine).find(Boolean) ?? `exit code ${r.code}`)}`);
 
   let status;
   try {
     status = JSON.parse(r.stdout.trim());
   } catch {
-    fail(`could not parse the MCP status as JSON: ${r.stdout.trim().slice(0, 200)}`);
+    fail(`could not parse the MCP status as JSON: ${fromCli(r.stdout.trim().slice(0, 200))}`);
   }
   const calls = status?.calls?.calls;
   if (!Array.isArray(calls)) fail(`could not read MCP server ${server}: the status came back in a shape this script does not know`);

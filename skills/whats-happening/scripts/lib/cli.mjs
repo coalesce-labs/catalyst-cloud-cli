@@ -41,6 +41,7 @@ function notConfigured(why) {
  * Run one catalyst verb and return {code, stdout, stderr}. Uses the CLI path the login
  * recorded when it still exists, else `npx <package>`. A CLI exit of 2 with a "not joined" or
  * "not connected" line is turned into this script's own exit 2, so every caller sees one contract.
+ * A caller that must not pass the CLI's words on as they are gives `say`, which rewrites that line before it is printed.
  */
 export function runCli(args, opts = {}) {
   const cfg = loadConfig();
@@ -61,7 +62,7 @@ export function runCli(args, opts = {}) {
   const stdout = res.stdout ?? "";
   const stderr = res.stderr ?? "";
   if (res.status === NOT_CONFIGURED_EXIT && /not (joined|connected|configured)/i.test(stderr)) {
-    process.stderr.write(stderr);
+    process.stderr.write(opts.say ? `${opts.say(stderr)}\n` : stderr);
     process.exit(NOT_CONFIGURED_EXIT);
   }
   return { code: res.status ?? 1, stdout, stderr };

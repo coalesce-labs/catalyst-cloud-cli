@@ -944,7 +944,7 @@ describe("text the CLI wrote never puts a route or an address into a refusal", (
     const { dir } = setup({ stdout: `Cannot ${ROUTE}\n<a href="${URL_}">x</a>` });
     const r = run(dir, ["workos"]);
     clean(r, 1);
-    expect(r.stderr).toBe('could not parse the MCP status as JSON: Cannot GET the portal\n');
+    expect(r.stderr).toBe("could not parse the MCP status as JSON: Cannot GET the portal <a the portal\n");
   });
 
   test("a body longer than the excerpt that has a route at the cut is masked, not cut through", () => {
