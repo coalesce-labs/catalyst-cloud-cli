@@ -389,6 +389,97 @@ describe("a record with elements that are not calls", () => {
   });
 });
 
+// The verb checks that `calls` is an array and nothing about what is in it, so every field the script
+// reads can arrive with the wrong type. A usable call is a plain object whose tool_name and outcome are
+// non-empty strings; any other call is skipped like a non-object element (it still counts in window.read,
+// and never poses as a failure, a success or the newest ok call). Every other field is read by type and
+// treated as absent when it is not the type the route sends.
+describe("a recorded call with a field of the wrong type", () => {
+  const WRONG: [string, unknown][] = [
+    ["null", null],
+    ["a number", 42],
+    ["a boolean", true],
+    ["an array", [1, "a"]],
+    ["an object with a non-callable toString", { toString: 5 }],
+    ["a nested object", { a: { b: 1 } }],
+  ];
+  interface Out { server: string; ticket: string | null; phase: string | null; tool: string | null; outcome: string | null; reason: string | null; explanation: string | null; at: string | null; fixer: { named: boolean; who: string | null }; window: { read: number; limit: number }; verdict: string }
+  const json = (dir: string, args: string[] = []) => JSON.parse(run(dir, ["workos", ...args, "--json"]).stdout) as Out;
+  // Nothing but a clean exit and one line of text: no crash, no stack trace, no value printed raw.
+  const clean = (r: ReturnType<typeof run>, why: string) => {
+    expect(r.stderr, `${why}: stderr`).toBe("");
+    expect(r.status, `${why}: exit`).toBe(0);
+    expect(r.stdout, `${why}: one line`).toMatch(ONE_LINE);
+    expect(r.stdout, `${why}: no field posing as a value`).not.toMatch(/failed \(null\)|\[object|undefined|NaN/);
+  };
+
+  // tool_name and outcome decide whether a call is usable at all.
+  const REQUIRED = [
+    ...WRONG,
+    ["an empty string", ""],
+    ["blank", "   "],
+  ];
+  const GOOD = { ...DENIED_CALL, call_id: "call_good", tool_name: "workos__good", denied_reason: "not-granted", explanation: "Refused: this key has no grant for the tool. A workspace admin can grant it." };
+  const NEWER_AT = OK_CALL.at + 60_000;
+  test.each(["tool_name", "outcome"].flatMap((field) => REQUIRED.map(([name, bad]) => [field, name, bad] as const)))(
+    "%s as %s: the call is skipped, never a failure, a success or the newest ok",
+    (field, _name, bad) => {
+      // Alone, it is an unreadable record: inconclusive, the same words as an empty window.
+      const alone = withRawCalls([{ ...DENIED_CALL, [field]: bad }]);
+      for (const args of [[], ["--ticket", "CTC-1234"]]) {
+        const r = run(alone.dir, ["workos", ...args]);
+        clean(r, `alone ${args.join(" ")}`);
+        expect(r.stdout, "alone: inconclusive").toContain("cannot say why");
+        expect(r.stdout, "alone: no failure").not.toContain("failed (");
+        expect(r.stdout, "alone: no success").not.toContain("no failed call");
+        expect(json(alone.dir, args)).toMatchObject({ verdict: "not-in-window", window: { read: 1, limit: 50 } });
+      }
+      // Beside a usable failed call, that one is the call reported.
+      const beside = withRawCalls([{ ...DENIED_CALL, [field]: bad }, GOOD]);
+      for (const args of [[], ["--ticket", "CTC-1234"]]) {
+        const r = run(beside.dir, ["workos", ...args]);
+        clean(r, `beside ${args.join(" ")}`);
+        expect(r.stdout, "beside: the usable call").toContain("workos__good");
+        expect(r.stdout, "beside: its reason").toContain("not-granted");
+        expect(r.stdout, "beside: not the unusable call").not.toContain("approval-expired");
+        expect(r.stdout, "beside: not the unusable call's tool").not.toContain("workos__list_users");
+      }
+      // A newer ok-looking record that is unusable is not the newest ok call.
+      const oks = withRawCalls([{ ...OK_CALL, at: NEWER_AT, [field]: bad }, OK_CALL]);
+      const r = run(oks.dir, ["workos", "--ticket", "CTC-1234"]);
+      clean(r, "newest ok");
+      expect(r.stdout, "newest ok: the usable call's time").toContain(new Date(OK_CALL.at).toISOString());
+      expect(r.stdout, "newest ok: not the unusable call's time").not.toContain(new Date(NEWER_AT).toISOString());
+    },
+  );
+
+  // The other fields are read by type: a value of the wrong type is absent, and the call is still reported.
+  const OPTIONAL: [string, (bad: unknown) => unknown, Partial<Out>][] = [
+    ["denied_reason", (bad) => ({ ...DENIED_CALL, denied_reason: bad }), { reason: "denied" }],
+    ["explanation", (bad) => ({ ...DENIED_CALL, explanation: bad }), { explanation: null, fixer: { named: false, who: null } }],
+    ["dispatch", (bad) => ({ ...DENIED_CALL, dispatch: bad }), { ticket: null, phase: null }],
+    ["dispatch.ticket", (bad) => ({ ...DENIED_CALL, dispatch: { ticket: bad, phase: "implement", generation: 3 } }), { ticket: null }],
+    ["dispatch.phase", (bad) => ({ ...DENIED_CALL, dispatch: { ticket: "CTC-1234", phase: bad, generation: 3 } }), { phase: null }],
+    ["at", (bad) => ({ ...DENIED_CALL, at: bad }), { at: null }],
+  ];
+  const EXPECTED: Out = {
+    server: "workos", ticket: "CTC-1234", phase: "implement", tool: "workos__list_users", outcome: "denied", reason: "approval-expired",
+    explanation: EXPIRED, at: new Date(DENIED_CALL.at).toISOString(), fixer: { named: true, who: "a workspace admin" },
+    window: { read: 1, limit: 50 }, verdict: "failed",
+  };
+  test.each(
+    OPTIONAL.flatMap(([field, make, expected]) =>
+      WRONG.filter(([name]) => !(field === "at" && name === "a number")).map(([name, bad]) => [field, name, bad, make, expected] as const),
+    ),
+  )("%s as %s: read as absent, the call is still explained", (_field, _name, bad, make, expected) => {
+    const { dir } = withRawCalls([make(bad)]);
+    const r = run(dir, ["workos"]);
+    clean(r, "line");
+    expect(r.stdout).toContain("workos__list_users on workos failed (denied)");
+    expect(json(dir)).toEqual({ ...EXPECTED, ...expected });
+  });
+});
+
 describe("a read that fails", () => {
   test("CLI exit 3 (older cloud, or a name the workspace did not register) is exit 1, names the server and `catalyst mcp list`, and relays none of the CLI's own text", () => {
     const { dir } = setup({ code: 3, stderr: NEEDS_NEWER });
