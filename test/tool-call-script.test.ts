@@ -228,6 +228,29 @@ describe("who can fix it", () => {
     ["a negated sentence anywhere vetoes the role", "A workspace admin can re-approve it. A workspace admin cannot grant new tools."],
     ["the same role under another name is vetoed too", "A workspace admin cannot fix this. Ask your admin."],
     ["one negation covers the whole sentence", "A workspace admin cannot fix this, but an operator can."],
+    // The explanation is read whole, never split into sentences: a restriction anywhere takes every role out.
+    ["a restriction in a later sentence", "A workspace admin can re-approve it. Only the provider can fix this failure."],
+    ["a restriction in an earlier sentence", "Only the provider can restore the service. A workspace admin can re-approve the key."],
+    ["a restriction after a semicolon", "Only the provider can fix this; an admin can retry it."],
+    ["a version string before a restriction", "A workspace admin can re-approve it on v1.2. Only the provider can fix this."],
+    ["a negation in an earlier sentence", "The approval was not granted. A workspace admin can grant it."],
+    ["a negation before a semicolon", "The key is not granted; a workspace admin can grant it."],
+    ["nobody, then ask", "Nobody can fix it. Ask your workspace admin."],
+    // Two different actors are ambiguous.
+    ["two different actors", "A workspace admin can re-approve it. An operator can restore the service."],
+    ["an owner or admin, then an admin alone", "An owner or admin can approve it. Ask your admin."],
+    // A modal alone is not a fix: the verb after it must be one the person would act on.
+    ["can see", "An admin can see this call in the audit list."],
+    ["can view", "A workspace admin can view the call."],
+    ["can list", "A workspace admin can list the calls."],
+    // Only a role the person is told to turn to, or who is said to fix it, is named.
+    ["have admin rights", "You have admin rights, but the provider must restore the service."],
+    ["have an admin do it", "Have an admin re-approve it."],
+    ["is able to is not a listed modal", "A workspace admin is able to fix this."],
+    ["ask, then a clause that is neither to, for nor the end", "Ask your workspace admin, who may know."],
+    // A role that belongs to someone else is not the workspace's.
+    ["a possessive owner", "The upstream server's owner can fix it."],
+    ["a possessive operator, curly apostrophe", "The provider\u2019s operator can fix it."],
   ])("never names a role the explanation negates or restricts: %s", (_why, explanation) => {
     const { r, json } = whoSays(explanation);
     expect(r.status).toBe(0);
@@ -247,10 +270,12 @@ describe("who can fix it", () => {
     ["The workspace owner must reconnect the server.", "the workspace owner"],
     ["An owner or admin can approve it.", "an owner or admin"],
     ["A workspace admin needs to re-approve it.", "a workspace admin"],
-    ["A workspace admin is able to fix this.", "a workspace admin"],
-    ["Have an admin re-approve it.", "an admin"],
-    ["The approval was not granted. A workspace admin can grant it.", "a workspace admin"],
-    ["The key is not granted; a workspace admin can grant it.", "a workspace admin"],
+    ["Only a workspace admin can re-approve it.", "a workspace admin"],
+    ["Ask your workspace admin to retry.", "your workspace admin"],
+    ["Ask your workspace admin for help.", "your workspace admin"],
+    ["Contact an operator.", "an operator"],
+    ["A workspace admin may reapprove it on the account's Connections page.", "a workspace admin"],
+    ["A workspace admin can re-approve it. Ask your workspace admin.", "a workspace admin"],
   ])("takes the actor the explanation names: %s", (explanation, who) => {
     const { dir } = withCalls([{ ...DENIED_CALL, explanation }]);
     const r = run(dir, ["workos", "--json"]);
@@ -632,11 +657,13 @@ describe("the line claims only what the record supports", () => {
     expect(r.stdout).not.toMatch(/\( | \)/);
   });
 
-  test("the verb's rule stands: any outcome but ok is a failure, and the line names the outcome", () => {
-    const { dir } = withCalls([{ ...DENIED_CALL, outcome: "pending", denied_reason: null, explanation: null }]);
-    const r = run(dir, ["workos"]);
-    expect(r.stdout).toContain("failed (pending)");
-    expect(r.stdout).toContain("the record gives no reason");
+  test("the verb's rule stands: an outcome that is neither ok nor in flight is a failure, and the line names it", () => {
+    for (const outcome of ["timeout", "Pending", "PENDING", "OK", "cancelled"]) {
+      const { dir } = withCalls([{ ...DENIED_CALL, outcome, denied_reason: null, explanation: null }]);
+      const r = run(dir, ["workos"]);
+      expect(r.stdout, outcome).toContain(`failed (${outcome})`);
+      expect(r.stdout, outcome).toContain("the record gives no reason");
+    }
   });
 
   test("an older failure is reported although the newest call was ok: the line says only that this call failed", () => {
@@ -660,6 +687,95 @@ describe("the line claims only what the record supports", () => {
     const { dir } = withCalls([DENIED_CALL]);
     const r = run(dir, ["workos", "--ticket", "ctc-1234"]);
     expect(r.stdout.startsWith("CTC-1234 implement: ")).toBe(true);
+  });
+});
+
+// The verb treats ok as the only success and never classifies the rest, so the script does: ok is success, a
+// small closed set of in-flight outcomes means the call has not finished, and every other outcome is a failure.
+// An unfinished call is never reported as a failure, and is never the newest ok call.
+describe("a call that has not finished is neither a failure nor a success", () => {
+  const IN_FLIGHT = ["pending", "in_flight", "in-flight", "in_progress", "in-progress", "running", "queued", "started", "awaiting_approval", "awaiting-approval", "approval_pending"];
+  const answerOf = (dir: string, args: string[]) => JSON.parse(run(dir, ["workos", ...args, "--json"]).stdout) as { verdict: string; outcome: string | null; reason: string | null; explanation: string | null; ticket: string | null };
+
+  test.each(IN_FLIGHT)("%s alone: no failed call, and the line says it has not finished", (outcome) => {
+    const { dir } = withCalls([{ ...OK_CALL, outcome }]);
+    for (const args of [[], ["--ticket", "CTC-1234"]]) {
+      const r = run(dir, ["workos", ...args]);
+      expect(r.status).toBe(0);
+      expect(lines(r.stdout)).toHaveLength(1);
+      expect(r.stdout).toContain("no failed call to workos");
+      expect(r.stdout).toContain(`is still ${outcome}, so it has not finished`);
+      expect(r.stdout).not.toMatch(/failed \(|was ok/);
+      expect(answerOf(dir, args)).toMatchObject({ verdict: "no-failure", outcome, reason: null, explanation: null });
+    }
+  });
+
+  test("an outcome is trimmed before it is compared, and compared case-sensitively", () => {
+    const spaced = run(withCalls([{ ...OK_CALL, outcome: "  running " }]).dir, ["workos"]);
+    expect(spaced.stdout).toContain("is still running, so it has not finished");
+    const upper = run(withCalls([{ ...OK_CALL, outcome: "RUNNING" }]).dir, ["workos"]);
+    expect(upper.stdout).toContain("failed (RUNNING)");
+  });
+
+  test("the newest match is unfinished and an older one was ok: it is not reported as the newest ok", () => {
+    const { dir } = withCalls([{ ...OK_CALL, outcome: "pending", at: OK_CALL.at + 1000 }, OK_CALL]);
+    const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
+    expect(r.stdout).toContain("the newest one that matches is still pending, so it has not finished");
+    expect(r.stdout).not.toContain("was ok");
+    expect(r.stdout).not.toContain(new Date(OK_CALL.at).toISOString());
+  });
+
+  test("an unfinished call older than an ok one does not change what the newest was", () => {
+    const { dir } = withCalls([OK_CALL, { ...OK_CALL, outcome: "pending", at: OK_CALL.at - 1000 }]);
+    const r = run(dir, ["workos"]);
+    expect(r.stdout).toContain("the newest was ok at " + new Date(OK_CALL.at).toISOString());
+    expect(r.stdout).not.toContain("pending");
+  });
+
+  test("a filter that matches only unfinished calls says they have not finished", () => {
+    const { dir } = withCalls([DENIED_CALL, { ...OK_CALL, tool_name: "workos__sync", outcome: "queued" }]);
+    const r = run(dir, ["workos", "--tool", "sync"]);
+    expect(r.stdout).toContain("no failed call to workos matching sync");
+    expect(r.stdout).toContain("the newest one that matches is still queued, so it has not finished");
+  });
+
+  test("with unreadable records too, both facts are said", () => {
+    const { dir } = withRawCalls([{ ...OK_CALL, tool_name: undefined }, { ...OK_CALL, outcome: "pending" }]);
+    const r = run(dir, ["workos"]);
+    expect(lines(r.stdout)).toHaveLength(1);
+    expect(r.stdout).toContain("the 1 readable of its newest 2 recorded calls");
+    expect(r.stdout).toContain("the newest readable one is still pending, so it has not finished");
+    expect(r.stdout).toContain("1 recorded call could not be read, so this may not be the whole picture");
+  });
+
+  test("a failed call is still the one reported beside a newer unfinished call, and the line says the newer one has not finished", () => {
+    const { dir } = withCalls([{ ...OK_CALL, outcome: "running", at: DENIED_CALL.at + 1000 }, DENIED_CALL]);
+    const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
+    expect(lines(r.stdout)).toHaveLength(1);
+    expect(r.stdout).toContain("workos__list_users on workos failed (denied)");
+    expect(r.stdout).toContain("Who can fix it: a workspace admin. A newer call is still running, so it has not finished.");
+    expect(answerOf(dir, ["--ticket", "CTC-1234"])).toMatchObject({ verdict: "failed", outcome: "denied" });
+  });
+
+  test("no newer unfinished call, no clause about one", () => {
+    const { dir } = withCalls([{ ...OK_CALL, outcome: "running", at: DENIED_CALL.at - 1000 }, DENIED_CALL]);
+    expect(run(dir, ["workos"]).stdout).not.toContain("has not finished");
+  });
+});
+
+// A reason or an explanation can be any length. The line keeps the record's own words whole and stays one line;
+// nothing is cut, so --json and the line agree.
+describe("a very long explanation", () => {
+  test("stays one line, verbatim, and is not truncated", () => {
+    const filler = "the approval for this call expired before it ran ".repeat(400).trim();
+    const explanation = `Refused: ${filler}. A workspace admin can re-approve it.`;
+    const { dir } = withCalls([{ ...DENIED_CALL, explanation }]);
+    const r = run(dir, ["workos"]);
+    expect(r.stdout).toMatch(ONE_LINE);
+    expect(r.stdout).toContain(explanation);
+    expect(r.stdout).toContain("Who can fix it: a workspace admin.");
+    const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { explanation: string };
+    expect(json.explanation).toBe(explanation);
   });
 });
 
