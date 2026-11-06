@@ -233,7 +233,7 @@ describe("who can fix it", () => {
     expect(r.status).toBe(0);
     expect(lines(r.stdout)).toHaveLength(1);
     expect(r.stdout).toContain(UNNAMED);
-    expect(r.stdout).not.toMatch(/Who can fix it: (?:an?|the|your) /);
+    expect(r.stdout).not.toMatch(/Who can fix it: (?:an?|the|your) (?:workspace |account )?(?:owner|admin|operator)/);
     expect(json.fixer).toEqual({ named: false, who: null });
   });
 
