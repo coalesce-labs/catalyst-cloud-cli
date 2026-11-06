@@ -7,6 +7,7 @@ Cloud reads are the default everywhere and need no local writer or database. Eac
 | ticket stage, owner, linked PRs | `catalyst query issue KEY-123` |
 | last phase, attempts, rounds, park, lease | `catalyst history KEY-123` |
 | why not running, what runs next | `node scripts/explain.mjs KEY-123` |
+| why a tool call failed | `node scripts/tool-call.mjs <server> --ticket KEY-123` |
 | running now | `catalyst running` |
 | queue order | `catalyst queue` |
 | PR state and checks | `catalyst query pulls --ticket KEY-123`, then `catalyst query pull <node-id>` |
