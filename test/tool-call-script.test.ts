@@ -22,27 +22,33 @@ const STATUS = {
   tools: { offered: 12, catalog: 12, missing_upstream: [] }, auth: "bearer",
   grants: { key_id: "key_01HZX", granted: 3, cataloged: 12, missing: ["workos__list_users", "workos__get_roles"] },
 };
-const OK_CALL = {
+// One recorded call, as the portal's calls route returns it (the fields the verb prints verbatim).
+interface Call {
+  call_id: string; key_id: string; user_id: string | null; tool_name: string; outcome: string;
+  denied_reason: string | null; approval_state: string; latency_ms: number; bytes_in: number;
+  bytes_out: number; at: number; explanation: string | null;
+  dispatch: { ticket: string; phase: string; generation: number } | null;
+}
+const OK_CALL: Call = {
   call_id: "call_01HZW", key_id: "key_01HZX", user_id: null, tool_name: "workos__get_user",
   outcome: "ok", denied_reason: null, approval_state: "not-required", latency_ms: 212,
   bytes_in: 1301, bytes_out: 2048, at: 1792230063000,
   dispatch: { ticket: "CTC-1234", phase: "implement", generation: 3 }, explanation: null,
 };
 const EXPIRED = "Refused: the approval for this call expired before it ran. A workspace admin can re-approve it on the account's Connections page.";
-const DENIED_CALL = {
+const DENIED_CALL: Call = {
   ...OK_CALL, call_id: "call_01HZX", tool_name: "workos__list_users", outcome: "denied",
   denied_reason: "approval-expired", approval_state: "missing-or-invalid", latency_ms: 14,
   bytes_in: 0, bytes_out: 0, at: 1792229575000,
   explanation: EXPIRED,
 };
 const PROVIDER_EXPLANATION = "The server failed or refused the call. Retry, or read the server's status.";
-const PROVIDER_CALL = {
+const PROVIDER_CALL: Call = {
   ...OK_CALL, call_id: "call_01HZY", tool_name: "workos__get_roles", outcome: "provider_error",
   latency_ms: 1803, at: 1792229412000, dispatch: null,
   explanation: PROVIDER_EXPLANATION,
 };
 
-type Call = typeof OK_CALL | typeof DENIED_CALL | typeof PROVIDER_CALL;
 const body = (calls: Call[]) => ({ status: STATUS, calls: { server: "workos", calls } });
 
 // What the real verb prints for the two refusals the script must not pass through verbatim.
