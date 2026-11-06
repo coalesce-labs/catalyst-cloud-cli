@@ -365,6 +365,10 @@ describe("downloadImage with the real docker adapter (CTC-6157)", () => {
     ["a CRLF in the password", PASSWORD, "\r\n"],
     ["an ANSI colour sequence in the auth value", EXPECTED_AUTH, "\x1b[31m"],
     ["a line feed in the auth value", EXPECTED_AUTH, "\n"],
+    ["an OSC ended by BEL in the password", PASSWORD, "\x1b]0;title\x07"],
+    ["an OSC ended by ST in the auth value", EXPECTED_AUTH, "\x1b]0;title\x1b\\"],
+    ["a charset designation in the password", PASSWORD, "\x1b(B"],
+    ["an 8-bit CSI in the auth value", EXPECTED_AUTH, "\x9b31m"],
   ] as const)(
     "Docker breaks the credential up with %s → the refusal holds none of it",
     async (_name, secret, gap) => {
@@ -382,6 +386,16 @@ describe("downloadImage with the real docker adapter (CTC-6157)", () => {
       );
     },
   );
+
+  test("CTC-6157: an unterminated OSC inside the password → the refusal holds no readable piece of it", async () => {
+    const docker = scriptedDocker(`progress line\n${LEAD}${broken(PASSWORD, "\x1b]0;title")} rejected`);
+    await signIn();
+    server.pullCredential = { status: 200, body: issuedBody() };
+    const refusal = refusalOf(await download(docker));
+    expect(refusal.code).toBe("image_download_refused");
+    expectNoSecretFragment(refusal.message);
+    expectNoSecretFragment(JSON.stringify(refusal));
+  });
 });
 
 describe("registryOf / credentialCovers", () => {

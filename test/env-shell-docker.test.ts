@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { exitCodeOf, lastLine, spawnEnvShellDocker } from "../src/env/shell-docker";
+import { exitCodeOf, lastLine, redactSecrets, spawnEnvShellDocker } from "../src/env/shell-docker";
 
 // The real spawn wrapper, driven against a scripted `docker` placed first on PATH. The fake records
 // every call (argv, the Docker selectors it saw, and for a pull the throwaway config file and its
@@ -451,13 +451,89 @@ describe("exitCodeOf and lastLine", () => {
 
   test("lastLine CTC-6157: a secret is matched as written, so regex metacharacters in it are not special", () => {
     const secret = "a.b*c+(d)[e]{1}|f^$\\g";
-    expect(lastLine(`x ${broken(secret, "\x1b[31m")} y aXb*c+(d)[e]{1}|f^$\\g`, [secret])).toBe(
-      "x [redacted] y aXb*c+(d)[e]{1}|f^$\\g",
+    expect(lastLine(`x ${broken(secret, "\x1b[31m")} y aXb*c+(d)`, [secret])).toBe(
+      "x [redacted] y aXb*c+(d)",
     );
   });
 
   test("lastLine CTC-6157: text that mimics the credential over and over is handled in linear time", () => {
     const hostile = "ctcpull_\x1b[".repeat(100_000);
+    const started = performance.now();
+    const shown = lastLine(hostile, [PASSWORD, EXPECTED_AUTH]);
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(shown.length).toBeLessThanOrEqual(400);
+  });
+});
+
+// CTC-6157 (review): every complete ECMA-48 escape or control sequence, 7-bit and 8-bit.
+const SEQUENCES = [
+  ["an OSC ended by BEL", "\x1b]0;title\x07"],
+  ["an OSC ended by ST", "\x1b]0;title\x1b\\"],
+  ["a DCS ended by ST", "\x1bPq#0;2;0;0;0\x1b\\"],
+  ["a SOS ended by BEL", "\x1bXnote\x07"],
+  ["a PM ended by ST", "\x1b^note\x1b\\"],
+  ["an APC ended by BEL", "\x1b_note\x07"],
+  ["an 8-bit OSC ended by 0x9C", "\x9d0;title\x9c"],
+  ["an 8-bit DCS ended by BEL", "\x90qdata\x07"],
+  ["an 8-bit SOS ended by 0x9C", "\x98note\x9c"],
+  ["an 8-bit PM ended by 0x9C", "\x9enote\x9c"],
+  ["an 8-bit APC ended by 0x9C", "\x9fnote\x9c"],
+  ["a 7-bit OSC ended by 0x9C", "\x1b]0;title\x9c"],
+  ["a charset designation (ESC ( B)", "\x1b(B"],
+  ["a save-cursor escape (ESC 7)", "\x1b7"],
+  ["a two-intermediate escape (ESC SP F)", "\x1b F"],
+  ["an 8-bit CSI", "\x9b31m"],
+  ["an 8-bit CSI with parameters", "\x9b38;5;196m"],
+] as const;
+
+const SEQUENCE_CASES = SEQUENCES.flatMap(([name, gap]) => [
+  [`${name} in the password`, PASSWORD, gap] as const,
+  [`${name} in the auth value`, EXPECTED_AUTH, gap] as const,
+]);
+
+describe("lastLine CTC-6157: complete escape and control sequences", () => {
+  test.each(SEQUENCE_CASES)("%s → the whole credential is redacted", (_name, secret, gap) => {
+    const shown = lastLine(`progress\n${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH]);
+    expectNoSecretFragment(shown);
+    expect(shown).toBe(`${LEAD}[redacted] rejected`);
+  });
+
+  test.each(SEQUENCE_CASES)("%s straddling the 400-character cut → no fragment of it", (_name, secret, gap) => {
+    const line = LEAD + "a".repeat(395 - LEAD.length) + broken(secret, gap) + " rejected";
+    const shown = lastLine(line, [PASSWORD, EXPECTED_AUTH]);
+    expectNoSecretFragment(shown);
+    expect(shown).toBe(LEAD + "a".repeat(395 - LEAD.length) + "[reda");
+  });
+
+  test.each(SEQUENCE_CASES)("%s → redactSecrets (the second layer) redacts it too", (_name, secret, gap) => {
+    const shown = redactSecrets(`${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH]);
+    expect(shown).toBe(`${LEAD}[redacted] rejected`);
+  });
+
+  test("an OSC with no terminator inside the password leaves no readable piece of it", () => {
+    for (const secret of [PASSWORD, EXPECTED_AUTH]) {
+      for (const gap of ["\x1b]0;title", "\x9d0;title", "\x1bPdata"]) {
+        const shown = lastLine(`${LEAD}${broken(secret, gap)} rejected`, [PASSWORD, EXPECTED_AUTH]);
+        expectNoSecretFragment(shown);
+        expect(shown.startsWith(LEAD)).toBe(true);
+      }
+    }
+  });
+
+  test("an unterminated OSC inside the password straddling the cut leaves no fragment", () => {
+    const line = LEAD + "a".repeat(390 - LEAD.length) + broken(PASSWORD, "\x1b]0;title") + " rejected";
+    expectNoSecretFragment(lastLine(line, [PASSWORD, EXPECTED_AUTH]));
+  });
+
+  test("text with no secret in it, even with sequences, comes out as before", () => {
+    expect(lastLine("denied \x1b]0;title\x07 \x1b(B \x9b31m end", [PASSWORD, EXPECTED_AUTH])).toBe(
+      "denied ]0;title (B 31m end",
+    );
+    expect(redactSecrets("plain ctcpull_ only", [PASSWORD])).toBe("plain ctcpull_ only");
+  });
+
+  test("hostile unterminated control strings are handled in linear time", () => {
+    const hostile = "ctcpull_\x1b]".repeat(100_000);
     const started = performance.now();
     const shown = lastLine(hostile, [PASSWORD, EXPECTED_AUTH]);
     expect(performance.now() - started).toBeLessThan(5_000);
