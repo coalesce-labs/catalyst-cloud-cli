@@ -3,6 +3,7 @@
 // Pure: nothing here spawns, reads a file or sees a variable's value. Values reach the container only as
 // bare `-e NAME` words, which Docker fills from the client process's environment.
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import type { ShellToolchain } from "./shell-declaration.js";
 
 /** The start script's exit code when `mise install` could not prepare a declared toolchain. */
@@ -11,6 +12,12 @@ export const START_EXIT_TOOLCHAIN = 97;
 export const ENV_SHELL_USER = "10001:10001";
 export const ENV_SHELL_WORKSPACE = "/workspace";
 const HOME = "/home/catalyst";
+/** Image directories a mount must not cover (a destination equal to one, or above it). */
+const CONTAINER_SYSTEM_DIRS = [
+  "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var",
+];
+/** Trees a mount must not sit inside: the mounts this module makes, and the ones the kernel owns. */
+const NO_MOUNTS_INSIDE = [ENV_SHELL_WORKSPACE, HOME, "/proc", "/sys", "/dev"];
 
 /** Runs as `sh -c <this> catalyst-env-shell <shell|check> <name@version>...` inside the image.
  *  Prototyped and run against mise 2026.8.14 in a Catalyst image in the plan phase (see the plan). */
@@ -54,7 +61,8 @@ export interface ShellRunInput {
   image: string;
   /** The repository's real path, mounted at /workspace. */
   root: string;
-  /** A worktree's shared git directory outside `root`, mounted at the same path; null otherwise. */
+  /** A worktree's shared git directory outside `root`, mounted at the same path, and also where a relative
+   *  `gitdir:` pointer in /workspace/.git resolves; null otherwise. */
   gitCommonDir: string | null;
   toolchains: readonly ShellToolchain[];
   /** Declared variables that have a value: passed by name only. */
@@ -63,6 +71,29 @@ export interface ShellRunInput {
   tty: boolean;
   /** Every declared variable the check reports on (check mode only). */
   checkNames: readonly string[];
+}
+
+/** `outer` is `inner` or a directory above it. Both are normalized absolute POSIX paths. */
+const covers = (outer: string, inner: string) => outer === inner || inner.startsWith(outer === "/" ? "/" : `${outer}/`);
+
+/** Where a relative `gitdir:` pointer in /workspace/.git finds the common dir: git resolves it against
+ *  /workspace, not the host path (CTC-6156). Null when that place cannot take a mount: not a POSIX path,
+ *  already the host-path mount, covering / or an image directory, or inside a tree we or the kernel own. */
+function relativeCommonDirTarget(root: string, gitCommonDir: string): string | null {
+  if (!posix.isAbsolute(root) || !posix.isAbsolute(gitCommonDir)) return null;
+  const target = posix.resolve(ENV_SHELL_WORKSPACE, posix.relative(root, gitCommonDir));
+  if (target === gitCommonDir) return null;
+  if ([ENV_SHELL_WORKSPACE, HOME, ...CONTAINER_SYSTEM_DIRS].some((dir) => covers(target, dir))) return null;
+  if (NO_MOUNTS_INSIDE.some((dir) => covers(dir, target))) return null;
+  return target;
+}
+
+/** The common dir's bind mounts: its own host path (absolute `gitdir:` pointers), then the place a relative one lands. */
+function gitCommonDirMounts(root: string, gitCommonDir: string): string[] {
+  const targets = [gitCommonDir];
+  const relativeTarget = relativeCommonDirTarget(root, gitCommonDir);
+  if (relativeTarget !== null) targets.push(relativeTarget);
+  return targets.flatMap((dst) => ["--mount", `type=bind,src=${gitCommonDir},dst=${dst}`]);
 }
 
 /** THE argv builder: `--check` and the shell differ only by mode, -i/-t and CATALYST_ENV_NAMES. */
@@ -79,7 +110,7 @@ export function shellRunArgs(input: ShellRunInput): string[] {
     ENV_SHELL_USER,
     "--mount",
     `type=bind,src=${input.root},dst=${ENV_SHELL_WORKSPACE}`,
-    ...(input.gitCommonDir ? ["--mount", `type=bind,src=${input.gitCommonDir},dst=${input.gitCommonDir}`] : []),
+    ...(input.gitCommonDir ? gitCommonDirMounts(input.root, input.gitCommonDir) : []),
     "--mount",
     `type=volume,src=${homeVolumeFor(input.image, input.root)},dst=${HOME}`,
     "-w",
