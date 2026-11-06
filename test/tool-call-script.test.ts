@@ -960,7 +960,7 @@ describe("a refusal never relays a word the CLI wrote", () => {
   });
 
   test("a CLI that exits 2 saying the machine is not connected: the desk's exit 2 with one fixed sentence that says how to connect", () => {
-    const { dir } = setup({ code: 2, stderr: `not connected: ${DIRTY}\nrun the join command`, stdout: DIRTY });
+    const { dir } = setup({ code: 2, stderr: `catalyst: not connected yet — run: ${DIRTY}\nrun the join command`, stdout: DIRTY });
     const r = run(dir, ["workos"]);
     expect(r.status).toBe(2);
     expect(r.stdout).toBe("");

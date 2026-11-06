@@ -15,9 +15,11 @@ const LIMIT = 50; // the verb reads the newest 50 calls, no further back
 const SERVER_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 // Nothing the CLI wrote reaches a refusal: its words can hold a banned word, a route, an address or an instruction the
 // skill must not give. Each refusal is a fixed sentence that names the validated server and the CLI's exit code only.
-// The CLI's own not-connected lines (src/config.ts, src/oauth.ts) start the line. `mcp status` also exits 2 for portal refusals
-// that carry the cloud's words ("... (portal not configured)"), which never start a line that way.
-const CLI_NOT_CONNECTED = /^(not connected|this machine is not connected)\b/im;
+// The CLI's own not-connected lines (src/config.ts, src/oauth.ts) are the first thing it prints, as `catalyst: <message>`
+// (src/cli.ts). `mcp status` also exits 2 for portal refusals that carry the cloud's words. The prefix is required and the
+// match is anchored to the start of stderr, with no multiline flag: a portal sentence starts `catalyst: mcp status` or
+// `catalyst: GET`, and a line break inside a portal reason is never at the start.
+const CLI_NOT_CONNECTED = /^catalyst: (?:not connected yet|this machine is not connected) — run: /;
 const NOT_CONNECTED = `not connected (this machine is not joined to a workspace) — run: ${CONNECT_COMMAND}`;
 
 // Who can fix a failure is not decided here. The explanation is free prose, and no rule over it is sound: negations,
