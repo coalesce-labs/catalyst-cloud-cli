@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.48
+
+`catalyst mcp add`, `list` and `remove` work again. They had stopped with an error saying the contract could not be read, because the contract lists a route with an HTTP method this CLI's SDK did not know. Update the CLI; nothing else changes.
+
 ## 0.16.47
 
 `catalyst env shell` now gives each checkout of each repository its own home volume, so repositories on the same image no longer share `/home/catalyst`. Your first shell in each checkout starts with a fresh home, so toolchains download again and shell history starts over. A moved checkout also gets a fresh home, and a directory with no `.git`, or a checkout on a filesystem that reports no creation time, gets a home that is removed when the shell exits.
