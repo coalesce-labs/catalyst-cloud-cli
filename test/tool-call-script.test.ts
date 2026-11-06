@@ -170,7 +170,7 @@ describe("--json", () => {
       reason: "approval-expired",
       explanation: EXPIRED,
       at: new Date(DENIED_CALL.at).toISOString(),
-      fixer: { named: true, who: "a workspace admin", roles: ["a workspace admin"], basis: "mentioned in the explanation" },
+      fixer: { mentioned: ["a workspace admin"], basis: "mentioned in the explanation" },
       window: { read: 3, limit: 50, unreadable: 0 },
       verdict: "failed",
     });
@@ -182,9 +182,9 @@ describe("--json", () => {
 // explanation mentions, that it mentions none, or that there is no explanation.
 describe("who can fix it: the line says what the explanation mentions and decides nothing", () => {
   const MENTIONS = (roles: string) => `Who can fix it: see the explanation above, which mentions ${roles}; read it as written.`;
-  const UNNAMED = "Who can fix it: the explanation does not name one.";
+  const UNNAMED = "Who can fix it: this script found no workspace owner, admin or operator in the explanation above; read it as written.";
   const NO_ONE_LINE = "Who can fix it: the record names no one; a workspace owner or admin manages this workspace's MCP servers.";
-  interface Fixer { named: boolean; who: string | null; roles: string[]; basis: string | null }
+  interface Fixer { mentioned: string[]; basis: string | null }
   const fixerOf = (dir: string) => (JSON.parse(run(dir, ["workos", "--json"]).stdout) as { fixer: Fixer }).fixer;
   const say = (explanation: string) => {
     const { dir } = withCalls([{ ...DENIED_CALL, explanation }]);
@@ -197,10 +197,10 @@ describe("who can fix it: the line says what the explanation mentions and decide
     expect(lines(r.stdout)).toHaveLength(1);
     expect(r.stdout).toContain(EXPIRED);
     expect(r.stdout).toContain(MENTIONS("a workspace admin"));
-    expect(fixerOf(dir)).toEqual({ named: true, who: "a workspace admin", roles: ["a workspace admin"], basis: "mentioned in the explanation" });
+    expect(fixerOf(dir)).toEqual({ mentioned: ["a workspace admin"], basis: "mentioned in the explanation" });
   });
 
-  test("form 2, an explanation that mentions no listed role: the line says it does not name one, with no pointer of its own", () => {
+  test("form 2, an explanation that mentions no listed role: the line says what this script found, with no pointer of its own", () => {
     const { dir } = withCalls([PROVIDER_CALL]);
     const r = run(dir, ["workos"]);
     expect(r.status).toBe(0);
@@ -209,7 +209,7 @@ describe("who can fix it: the line says what the explanation mentions and decide
     expect(r.stdout).toContain(UNNAMED);
     expect(r.stdout).not.toContain("manages this workspace");
     expect(r.stdout).not.toContain("the record names no one");
-    expect(fixerOf(dir)).toEqual({ named: false, who: null, roles: [], basis: "explanation names none" });
+    expect(fixerOf(dir)).toEqual({ mentioned: [], basis: "explanation names none" });
   });
 
   test("form 3, no explanation at all (null, absent, blank or not a string): the labelled fallback", () => {
@@ -218,12 +218,12 @@ describe("who can fix it: the line says what the explanation mentions and decide
       const r = run(dir, ["workos"]);
       expect(r.status).toBe(0);
       expect(r.stdout).toContain(NO_ONE_LINE);
-      expect(fixerOf(dir)).toEqual({ named: false, who: null, roles: [], basis: "no explanation" });
+      expect(fixerOf(dir)).toEqual({ mentioned: [], basis: "no explanation" });
     }
   });
 
   // Every adversarial sentence the five rounds produced. None may make the line say a role can fix it: the line says
-  // "mentions" or "does not name one", always on one line, with the explanation in it as written.
+  // "mentions" or "found no ... in the explanation", always on one line, with the explanation in it as written.
   const ADVERSARIAL = [
     "A workspace admin cannot fix this; only the provider can restore the service.",
     "A workspace admin can retry the call, but the upstream server is still down. The provider must restore it.",
@@ -263,10 +263,12 @@ describe("who can fix it: the line says what the explanation mentions and decide
     expect(r.stdout).toContain(explanation);
     for (const claim of ["Who can fix it: a workspace admin", "Who can fix it: an admin", "Who can fix it: an owner", "Who can fix it: an operator", "Who can fix it: your", "Who can fix it: the workspace"])
       expect(r.stdout).not.toContain(claim);
-    expect(r.stdout).toMatch(/Who can fix it: (?:see the explanation above, which mentions [^;]+; read it as written|the explanation does not name one)\./);
-    expect(fixer.basis).toMatch(/^(?:mentioned in the explanation|explanation names none)$/);
-    expect(fixer.named).toBe(fixer.roles.length > 0);
-    expect(fixer.who).toBe(fixer.roles[0] ?? null);
+    expect(r.stdout).toMatch(
+      /Who can fix it: (?:see the explanation above, which mentions [^;]+; read it as written|this script found no workspace owner, admin or operator in the explanation above; read it as written)\./,
+    );
+    expect(fixer.basis).toBe(fixer.mentioned.length > 0 ? "mentioned in the explanation" : "explanation names none");
+    // Nothing in the object a reader could take for "this role can fix it".
+    expect(Object.keys(fixer).sort()).toEqual(["basis", "mentioned"]);
   });
 
   // The roles listed are the roles the explanation mentions, each once, in order of first mention, as written.
@@ -282,7 +284,27 @@ describe("who can fix it: the line says what the explanation mentions and decide
     const { r, fixer } = say(explanation);
     expect(lines(r.stdout)).toHaveLength(1);
     expect(r.stdout).toContain(`Who can fix it: see the explanation above, which mentions ${phrase}; read it as written.`);
-    expect(fixer).toEqual({ named: true, who: roles[0], roles, basis: "mentioned in the explanation" });
+    expect(fixer).toEqual({ mentioned: roles, basis: "mentioned in the explanation" });
+  });
+
+  // --json carries what the explanation mentions and nothing a reader could take for "this role can fix it": no `who`,
+  // no `named`, only `mentioned` and `basis`, even when the first role mentioned is the one the explanation rules out.
+  test("--json: a role that can only retry is listed as mentioned, and no field says who can fix it", () => {
+    const explanation = "A workspace admin can retry the call, but the upstream server is still down. The provider must restore it.";
+    const { dir } = withCalls([{ ...DENIED_CALL, explanation }]);
+    const out = run(dir, ["workos", "--json"]).stdout;
+    const { fixer } = JSON.parse(out) as { fixer: Fixer };
+    expect(fixer).toEqual({ mentioned: ["a workspace admin"], basis: "mentioned in the explanation" });
+    expect(out).not.toMatch(/"(?:who|named|roles)"/);
+  });
+
+  test("--json: the mentioned roles are in order of first mention, and basis is null when the call did not fail", () => {
+    const { dir } = withCalls([{ ...DENIED_CALL, explanation: "An operator can look first; then a workspace owner or admin decides." }]);
+    expect(fixerOf(dir)).toEqual({ mentioned: ["an operator", "a workspace owner or admin"], basis: "mentioned in the explanation" });
+    for (const calls of [[OK_CALL], []]) {
+      const { dir: other } = withCalls(calls);
+      expect(fixerOf(other)).toEqual({ mentioned: [], basis: null });
+    }
   });
 });
 
@@ -487,7 +509,7 @@ describe("a recorded call with a field of the wrong type", () => {
     ["an object with a non-callable toString", { toString: 5 }],
     ["a nested object", { a: { b: 1 } }],
   ];
-  interface Out { server: string; ticket: string | null; phase: string | null; tool: string | null; outcome: string | null; reason: string | null; explanation: string | null; at: string | null; fixer: { named: boolean; who: string | null; roles: string[]; basis: string | null }; window: { read: number; limit: number; unreadable: number }; verdict: string }
+  interface Out { server: string; ticket: string | null; phase: string | null; tool: string | null; outcome: string | null; reason: string | null; explanation: string | null; at: string | null; fixer: { mentioned: string[]; basis: string | null }; window: { read: number; limit: number; unreadable: number }; verdict: string }
   const json = (dir: string, args: string[] = []) => JSON.parse(run(dir, ["workos", ...args, "--json"]).stdout) as Out;
   // Nothing but a clean exit and one line of text: no crash, no stack trace, no value printed raw.
   const clean = (r: ReturnType<typeof run>, why: string) => {
@@ -540,7 +562,7 @@ describe("a recorded call with a field of the wrong type", () => {
   // The other fields are read by type: a value of the wrong type is absent, and the call is still reported.
   const OPTIONAL: [string, (bad: unknown) => unknown, Partial<Out>][] = [
     ["denied_reason", (bad) => ({ ...DENIED_CALL, denied_reason: bad }), { reason: "denied" }],
-    ["explanation", (bad) => ({ ...DENIED_CALL, explanation: bad }), { explanation: null, fixer: { named: false, who: null, roles: [], basis: "no explanation" } }],
+    ["explanation", (bad) => ({ ...DENIED_CALL, explanation: bad }), { explanation: null, fixer: { mentioned: [], basis: "no explanation" } }],
     ["dispatch", (bad) => ({ ...DENIED_CALL, dispatch: bad }), { ticket: null, phase: null }],
     ["dispatch.ticket", (bad) => ({ ...DENIED_CALL, dispatch: { ticket: bad, phase: "implement", generation: 3 } }), { ticket: null }],
     ["dispatch.phase", (bad) => ({ ...DENIED_CALL, dispatch: { ticket: "CTC-1234", phase: bad, generation: 3 } }), { phase: null }],
@@ -548,7 +570,7 @@ describe("a recorded call with a field of the wrong type", () => {
   ];
   const EXPECTED: Out = {
     server: "workos", ticket: "CTC-1234", phase: "implement", tool: "workos__list_users", outcome: "denied", reason: "approval-expired",
-    explanation: EXPIRED, at: new Date(DENIED_CALL.at).toISOString(), fixer: { named: true, who: "a workspace admin", roles: ["a workspace admin"], basis: "mentioned in the explanation" },
+    explanation: EXPIRED, at: new Date(DENIED_CALL.at).toISOString(), fixer: { mentioned: ["a workspace admin"], basis: "mentioned in the explanation" },
     window: { read: 1, limit: 50, unreadable: 0 }, verdict: "failed",
   };
   test.each(
@@ -873,6 +895,72 @@ describe("a read that fails", () => {
     const r = run(dir, ["workos"]);
     expect(r.status).toBe(2);
     expect(calls()).toEqual([]);
+  });
+});
+
+// What the CLI said is not the script's to pass on if it names a route: a token that starts with "/" or with http:// or
+// https:// becomes "the portal", and the rest of the message is kept.
+describe("text the CLI wrote never puts a route or an address into a refusal", () => {
+  const ROUTE = "GET /api/v1/mcp/servers/workos/calls";
+  const URL_ = "https://portal.example/api/v1/x";
+  const CLI_SAYS = `${ROUTE} was refused with 403: see ${URL_} for the key`;
+  const MASKED = "GET the portal was refused with 403: see the portal for the key";
+  const clean = (r: ReturnType<typeof run>, status: number) => {
+    expect(r.status).toBe(status);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toMatch(ONE_LINE);
+    for (const leak of ["/api/", "portal.example", "https://", "http://", "/v1", "mcp/servers"]) expect(r.stderr, leak).not.toContain(leak);
+  };
+
+  test.each([1, 2])("a CLI that exits %i with a route and an address in its first line: both masked, the rest kept", (code) => {
+    const { dir } = setup({ code, stderr: CLI_SAYS });
+    const r = run(dir, ["workos"]);
+    clean(r, 1);
+    expect(r.stderr).toBe(`could not read MCP server workos: ${MASKED}\n`);
+  });
+
+  test("a route in the middle of a word group, in quotes and in brackets, is masked whole", () => {
+    const { dir } = setup({ code: 1, stderr: `refused (/api/v1/x) and "/api/v1/y" and http://portal.example/z.` });
+    const r = run(dir, ["workos"]);
+    clean(r, 1);
+    expect(r.stderr).toBe("could not read MCP server workos: refused the portal and the portal and the portal\n");
+  });
+
+  test("a CLI error on several lines: the first line is relayed, masked, and later lines are not", () => {
+    const { dir } = setup({ code: 1, stderr: `\n${CLI_SAYS}\nsecond line GET /api/v1/second` });
+    const r = run(dir, ["workos"]);
+    clean(r, 1);
+    expect(r.stderr).toBe(`could not read MCP server workos: ${MASKED}\n`);
+  });
+
+  test("a CLI that exits 2 saying the machine is not joined: the desk's exit 2, still one masked line", () => {
+    const { dir } = setup({ code: 2, stderr: `not joined to a workspace — ${CLI_SAYS}\nrun the join command` });
+    const r = run(dir, ["workos"]);
+    clean(r, 2);
+    expect(r.stderr).toBe(`not joined to a workspace — ${MASKED} run the join command\n`);
+  });
+
+  test("a status body that is not JSON and names a route: the excerpt is masked and the line is still one", () => {
+    const { dir } = setup({ stdout: `Cannot ${ROUTE}\n<a href="${URL_}">x</a>` });
+    const r = run(dir, ["workos"]);
+    clean(r, 1);
+    expect(r.stderr).toBe('could not parse the MCP status as JSON: Cannot GET the portal\n');
+  });
+
+  test("a body longer than the excerpt that has a route at the cut is masked, not cut through", () => {
+    const { dir } = setup({ stdout: `${"x ".repeat(98)}/api/v1/mcp/servers/workos/calls` });
+    const r = run(dir, ["workos"]);
+    clean(r, 1);
+    expect(r.stderr).toBe(`could not parse the MCP status as JSON: ${"x ".repeat(98)}the portal\n`);
+  });
+
+  test("CLI exit 3: the fixed sentence has no route and none of the CLI's words", () => {
+    const { dir } = setup({ code: 3, stderr: `${CLI_SAYS}` });
+    const r = run(dir, ["workos"]);
+    clean(r, 1);
+    expect(r.stderr).not.toContain("403");
+    expect(r.stderr).not.toMatch(/\/\S/);
+    expect(r.stderr).toContain("catalyst mcp list");
   });
 });
 
