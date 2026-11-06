@@ -78,7 +78,7 @@ interface Ports {
    * Absent means unverified, so a fixture that omits it fails closed. */
   readonly verifyDockerSignature?: (input: { path: string; deadlineMs: number; signal?: AbortSignal }) => Promise<string | undefined>;
 }
-/** Docker Inc's Apple developer team id. TO BE CONFIRMED on a host with `codesign -dv` on the Docker CLI before push. */
+/** Docker Inc's Apple developer team id, read from Docker Desktop's bundled CLI on 2026-11-06 (Developer ID Application: Docker Inc). */
 export const DOCKER_TEAM_IDENTIFIER = "9BNSXJN65R";
 const LABEL = "dev.catalystcloud.runner.darwin-thoughts-custody";
 const vendor = resolve(dirname(fileURLToPath(import.meta.url)), "../vendor/self-host/darwin-thoughts-custody");
