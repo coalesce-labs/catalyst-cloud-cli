@@ -1,6 +1,6 @@
 interface:
   display_name: "What's happening"
-  short_description: "Where your Catalyst work stands and how Catalyst decides: in flight, blocked and on whom, closed, what runs next, and why"
+  short_description: "Where your Catalyst work stands and how Catalyst decides: in flight, blocked and on whom, closed, what runs next, why, and why a tool call failed"
   default_prompt: "Use $whats-happening to tell me where my work stands and why anything is stuck."
 policy:
   allow_implicit_invocation: true

@@ -18,6 +18,7 @@ Run `catalyst explain <ticket>` and look the reason up in the `whats-happening` 
 - **The person, with their own login, acts:** do it when the move is yours (re-dispatch, a comment that clears a no-change or validate-budget hold, a question routed to `what-needs-me`), and file an ask when it is theirs.
 - **A park or hold a release clears:** once its cause is fixed, the `unstick` skill releases it (`catalyst release <ticket> --because <what changed>`). A round-threshold hold and a review that will not converge refuse that release; the table says what clears each.
 - **An owner or admin, in settings, or an operator:** when the person holds that seat and a command can make the change, offer to run it; otherwise one ask per repository or setting.
+- **A tool call failed:** when the explainer or the outcome card says an MCP tool call failed, run `catalyst mcp status <server> --json` and put one summary line from it, as the `whats-happening` skill's `references/why-a-tool-call-failed.md` shapes it (ticket, tool, reason, who can fix it). Route the fix to that actor, and file an ask only when it is the person's to make.
 - **Finished:** close the loop in the summary.
 
 Quote a reason the table does not know as the explainer spelled it.
