@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.16.46
+
+`catalyst runner update` on a Mac keeps working after Docker Desktop updates its `docker` command. Private thoughts storage records which `docker` command it trusts, and until now a changed one stopped every update until the machine was set up again with `catalyst onboard --runner`. The update now checks the new command's code signature. When Docker signed it (team ID `9BNSXJN65R`), the update records the new command and goes on, and its log names the old and new SHA-256 and the signer. A command with any other signature, or none, is still refused.
+
+`catalyst runner update` now adds the log setting to a self-hosted machine whose `compose.yaml` was written before October 7, 2026, which 0.16.44 missed. A value you set in the runner's `.env` still wins.
 
 `catalyst lease take` can now say who holds a lease. `--holder-kind` names the kind of agent (catalyst-seat, claude-code, codex, factory, devin, cursor or other), `--name` a display name, `--external-id` the session's id, `--link` a session link on a host that kind allows, and `--contact` a link on linear.app, github.com or app.slack.com. `CATALYST_LEASE_HOLDER_KIND`, `CATALYST_LEASE_LINK` and `CATALYST_LEASE_EXTERNAL_ID` stand in for their flags. `catalyst lease renew` takes `--name`, `--external-id`, `--link` and `--contact` beside its progress. Every member of the workspace can read these details, so the CLI refuses a value that looks like a credential before it sends anything, naming the flag and never the value. It also refuses a link on a host the kind does not allow, and holder details on a Catalyst Cloud too old to record them (it needs contract 2.65.0). A take or renew with none of these flags sends what it sent before.
 
