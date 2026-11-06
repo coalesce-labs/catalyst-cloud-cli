@@ -11,6 +11,7 @@ import {
   START_EXIT_TOOLCHAIN,
   toolchainSpecs,
 } from "../src/env/shell-plan";
+import { identityFromStat } from "../src/env/shell";
 
 const IMAGE =
   "ghcr.io/coalesce-labs/catalyst-runner@sha256:a19f7b0859a9814740935f7aadd8fe5c5c9c5974f9a5956a057b983ada16ea01";
@@ -51,6 +52,14 @@ test("the same path with a different directory identity gets a different home vo
   expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000001")).not.toBe(first);
   expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000000")).toBe(first);
   expect(homeVolumeFor(IMAGE, "/Users/ana/src/api", "4242:1700000000000000000")).not.toBe(first);
+});
+
+test("the checkout identity ignores the change time, so adding entries at the root keeps the volume (CTC-6155)", () => {
+  const fresh = identityFromStat({ ino: 5n, birthtimeNs: 100n });
+  expect(fresh).toBe("5:100");
+  expect(identityFromStat({ ino: 5n, birthtimeNs: 100n })).toBe(fresh);
+  expect(identityFromStat({ ino: 5n, birthtimeNs: 101n })).not.toBe(fresh);
+  expect(identityFromStat({ ino: 5n, birthtimeNs: 0n })).toBe("5");
 });
 
 test("the home volume name is a valid Docker volume name of fixed length for any root", () => {

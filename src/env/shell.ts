@@ -26,14 +26,26 @@ export interface EnvShellDeps {
   gitCommonDir?: (root: string) => Promise<string | null>;
 }
 
-/** The directory's inode and birth time, read-only and with no git call, so it neither dirties the work tree nor
+/** What a directory's name in the home volume key is built from: its inode and birth time. A birth time
+ *  never changes while the directory exists, so the name stays put when entries at the root are added,
+ *  removed or changed, including a freshly created root whose birth time still equals its change time. */
+export function identityFromStat(stat: { ino: bigint; birthtimeNs: bigint }): string {
+  return stat.birthtimeNs > 0n ? `${stat.ino}:${stat.birthtimeNs}` : `${stat.ino}`;
+}
+
+/** The checkout directory's identity, read-only and with no git call, so it neither dirties the work tree nor
  *  follows anything in the checkout (`root` is already a real path). A repository deleted and a different one
- *  cloned to the same path gets a new birth time, hence a new home volume (CTC-6155). On a filesystem with no
- *  birth time, Node reports the change time instead, which moves whenever an entry is added; that case (equal
- *  to ctime) falls back to the inode alone so the name stays stable. */
+ *  cloned to the same path gets a new birth time, hence a new home volume (CTC-6155). Residuals, not closed
+ *  here: (1) on a filesystem that reports no birth time (zero; some network, FUSE and older Linux filesystems)
+ *  only the inode is used, so a directory re-created at the same path with a reused inode shares the old
+ *  volume. An attacker would need the person to delete a repository and clone another to that very path on
+ *  such a filesystem, and the inode to be reused. It is not closed because any other identity is either
+ *  writable from the container or the checkout (a marker file, git state, the origin URL) or needs a host
+ *  registry with a deletion signal, which is a product decision. (2) Where Node has no statx and synthesizes the
+ *  birth time from the change time, the name changes when entries at the root change: that checkout gets a
+ *  fresh volume (toolchains download again) and never shares one. */
 export function checkoutIdentity(root: string): string {
-  const { ino, birthtimeNs, ctimeNs } = statSync(root, { bigint: true });
-  return birthtimeNs > 0n && birthtimeNs !== ctimeNs ? `${ino}:${birthtimeNs}` : `${ino}`;
+  return identityFromStat(statSync(root, { bigint: true }));
 }
 
 const DECLARATION = ".catalyst/catalyst.toml";

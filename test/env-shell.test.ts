@@ -7,7 +7,7 @@ import { dirname, join, posix } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { main } from "../src/cli";
 import type { DockerConfigJson, EnvShellDocker, EnvShellServer } from "../src/env/shell-docker";
-import type { EnvShellDeps } from "../src/env/shell";
+import { checkoutIdentity, type EnvShellDeps } from "../src/env/shell";
 import { RUNNER_HOST_IMAGES } from "../src/onboard-runner";
 import { buildFixtureContract, FIXTURE_ROUTE_PREFIX } from "./fixture-contract";
 import { startMeFixture, type FixtureServer } from "./fixture";
@@ -563,6 +563,28 @@ describe("catalyst env shell (interactive)", () => {
     const reused = recordingPort();
     expect(await shell([], reused.docker)).toBe(0);
     expect(homeOf(reused)).not.toBe(homeOf(first));
+  });
+
+  test("one checkout keeps its home volume when entries at its root are added, removed or changed (CTC-6155)", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "catalyst-env-stable-")));
+    try {
+      const fresh = checkoutIdentity(dir);
+      writeFileSync(join(dir, "added"), "x");
+      expect(checkoutIdentity(dir)).toBe(fresh);
+      writeFileSync(join(dir, "added"), "y");
+      rmSync(join(dir, "added"));
+      expect(checkoutIdentity(dir)).toBe(fresh);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const homeOf = (port: ReturnType<typeof recordingPort>) =>
+      port.rec.runs[0]?.argv.find((word) => word.startsWith("type=volume,")) ?? "";
+    const before = recordingPort();
+    expect(await shell([], before.docker)).toBe(0);
+    writeFileSync(join(repo, "later.txt"), "x");
+    const after = recordingPort();
+    expect(await shell([], after.docker)).toBe(0);
+    expect(homeOf(after)).toBe(homeOf(before));
   });
 
   /** Plan the shell for `feature` through the real CLI path, then run git in the planned container. */
