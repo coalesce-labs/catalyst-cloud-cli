@@ -26,25 +26,23 @@ export interface EnvShellDeps {
   gitCommonDir?: (root: string) => Promise<string | null>;
 }
 
-/** What a directory's name in the home volume key is built from: its inode and birth time. A birth time
- *  never changes while the directory exists, so the name stays put when entries at the root are added,
- *  removed or changed, including a freshly created root whose birth time still equals its change time. */
-export function identityFromStat(stat: { ino: bigint; birthtimeNs: bigint }): string {
-  return stat.birthtimeNs > 0n ? `${stat.ino}:${stat.birthtimeNs}` : `${stat.ino}`;
+/** What the home volume key is built from: the directory's inode and birth time, or null when the platform
+ *  reports no birth time. A birth time never changes while the directory exists, so the name stays put when
+ *  entries at the root are added, removed or changed. Without one, an inode alone cannot tell a directory
+ *  re-created at the same path with a reused inode from the old one, so there is no identity (CTC-6155). */
+export function identityFromStat(stat: { ino: bigint; birthtimeNs: bigint }): string | null {
+  return stat.birthtimeNs > 0n ? `${stat.ino}:${stat.birthtimeNs}` : null;
 }
 
 /** The checkout directory's identity, read-only and with no git call, so it neither dirties the work tree nor
  *  follows anything in the checkout (`root` is already a real path). A repository deleted and a different one
- *  cloned to the same path gets a new birth time, hence a new home volume (CTC-6155). Residuals, not closed
- *  here: (1) on a filesystem that reports no birth time (zero; some network, FUSE and older Linux filesystems)
- *  only the inode is used, so a directory re-created at the same path with a reused inode shares the old
- *  volume. An attacker would need the person to delete a repository and clone another to that very path on
- *  such a filesystem, and the inode to be reused. It is not closed because any other identity is either
- *  writable from the container or the checkout (a marker file, git state, the origin URL) or needs a host
- *  registry with a deletion signal, which is a product decision. (2) Where Node has no statx and synthesizes the
- *  birth time from the change time, the name changes when entries at the root change: that checkout gets a
- *  fresh volume (toolchains download again) and never shares one. */
-export function checkoutIdentity(root: string): string {
+ *  cloned to the same path gets a new birth time, hence a new home volume. When the filesystem reports no
+ *  birth time the result is null and the run gets an anonymous home volume that `--rm` removes with the
+ *  container, so no later run can mount it: toolchains download again on every run there, the price of never
+ *  sharing a home across repositories. Accepted follow-up: where Node synthesizes the birth time from the
+ *  change time (no statx; not on Node 24's supported kernels), the name changes when entries at the root
+ *  change, so that checkout gets a fresh volume and never shares one. */
+export function checkoutIdentity(root: string): string | null {
   return identityFromStat(statSync(root, { bigint: true }));
 }
 

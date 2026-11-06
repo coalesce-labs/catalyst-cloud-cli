@@ -64,8 +64,8 @@ export interface ShellRunInput {
   image: string;
   /** The repository's real path, mounted at /workspace. */
   root: string;
-  /** `checkoutIdentity(root)`: tells a directory apart from a later one created at the same path. */
-  rootIdentity: string;
+  /** `checkoutIdentity(root)`: tells a directory apart from a later one created at the same path; null when the filesystem reports no birth time. */
+  rootIdentity: string | null;
   /** A worktree's shared git directory outside `root`, mounted at the same path, and also where a relative
    *  `gitdir:` pointer in /workspace/.git resolves; null otherwise. */
   gitCommonDir: string | null;
@@ -117,7 +117,9 @@ export function shellRunArgs(input: ShellRunInput): string[] {
     `type=bind,src=${input.root},dst=${ENV_SHELL_WORKSPACE}`,
     ...(input.gitCommonDir ? gitCommonDirMounts(input.root, input.gitCommonDir) : []),
     "--mount",
-    `type=volume,src=${homeVolumeFor(input.image, input.root, input.rootIdentity)},dst=${HOME}`,
+    input.rootIdentity === null
+      ? `type=volume,dst=${HOME}` // no identity: an anonymous volume, removed by --rm, that no other run can name
+      : `type=volume,src=${homeVolumeFor(input.image, input.root, input.rootIdentity)},dst=${HOME}`,
     "-w",
     ENV_SHELL_WORKSPACE,
     "-e",

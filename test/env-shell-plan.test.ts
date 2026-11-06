@@ -59,7 +59,16 @@ test("the checkout identity ignores the change time, so adding entries at the ro
   expect(fresh).toBe("5:100");
   expect(identityFromStat({ ino: 5n, birthtimeNs: 100n })).toBe(fresh);
   expect(identityFromStat({ ino: 5n, birthtimeNs: 101n })).not.toBe(fresh);
-  expect(identityFromStat({ ino: 5n, birthtimeNs: 0n })).toBe("5");
+  expect(identityFromStat({ ino: 5n, birthtimeNs: 0n })).toBeNull();
+});
+
+test("with no directory identity the home is an anonymous volume: no name, so no other run can mount it (CTC-6155)", () => {
+  for (const mode of ["shell", "check"] as const) {
+    const argv = shellRunArgs({ ...base, rootIdentity: null, mode, tty: false });
+    expect(homeMount(argv)).toBe("type=volume,dst=/home/catalyst");
+    expect(argv.some((word) => word.includes("catalyst-env-home-"))).toBe(false);
+    expect(homeMount(shellRunArgs({ ...base, rootIdentity: null, mode, tty: false }))).toBe(homeMount(argv));
+  }
 });
 
 test("the home volume name is a valid Docker volume name of fixed length for any root", () => {
