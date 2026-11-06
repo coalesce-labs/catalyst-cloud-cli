@@ -793,15 +793,22 @@ describe("a very long explanation", () => {
   });
 });
 
-// A --ticket filter can only be answered for a call whose ticket the script can read. A call whose dispatch is
-// present but of the wrong type may belong to the ticket, so it is counted as unreadable, not read as "no ticket".
+// A --ticket filter can only be answered for a call whose ticket the script can read. The route sends dispatch as
+// null or as an object with a string ticket; a call with anything else may belong to the ticket, so it is counted
+// as unreadable, not read as "no ticket".
 describe("under --ticket, a call whose ticket cannot be read is counted and never dropped", () => {
-  const WRONG: [string, unknown][] = [["a number", 42], ["a boolean", true], ["an array", [1]], ["an object with a non-callable toString", { toString: 5 }]];
+  const WRONG: [string, unknown][] = [
+    ["a number", 42], ["a boolean", true], ["an array", [1]], ["an object with a non-callable toString", { toString: 5 }],
+    ["an empty object", {}], ["null", null], ["a blank string", "  "],
+  ];
   const makers: [string, (bad: unknown) => unknown][] = [
     ["dispatch", (bad) => ({ ...DENIED_CALL, dispatch: bad })],
     ["dispatch.ticket", (bad) => ({ ...DENIED_CALL, dispatch: { ticket: bad, phase: "implement", generation: 3 } })],
   ];
-  test.each(makers.flatMap(([field, make]) => WRONG.map(([name, bad]) => [field, name, bad, make] as const)))(
+  // dispatch null is the route's own "not dispatched", so it is the one row that is not unreadable.
+  test.each(
+    makers.flatMap(([field, make]) => WRONG.filter(([name]) => !(field === "dispatch" && name === "null")).map(([name, bad]) => [field, name, bad, make] as const)),
+  )(
     "%s as %s",
     (_field, _name, bad, make) => {
       const { dir } = withRawCalls([make(bad), OK_CALL]);
@@ -815,9 +822,8 @@ describe("under --ticket, a call whose ticket cannot be read is counted and neve
     },
   );
 
-  test("a call with no dispatch, a null ticket or a blank one is known to name no ticket: nothing is unreadable", () => {
-    const none = [null, undefined, {}, { ticket: null, phase: "p" }, { ticket: "  ", phase: "p" }];
-    for (const dispatch of none) {
+  test("a call with no dispatch is known to name no ticket: nothing is unreadable", () => {
+    for (const dispatch of [null, undefined]) {
       const { dir } = withRawCalls([{ ...DENIED_CALL, dispatch }, OK_CALL]);
       const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
       expect(r.stdout, JSON.stringify(dispatch)).toContain("in its newest 2 recorded calls");
