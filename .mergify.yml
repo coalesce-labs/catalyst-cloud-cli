@@ -28,12 +28,14 @@ queue_rules:
       - "#review-threads-unresolved=0"
       - "check-success=check"
       - "check-success=Review Evidence"
+      - "check-success=no thoughts documents"
     merge_conditions:
       - base=main
       - label!=hold
       - "#review-threads-unresolved=0"
       - "check-success=check"
       - "check-success=Review Evidence"
+      - "check-success=no thoughts documents"
 
 pull_request_rules:
   # The trigger, not a second gate: its conditions mirror queue_conditions so a pull request that
@@ -46,6 +48,7 @@ pull_request_rules:
       - "#review-threads-unresolved=0"
       - "check-success=check"
       - "check-success=Review Evidence"
+      - "check-success=no thoughts documents"
     actions:
       queue: {}
 
@@ -59,3 +62,4 @@ merge_protections:
     success_conditions:
       - "#review-threads-unresolved=0"
       - "check-success=Review Evidence"
+      - "check-success=no thoughts documents"
