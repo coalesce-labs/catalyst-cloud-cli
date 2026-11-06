@@ -103,7 +103,14 @@ function withCalls(calls: Call[]) {
   return setup({ stdout: JSON.stringify(body(calls)) });
 }
 
+/** A home whose stand-in CLI answers with these calls verbatim, for shapes the portal's type does not allow. */
+function withRawCalls(calls: readonly unknown[]) {
+  return setup({ stdout: JSON.stringify({ status: STATUS, calls: { server: "workos", calls } }) });
+}
+
 const lines = (s: string) => s.trimEnd().split("\n");
+// Exactly one line: no CR, LF, U+2028 or U+2029 before the closing newline.
+const ONE_LINE = /^[^\r\n\u2028\u2029]+\n$/;
 
 describe("scenario: the desk explains a failed tool call in one line", () => {
   test("names the ticket, the tool, the reason and who can fix it, in exactly one line", () => {
@@ -211,6 +218,39 @@ describe("the reason", () => {
     const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
     expect(lines(r.stdout)).toHaveLength(1);
     expect(r.stdout).toContain("Refused: the approval expired. A workspace admin can re-approve it.");
+  });
+});
+
+describe("the answer is one line whatever the flags and the record hold", () => {
+  test("a --ticket value with a newline, no call for it: the inconclusive line is still one line", () => {
+    const { dir } = withCalls([OK_CALL]);
+    const r = run(dir, ["workos", "--ticket", "CTC-9999\nSecond line"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(ONE_LINE);
+    expect(r.stdout).toContain("CTC-9999 Second line has no call to workos");
+  });
+
+  test("--ticket and --tool values with newlines, calls that all succeeded: the no-failure line is one line", () => {
+    const ok = { ...OK_CALL, tool_name: "workos__get\n_user", dispatch: { ticket: "CTC-1234\nX", phase: "implement", generation: 3 } };
+    const { dir } = withCalls([ok]);
+    const r = run(dir, ["workos", "--ticket", "CTC-1234\nX", "--tool", "get\n_user"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("no failed call to workos on CTC-1234 X matching get _user");
+    expect(r.stdout).toMatch(ONE_LINE);
+  });
+
+  test("a recorded ticket, phase, tool and outcome with line breaks: the failed-call line is one line", () => {
+    const odd = {
+      ...DENIED_CALL,
+      tool_name: "workos__list\n\u2028users",
+      outcome: "denied\r\nagain",
+      dispatch: { ticket: "CTC-\n1234", phase: "imple\nment", generation: 3 },
+    };
+    const { dir } = withCalls([odd]);
+    const r = run(dir, ["workos"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(ONE_LINE);
+    expect(r.stdout).toContain("CTC- 1234 imple ment: workos__list users on workos failed (denied again)");
   });
 });
 
