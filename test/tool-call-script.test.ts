@@ -341,6 +341,37 @@ describe("when the record cannot name a failure, it says so and does not guess",
   });
 });
 
+describe("a record with elements that are not calls", () => {
+  test.each([
+    ["null", null],
+    ["a string", "oops"],
+    ["a number", 42],
+    ["a boolean", true],
+    ["an array", []],
+  ])("%s among the calls is skipped, and the real call after it is still explained", (_name, bad) => {
+    const { dir } = withRawCalls([bad, DENIED_CALL]);
+    for (const args of [["workos"], ["workos", "--ticket", "CTC-1234"], ["workos", "--tool", "list_users"]]) {
+      const r = run(dir, args);
+      expect(r.status).toBe(0);
+      expect(r.stderr).toBe("");
+      expect(lines(r.stdout)).toHaveLength(1);
+      expect(r.stdout).toContain("workos__list_users");
+      expect(r.stdout).toContain("approval-expired");
+    }
+  });
+
+  test("a record of nothing but non-calls is inconclusive, not a crash and not a failure", () => {
+    const { dir } = withRawCalls([null, "oops"]);
+    const r = run(dir, ["workos"]);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toContain("cannot say why");
+    const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { verdict: string; window: unknown };
+    expect(json.verdict).toBe("not-in-window");
+    expect(json.window).toEqual({ read: 2, limit: 50 });
+  });
+});
+
 describe("a read that fails", () => {
   test("CLI exit 3 (older cloud, or a name the workspace did not register) is exit 1, names the server and `catalyst mcp list`, and relays none of the CLI's own text", () => {
     const { dir } = setup({ code: 3, stderr: NEEDS_NEWER });
