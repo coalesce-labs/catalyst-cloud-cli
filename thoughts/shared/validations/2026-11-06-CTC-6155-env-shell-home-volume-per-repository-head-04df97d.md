@@ -48,7 +48,7 @@ Main has not moved since the merge base. Branch code changes: `src/env/shell-pla
 - [ ] With Docker, run `catalyst env shell` in two checkouts and check `docker volume ls --filter name=catalyst-env-home-` shows two distinct 55-character names. This container has no Docker.
 
 ```catalyst-validation-ladder
-{"steps":[
+{"version":1,"steps":[
 {"step":"plan-conformance","verdict":"PASS","materiality":"plan-only","detail":"Per-repository volume implemented and traced from root to the docker argv. Key is stricter than planned (adds directory identity, anonymous volume when none); the plan's path-reuse exclusion is stale. Tests added; no file outside src/env and test/env-shell*."},
 {"step":"type-safety","verdict":"PASS","detail":"typecheck exit 0; 60 env-shell tests pass; reward-hacking scan of the diff found nothing."},
 {"step":"code-review","verdict":"PASS","detail":"review-code: no finding at 80 or above."},
