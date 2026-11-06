@@ -170,22 +170,71 @@ describe("--json", () => {
       explanation: EXPIRED,
       at: new Date(DENIED_CALL.at).toISOString(),
       fixer: { named: true, who: "a workspace admin" },
-      window: { read: 3, limit: 50 },
+      window: { read: 3, limit: 50, unreadable: 0 },
       verdict: "failed",
     });
   });
 });
 
 describe("who can fix it", () => {
-  test("an explanation that names no one gets the labelled fallback, not an invented actor", () => {
+  test("no explanation at all gets the labelled fallback, not an invented actor", () => {
+    for (const explanation of [null, undefined, "", "   "]) {
+      const { dir } = withRawCalls([{ ...PROVIDER_CALL, explanation }]);
+      const r = run(dir, ["workos"]);
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(
+        "Who can fix it: the record names no one; a workspace owner or admin manages this workspace's MCP servers.",
+      );
+      const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { fixer: { named: boolean; who: string | null } };
+      expect(json.fixer).toEqual({ named: false, who: null });
+    }
+  });
+
+  const UNNAMED = "Who can fix it: the explanation does not name one.";
+  const whoSays = (explanation: string) => {
+    const { dir } = withCalls([{ ...DENIED_CALL, explanation }]);
+    const r = run(dir, ["workos"]);
+    const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { fixer: { named: boolean; who: string | null } };
+    return { r, json };
+  };
+
+  test("an explanation that names no role says so, and adds no pointer the explanation may contradict", () => {
     const { dir } = withCalls([PROVIDER_CALL]);
     const r = run(dir, ["workos"]);
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain(
-      "the record names no one; a workspace owner or admin manages this workspace's MCP servers",
-    );
+    expect(lines(r.stdout)).toHaveLength(1);
+    expect(r.stdout).toContain(PROVIDER_EXPLANATION);
+    expect(r.stdout).toContain(UNNAMED);
+    expect(r.stdout).not.toContain("manages this workspace");
+    expect(r.stdout).not.toContain("the record names no one");
     const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { fixer: { named: boolean; who: string | null } };
-    expect(json.fixer.named).toBe(false);
+    expect(json.fixer).toEqual({ named: false, who: null });
+  });
+
+  // A role is named only on an affirmative statement about it. A negation or a restriction anywhere in the
+  // sentence, or in any sentence that mentions the role, means the explanation does not say it can fix this.
+  test.each([
+    ["cannot, then only the provider", "A workspace admin cannot fix this; only the provider can restore the service."],
+    ["can't", "A workspace admin can't fix this."],
+    ["a curly apostrophe", "A workspace admin can\u2019t fix this."],
+    ["only if", "A workspace admin can fix this only if the provider restores the service first."],
+    ["unless", "A workspace admin can approve it unless the provider has blocked the key."],
+    ["no one", "No one can fix this from here; a workspace admin can only wait."],
+    ["no admin", "No workspace admin can fix this."],
+    ["unable", "A workspace admin is unable to fix this."],
+    ["neither nor", "Neither an owner nor an admin can fix this."],
+    ["do not ask", "Do not ask a workspace admin; ask the provider instead."],
+    ["a role mentioned in passing", "The approval page is managed by a workspace admin."],
+    ["a negated sentence anywhere vetoes the role", "A workspace admin can re-approve it. A workspace admin cannot grant new tools."],
+    ["the same role under another name is vetoed too", "A workspace admin cannot fix this. Ask your admin."],
+    ["one negation covers the whole sentence", "A workspace admin cannot fix this, but an operator can."],
+  ])("never names a role the explanation negates or restricts: %s", (_why, explanation) => {
+    const { r, json } = whoSays(explanation);
+    expect(r.status).toBe(0);
+    expect(lines(r.stdout)).toHaveLength(1);
+    expect(r.stdout).toContain(UNNAMED);
+    expect(r.stdout).not.toMatch(/Who can fix it: (?:an?|the|your) /);
+    expect(json.fixer).toEqual({ named: false, who: null });
   });
 
   test.each([
@@ -194,6 +243,14 @@ describe("who can fix it", () => {
     ["A workspace owner or admin can approve it.", "a workspace owner or admin"],
     ["Ask the account admin.", "the account admin"],
     ["Only an owner can re-grant it.", "an owner"],
+    ["Contact your workspace admin to re-approve it.", "your workspace admin"],
+    ["The workspace owner must reconnect the server.", "the workspace owner"],
+    ["An owner or admin can approve it.", "an owner or admin"],
+    ["A workspace admin needs to re-approve it.", "a workspace admin"],
+    ["A workspace admin is able to fix this.", "a workspace admin"],
+    ["Have an admin re-approve it.", "an admin"],
+    ["The approval was not granted. A workspace admin can grant it.", "a workspace admin"],
+    ["The key is not granted; a workspace admin can grant it.", "a workspace admin"],
   ])("takes the actor the explanation names: %s", (explanation, who) => {
     const { dir } = withCalls([{ ...DENIED_CALL, explanation }]);
     const r = run(dir, ["workos", "--json"]);
@@ -330,7 +387,7 @@ describe("when the record cannot name a failure, it says so and does not guess",
     expect(r.stdout).not.toMatch(/succe/i);
     const json = JSON.parse(run(dir, ["workos", "--ticket", "ENG-123", "--json"]).stdout) as { verdict: string; window: unknown };
     expect(json.verdict).toBe("not-in-window");
-    expect(json.window).toEqual({ read: 3, limit: 50 });
+    expect(json.window).toEqual({ read: 3, limit: 50, unreadable: 0 });
   });
 
   test.each([
@@ -343,7 +400,7 @@ describe("when the record cannot name a failure, it says so and does not guess",
     const { dir } = withRawCalls([{ ...OK_CALL, at }]);
     const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain("the newest was ok at an unrecorded time.");
+    expect(r.stdout).toContain("was ok at an unrecorded time.");
     expect(r.stdout).not.toContain("1970");
     const json = JSON.parse(run(dir, ["workos", "--ticket", "CTC-1234", "--json"]).stdout) as { verdict: string; at: string | null };
     expect(json.verdict).toBe("no-failure");
@@ -385,7 +442,7 @@ describe("a record with elements that are not calls", () => {
     expect(r.stdout).toContain("cannot say why");
     const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { verdict: string; window: unknown };
     expect(json.verdict).toBe("not-in-window");
-    expect(json.window).toEqual({ read: 2, limit: 50 });
+    expect(json.window).toEqual({ read: 2, limit: 50, unreadable: 2 });
   });
 });
 
@@ -403,7 +460,7 @@ describe("a recorded call with a field of the wrong type", () => {
     ["an object with a non-callable toString", { toString: 5 }],
     ["a nested object", { a: { b: 1 } }],
   ];
-  interface Out { server: string; ticket: string | null; phase: string | null; tool: string | null; outcome: string | null; reason: string | null; explanation: string | null; at: string | null; fixer: { named: boolean; who: string | null }; window: { read: number; limit: number }; verdict: string }
+  interface Out { server: string; ticket: string | null; phase: string | null; tool: string | null; outcome: string | null; reason: string | null; explanation: string | null; at: string | null; fixer: { named: boolean; who: string | null }; window: { read: number; limit: number; unreadable: number }; verdict: string }
   const json = (dir: string, args: string[] = []) => JSON.parse(run(dir, ["workos", ...args, "--json"]).stdout) as Out;
   // Nothing but a clean exit and one line of text: no crash, no stack trace, no value printed raw.
   const clean = (r: ReturnType<typeof run>, why: string) => {
@@ -432,7 +489,7 @@ describe("a recorded call with a field of the wrong type", () => {
         expect(r.stdout, "alone: inconclusive").toContain("cannot say why");
         expect(r.stdout, "alone: no failure").not.toContain("failed (");
         expect(r.stdout, "alone: no success").not.toContain("no failed call");
-        expect(json(alone.dir, args)).toMatchObject({ verdict: "not-in-window", window: { read: 1, limit: 50 } });
+        expect(json(alone.dir, args)).toMatchObject({ verdict: "not-in-window", window: { read: 1, limit: 50, unreadable: 1 } });
       }
       // Beside a usable failed call, that one is the call reported.
       const beside = withRawCalls([{ ...DENIED_CALL, [field]: bad }, GOOD]);
@@ -465,7 +522,7 @@ describe("a recorded call with a field of the wrong type", () => {
   const EXPECTED: Out = {
     server: "workos", ticket: "CTC-1234", phase: "implement", tool: "workos__list_users", outcome: "denied", reason: "approval-expired",
     explanation: EXPIRED, at: new Date(DENIED_CALL.at).toISOString(), fixer: { named: true, who: "a workspace admin" },
-    window: { read: 1, limit: 50 }, verdict: "failed",
+    window: { read: 1, limit: 50, unreadable: 0 }, verdict: "failed",
   };
   test.each(
     OPTIONAL.flatMap(([field, make, expected]) =>
@@ -477,6 +534,132 @@ describe("a recorded call with a field of the wrong type", () => {
     clean(r, "line");
     expect(r.stdout).toContain("workos__list_users on workos failed (denied)");
     expect(json(dir)).toEqual({ ...EXPECTED, ...expected });
+  });
+});
+
+// A record the script cannot read is counted, and every sentence that would otherwise claim to know the
+// whole window says it does not. A failed readable call is still reported as failed.
+describe("records the script could not read are counted and never hidden", () => {
+  const NO_TOOL = { ...DENIED_CALL, tool_name: undefined };
+  const unreadable = (dir: string, args: string[] = []) =>
+    (JSON.parse(run(dir, ["workos", ...args, "--json"]).stdout) as { window: { read: number; limit: number; unreadable: number } }).window;
+
+  test("a clean record says nothing about unreadable calls", () => {
+    for (const calls of [[DENIED_CALL, OK_CALL], [OK_CALL], []]) {
+      const { dir } = withCalls(calls);
+      for (const args of [[], ["--ticket", "CTC-1234"], ["--ticket", "ENG-123"]]) {
+        const r = run(dir, ["workos", ...args]);
+        expect(r.stdout, args.join(" ")).not.toMatch(/could not be read|readable/);
+      }
+      expect(unreadable(dir).unreadable).toBe(0);
+    }
+  });
+
+  test("no readable call matches: the line does not say there is none, and says what could not be read", () => {
+    const { dir } = withRawCalls([NO_TOOL, null, OK_CALL]);
+    const r = run(dir, ["workos", "--ticket", "ENG-123"]);
+    expect(r.status).toBe(0);
+    expect(lines(r.stdout)).toHaveLength(1);
+    expect(r.stdout).toContain("ENG-123 has no readable call to workos");
+    expect(r.stdout).toContain("among the newest 50");
+    expect(r.stdout).toContain("2 recorded calls could not be read");
+    expect(r.stdout).toContain("cannot say why");
+    expect(r.stdout).not.toMatch(/\bhas no call\b/);
+    expect(unreadable(dir, ["--ticket", "ENG-123"])).toEqual({ read: 3, limit: 50, unreadable: 2 });
+    const none = withRawCalls([NO_TOOL]);
+    const alone = run(none.dir, ["workos"]);
+    expect(alone.stdout).toContain("there is no readable call to workos");
+    expect(alone.stdout).toContain("1 recorded call could not be read");
+  });
+
+  test("no failed readable call: the line does not claim the whole window, and says what could not be read", () => {
+    const { dir } = withRawCalls([NO_TOOL, OK_CALL]);
+    for (const args of [[], ["--ticket", "CTC-1234"]]) {
+      const r = run(dir, ["workos", ...args]);
+      expect(r.status).toBe(0);
+      expect(lines(r.stdout)).toHaveLength(1);
+      expect(r.stdout, args.join(" ")).toContain("no failed call to workos");
+      expect(r.stdout).toContain("the 1 readable of its newest 2 recorded calls");
+      expect(r.stdout).toContain(new Date(OK_CALL.at).toISOString());
+      expect(r.stdout).toContain("1 recorded call could not be read, so this may not be the whole picture");
+      expect(r.stdout).not.toContain("in its newest 2 recorded calls");
+    }
+    expect(unreadable(dir)).toEqual({ read: 2, limit: 50, unreadable: 1 });
+  });
+
+  test("a failed readable call is still reported as failed, with the count beside it", () => {
+    const { dir } = withRawCalls([null, "oops", DENIED_CALL]);
+    const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
+    expect(r.status).toBe(0);
+    expect(lines(r.stdout)).toHaveLength(1);
+    expect(r.stdout).toContain("workos__list_users on workos failed (denied)");
+    expect(r.stdout).toContain("Who can fix it: a workspace admin.");
+    expect(r.stdout).toContain("2 other recorded calls could not be read, so this may not be the newest failure");
+    const json = JSON.parse(run(dir, ["workos", "--ticket", "CTC-1234", "--json"]).stdout) as { verdict: string; window: unknown };
+    expect(json.verdict).toBe("failed");
+    expect(json.window).toEqual({ read: 3, limit: 50, unreadable: 2 });
+  });
+});
+
+// Every claim in the line is read from the record by type, or hedged. These hold the claims the review of
+// the line found open: what "the newest" refers to when a filter is on, and values with stray spaces.
+describe("the line claims only what the record supports", () => {
+  test("with a filter on, 'the newest' is the newest match, not the newest call to the server", () => {
+    const otherTicketFailure = { ...DENIED_CALL, call_id: "call_other", at: OK_CALL.at + 60_000, dispatch: { ticket: "CTC-9999", phase: "plan", generation: 1 } };
+    const { dir } = withCalls([otherTicketFailure, OK_CALL]);
+    const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
+    expect(lines(r.stdout)).toHaveLength(1);
+    expect(r.stdout).toContain("no failed call to workos on CTC-1234");
+    expect(r.stdout).toContain("the newest one that matches was ok at " + new Date(OK_CALL.at).toISOString());
+    expect(r.stdout).not.toContain("CTC-9999");
+    const tool = run(dir, ["workos", "--tool", "get_user"]);
+    expect(tool.stdout).toContain("the newest one that matches was ok at");
+    // With no filter the newest call is the newest call.
+    expect(run(withCalls([OK_CALL]).dir, ["workos"]).stdout).toContain("the newest was ok at " + new Date(OK_CALL.at).toISOString());
+  });
+
+  test.each([
+    ["an outcome of ' ok '", { ...OK_CALL, outcome: " ok " }, "no failed call"],
+    ["an outcome with spaces around a failure", { ...DENIED_CALL, outcome: "  denied " }, "failed (denied)"],
+    ["a tool name with spaces around it", { ...DENIED_CALL, tool_name: "  workos__list_users  " }, "workos__list_users on workos failed"],
+    ["a recorded ticket with spaces around it", { ...DENIED_CALL, dispatch: { ticket: " CTC-1234 ", phase: " implement ", generation: 3 } }, "CTC-1234 implement: workos__list_users"],
+  ])("%s is read as the value without the spaces", (_name, call, line) => {
+    const { dir } = withCalls([call]);
+    const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
+    expect(r.status).toBe(0);
+    expect(lines(r.stdout)).toHaveLength(1);
+    expect(r.stdout).toContain(line);
+    expect(r.stdout).not.toMatch(/\( | \)/);
+  });
+
+  test("the verb's rule stands: any outcome but ok is a failure, and the line names the outcome", () => {
+    const { dir } = withCalls([{ ...DENIED_CALL, outcome: "pending", denied_reason: null, explanation: null }]);
+    const r = run(dir, ["workos"]);
+    expect(r.stdout).toContain("failed (pending)");
+    expect(r.stdout).toContain("the record gives no reason");
+  });
+
+  test("an older failure is reported although the newest call was ok: the line says only that this call failed", () => {
+    const { dir } = withCalls([{ ...OK_CALL, at: DENIED_CALL.at + 60_000 }, DENIED_CALL]);
+    const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
+    expect(r.stdout).toContain("workos__list_users on workos failed (denied)");
+    expect(r.stdout).not.toContain("no failed call");
+    expect(r.stdout).not.toMatch(/\bnewest\b/);
+  });
+
+  test("a --tool that matches several tools reports the newest failure and names the tool that failed", () => {
+    const listRoles = { ...DENIED_CALL, call_id: "call_roles", tool_name: "workos__list_roles", at: DENIED_CALL.at + 1000, denied_reason: "not-granted", explanation: "Refused: no grant. A workspace admin can grant it." };
+    const { dir } = withCalls([{ ...OK_CALL, tool_name: "workos__list_orgs", at: DENIED_CALL.at + 2000 }, listRoles, DENIED_CALL]);
+    const r = run(dir, ["workos", "--tool", "list_"]);
+    expect(r.stdout).toContain("workos__list_roles on workos failed (denied)");
+    expect(r.stdout).toContain("not-granted");
+    expect(r.stdout).not.toContain("workos__list_users");
+  });
+
+  test("a ticket given in another case is matched, and the line spells it as the record does", () => {
+    const { dir } = withCalls([DENIED_CALL]);
+    const r = run(dir, ["workos", "--ticket", "ctc-1234"]);
+    expect(r.stdout.startsWith("CTC-1234 implement: ")).toBe(true);
   });
 });
 
