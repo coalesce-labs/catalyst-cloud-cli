@@ -333,6 +333,23 @@ describe("when the record cannot name a failure, it says so and does not guess",
     expect(json.window).toEqual({ read: 3, limit: 50 });
   });
 
+  test.each([
+    ["null", null],
+    ["absent", undefined],
+    ["a string", "yesterday"],
+    ["false", false],
+    ["true", true],
+  ])("a call whose at is %s has an unrecorded time, never the epoch", (_name, at) => {
+    const { dir } = withRawCalls([{ ...OK_CALL, at }]);
+    const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("the newest was ok at an unrecorded time.");
+    expect(r.stdout).not.toContain("1970");
+    const json = JSON.parse(run(dir, ["workos", "--ticket", "CTC-1234", "--json"]).stdout) as { verdict: string; at: string | null };
+    expect(json.verdict).toBe("no-failure");
+    expect(json.at).toBeNull();
+  });
+
   test("a server with no recorded calls is inconclusive too", () => {
     const { dir } = withCalls([]);
     const r = run(dir, ["workos"]);
