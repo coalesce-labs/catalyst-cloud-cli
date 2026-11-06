@@ -758,7 +758,7 @@ describe("a call that has not finished is neither a failure nor a success", () =
   });
 
   test("no newer unfinished call, no clause about one", () => {
-    const { dir } = withCalls([{ ...OK_CALL, outcome: "running", at: DENIED_CALL.at - 1000 }, DENIED_CALL]);
+    const { dir } = withCalls([DENIED_CALL, { ...OK_CALL, outcome: "running", at: DENIED_CALL.at - 1000 }]);
     expect(run(dir, ["workos"]).stdout).not.toContain("has not finished");
   });
 });
