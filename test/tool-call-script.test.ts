@@ -71,7 +71,8 @@ function setup(answer: Answer = {}, config: Record<string, unknown> | null = {})
       `const answer = JSON.parse(readFileSync(${JSON.stringify(join(dir, "answer.json"))}, "utf8"));`,
       'if (answer.stderr) process.stderr.write(answer.stderr + "\\n");',
       'if (answer.stdout) process.stdout.write(answer.stdout + "\\n");',
-      "process.exit(answer.code ?? 0);",
+      // exitCode, not exit(): a process.exit() after a large write to a pipe cuts the write at 64 KiB.
+      "process.exitCode = answer.code ?? 0;",
     ].join("\n"),
   );
   if (config !== null) {
@@ -776,6 +777,59 @@ describe("a very long explanation", () => {
     expect(r.stdout).toContain("Who can fix it: a workspace admin.");
     const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { explanation: string };
     expect(json.explanation).toBe(explanation);
+  });
+
+  test("beyond the 64 KiB a pipe holds, the line and the JSON are still whole", () => {
+    const explanation = `Refused: ${"the approval for this call expired before it ran ".repeat(3000).trim()}. A workspace admin can re-approve it.`;
+    const { dir } = withCalls([{ ...DENIED_CALL, explanation }]);
+    const r = run(dir, ["workos"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout.length).toBeGreaterThan(2 * 65536);
+    expect(r.stdout).toMatch(ONE_LINE);
+    expect(r.stdout).toContain(explanation);
+    expect(r.stdout.endsWith("Who can fix it: a workspace admin.\n")).toBe(true);
+    const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { explanation: string };
+    expect(json.explanation).toBe(explanation);
+  });
+});
+
+// A --ticket filter can only be answered for a call whose ticket the script can read. A call whose dispatch is
+// present but of the wrong type may belong to the ticket, so it is counted as unreadable, not read as "no ticket".
+describe("under --ticket, a call whose ticket cannot be read is counted and never dropped", () => {
+  const WRONG: [string, unknown][] = [["a number", 42], ["a boolean", true], ["an array", [1]], ["an object with a non-callable toString", { toString: 5 }]];
+  const makers: [string, (bad: unknown) => unknown][] = [
+    ["dispatch", (bad) => ({ ...DENIED_CALL, dispatch: bad })],
+    ["dispatch.ticket", (bad) => ({ ...DENIED_CALL, dispatch: { ticket: bad, phase: "implement", generation: 3 } })],
+  ];
+  test.each(makers.flatMap(([field, make]) => WRONG.map(([name, bad]) => [field, name, bad, make] as const)))(
+    "%s as %s",
+    (_field, _name, bad, make) => {
+      const { dir } = withRawCalls([make(bad), OK_CALL]);
+      const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
+      expect(r.status).toBe(0);
+      expect(lines(r.stdout)).toHaveLength(1);
+      expect(r.stdout).toContain("no failed call to workos on CTC-1234 in the 1 readable of its newest 2 recorded calls");
+      expect(r.stdout).toContain("1 recorded call could not be read, so this may not be the whole picture");
+      const json = JSON.parse(run(dir, ["workos", "--ticket", "CTC-1234", "--json"]).stdout) as { window: unknown };
+      expect(json.window).toEqual({ read: 2, limit: 50, unreadable: 1 });
+    },
+  );
+
+  test("a call with no dispatch, a null ticket or a blank one is known to name no ticket: nothing is unreadable", () => {
+    const none = [null, undefined, {}, { ticket: null, phase: "p" }, { ticket: "  ", phase: "p" }];
+    for (const dispatch of none) {
+      const { dir } = withRawCalls([{ ...DENIED_CALL, dispatch }, OK_CALL]);
+      const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
+      expect(r.stdout, JSON.stringify(dispatch)).toContain("in its newest 2 recorded calls");
+      expect(r.stdout, JSON.stringify(dispatch)).not.toContain("could not be read");
+    }
+  });
+
+  test("without --ticket the same call is explained as a failure with no ticket, and nothing is unreadable", () => {
+    const { dir } = withRawCalls([{ ...DENIED_CALL, dispatch: 42 }, OK_CALL]);
+    const r = run(dir, ["workos"]);
+    expect(r.stdout).toContain("no ticket: workos__list_users on workos failed (denied)");
+    expect(r.stdout).not.toContain("could not be read");
   });
 });
 
