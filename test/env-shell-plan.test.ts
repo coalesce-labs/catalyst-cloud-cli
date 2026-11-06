@@ -21,6 +21,7 @@ const TOOLCHAINS = [
 const base = {
   image: IMAGE,
   root: "/Users/ana/src/web",
+  rootIdentity: "4242:1700000000000000000",
   gitCommonDir: null,
   toolchains: TOOLCHAINS,
   passNames: ["DATABASE_URL", "STRIPE_SECRET_KEY"],
@@ -28,9 +29,9 @@ const base = {
 };
 
 test("homeVolumeFor names the volume by the image digest's first 12 hex and the checkout path's sha256", () => {
-  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web")).toBe("catalyst-env-home-a19f7b0859a9-0e7676587a0a89966444e3c9");
-  expect(homeVolumeFor("not-pinned", "/Users/ana/src/web")).toMatch(
-    /^catalyst-env-home-[0-9a-f]{12}-0e7676587a0a89966444e3c9$/,
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", base.rootIdentity)).toBe("catalyst-env-home-a19f7b0859a9-4076c8137440206d8962b5e6");
+  expect(homeVolumeFor("not-pinned", "/Users/ana/src/web", base.rootIdentity)).toMatch(
+    /^catalyst-env-home-[0-9a-f]{12}-4076c8137440206d8962b5e6$/,
   );
 });
 
@@ -45,10 +46,17 @@ test("two repositories on one image get different home volumes; one repository k
   expect(homeMount(shellRunArgs({ ...base, mode: "shell", tty: true, gitCommonDir: "/Users/ana/src/api/.git" }))).toBe(web);
 });
 
+test("the same path with a different directory identity gets a different home volume (CTC-6155)", () => {
+  const first = homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000000");
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000001")).not.toBe(first);
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/web", "4242:1700000000000000000")).toBe(first);
+  expect(homeVolumeFor(IMAGE, "/Users/ana/src/api", "4242:1700000000000000000")).not.toBe(first);
+});
+
 test("the home volume name is a valid Docker volume name of fixed length for any root", () => {
   for (const root of ["/Users/ana/src/web", "/home/a b/ünï=code", `/${"x".repeat(400)}`, "C:\\Users\\ana\\web"]) {
     for (const image of [IMAGE, "not-pinned"]) {
-      const name = homeVolumeFor(image, root);
+      const name = homeVolumeFor(image, root, "9:1700000000000000000");
       expect(name).toMatch(/^catalyst-env-home-[0-9a-f]{12}-[0-9a-f]{24}$/);
       expect(name).toMatch(/^[A-Za-z0-9][A-Za-z0-9_.-]+$/);
       expect(name).toHaveLength(55);
@@ -65,7 +73,7 @@ test("shell mode on a terminal: the whole argv, pinned", () => {
     "run", "--rm", "--pull", "never", "-i", "-t",
     "--user", "10001:10001",
     "--mount", "type=bind,src=/Users/ana/src/web,dst=/workspace",
-    "--mount", "type=volume,src=catalyst-env-home-a19f7b0859a9-0e7676587a0a89966444e3c9,dst=/home/catalyst",
+    "--mount", "type=volume,src=catalyst-env-home-a19f7b0859a9-4076c8137440206d8962b5e6,dst=/home/catalyst",
     "-w", "/workspace",
     "-e", "HOME=/home/catalyst",
     "-e", "MISE_SYSTEM_DATA_DIR=/opt/catalyst/toolchain",
@@ -102,7 +110,7 @@ test("check mode: neither -i nor -t; CATALYST_ENV_NAMES carries the declared nam
   expect(argv.slice(-4)).toEqual(["catalyst-env-shell", "check", "node@22", "bun@1.3.14"]);
 });
 
-const homeMountForRoot = (root: string) => `type=volume,src=${homeVolumeFor(IMAGE, root)},dst=/home/catalyst`;
+const homeMountForRoot = (root: string) => `type=volume,src=${homeVolumeFor(IMAGE, root, base.rootIdentity)},dst=/home/catalyst`;
 
 /** The `--mount` words of the shell argv for a checkout at `root` whose git common dir is `gitCommonDir`. */
 function mountsFor(root: string, gitCommonDir: string): string[] {

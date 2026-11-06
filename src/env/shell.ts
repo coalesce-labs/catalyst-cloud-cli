@@ -2,7 +2,7 @@
 // Every refusal a person can fix in the file or the terminal fires before Docker is touched; the
 // cloud is asked only when a credential-free download is refused (shell-pull.ts).
 import { execFile } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve } from "node:path";
 import { parseEnv, promisify } from "node:util";
 import { flagBool, flagList, flagString, positionals, type ParsedArgs } from "../args.js";
@@ -24,6 +24,16 @@ export interface EnvShellDeps {
   readRepositoryName?: (root: string) => Promise<string | null>;
   gitTopLevel?: (cwd: string) => Promise<string | null>;
   gitCommonDir?: (root: string) => Promise<string | null>;
+}
+
+/** The directory's inode and birth time, read-only and with no git call, so it neither dirties the work tree nor
+ *  follows anything in the checkout (`root` is already a real path). A repository deleted and a different one
+ *  cloned to the same path gets a new birth time, hence a new home volume (CTC-6155). On a filesystem with no
+ *  birth time, Node reports the change time instead, which moves whenever an entry is added; that case (equal
+ *  to ctime) falls back to the inode alone so the name stays stable. */
+export function checkoutIdentity(root: string): string {
+  const { ino, birthtimeNs, ctimeNs } = statSync(root, { bigint: true });
+  return birthtimeNs > 0n && birthtimeNs !== ctimeNs ? `${ino}:${birthtimeNs}` : `${ino}`;
 }
 
 const DECLARATION = ".catalyst/catalyst.toml";
@@ -226,6 +236,7 @@ export async function runEnvShell(args: ParsedArgs, ctx: Ctx, deps: EnvShellDeps
     mode: check ? "check" : "shell",
     image,
     root,
+    rootIdentity: checkoutIdentity(root),
     gitCommonDir,
     toolchains: declaration.toolchains,
     passNames: variables.set,

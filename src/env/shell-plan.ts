@@ -44,11 +44,14 @@ export const ENV_SHELL_START_SCRIPT = [
 
 /** One home volume per image digest and checkout: downloaded toolchains and history persist for this
  *  repository folder, a new image starts fresh, and no other repository's shell ever mounts it (CTC-6155).
- *  Keyed on the host path mounted at /workspace, which nothing inside the container can change; never on the
- *  origin URL or git common dir, which the checkout's own files decide. */
-export function homeVolumeFor(image: string, root: string): string {
+ *  Keyed on the host path mounted at /workspace plus `identity`, the directory's own inode and birth time
+ *  (`checkoutIdentity`), so a different repository later cloned to a reused path gets a fresh volume instead of
+ *  inheriting the old one's ~/.bash_profile. Both are fixed on the host before Docker starts; nothing inside the
+ *  container can set a directory's birth time or inode, and the name never uses the origin URL or git common
+ *  dir, which the checkout's own files decide. */
+export function homeVolumeFor(image: string, root: string, identity: string): string {
   const digest = /@sha256:([0-9a-f]{12})/.exec(image)?.[1] ?? createHash("sha256").update(image).digest("hex").slice(0, 12);
-  const checkout = createHash("sha256").update(root).digest("hex").slice(0, 24);
+  const checkout = createHash("sha256").update(`${root}\0${identity}`).digest("hex").slice(0, 24);
   return `catalyst-env-home-${digest}-${checkout}`;
 }
 
@@ -61,6 +64,8 @@ export interface ShellRunInput {
   image: string;
   /** The repository's real path, mounted at /workspace. */
   root: string;
+  /** `checkoutIdentity(root)`: tells a directory apart from a later one created at the same path. */
+  rootIdentity: string;
   /** A worktree's shared git directory outside `root`, mounted at the same path, and also where a relative
    *  `gitdir:` pointer in /workspace/.git resolves; null otherwise. */
   gitCommonDir: string | null;
@@ -112,7 +117,7 @@ export function shellRunArgs(input: ShellRunInput): string[] {
     `type=bind,src=${input.root},dst=${ENV_SHELL_WORKSPACE}`,
     ...(input.gitCommonDir ? gitCommonDirMounts(input.root, input.gitCommonDir) : []),
     "--mount",
-    `type=volume,src=${homeVolumeFor(input.image, input.root)},dst=${HOME}`,
+    `type=volume,src=${homeVolumeFor(input.image, input.root, input.rootIdentity)},dst=${HOME}`,
     "-w",
     ENV_SHELL_WORKSPACE,
     "-e",

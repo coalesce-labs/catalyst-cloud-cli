@@ -549,6 +549,22 @@ describe("catalyst env shell (interactive)", () => {
     }
   });
 
+  test("a different repository cloned to a deleted repository's path gets its own home volume (CTC-6155)", async () => {
+    const homeOf = (port: ReturnType<typeof recordingPort>) =>
+      port.rec.runs[0]?.argv.find((word) => word.startsWith("type=volume,")) ?? "";
+    const first = recordingPort();
+    expect(await shell([], first.docker)).toBe(0);
+    const again = recordingPort();
+    expect(await shell(["--check"], again.docker)).toBe(0);
+    expect(homeOf(again)).toBe(homeOf(first));
+    rmSync(repo, { recursive: true, force: true });
+    mkdirSync(repo, { recursive: true });
+    writeDeclaration(repo, OAKMONT);
+    const reused = recordingPort();
+    expect(await shell([], reused.docker)).toBe(0);
+    expect(homeOf(reused)).not.toBe(homeOf(first));
+  });
+
   /** Plan the shell for `feature` through the real CLI path, then run git in the planned container. */
   async function expectGitWorksInPlannedContainer(mainRepo: string, feature: string): Promise<void> {
     const { docker, rec } = recordingPort();
