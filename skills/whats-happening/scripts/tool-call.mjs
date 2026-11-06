@@ -196,5 +196,5 @@ if (!Array.isArray(calls)) fail(`could not read MCP server ${server}: the status
 
 const result = answer(server, flags.ticket, flags.tool, calls);
 // The line is collapsed whole, so no value in it (a flag, a recorded ticket, phase, tool or outcome) can break it in two.
+// No process.exit() after the write: on a pipe it cuts a large write short, and the record's own words are kept whole.
 process.stdout.write(`${flags.json ? JSON.stringify(result.a) : oneLine(render(result, flags.ticket, flags.tool))}\n`);
-process.exit(0);
