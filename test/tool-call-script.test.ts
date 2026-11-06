@@ -7,7 +7,7 @@
 // The call shapes are copied field for field from test/mcp.test.ts (the real route bodies), so the
 // script is held to the shape the verb prints.
 import { describe, expect, test } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -125,7 +125,7 @@ describe("scenario: the desk explains a failed tool call in one line", () => {
     expect(line).toContain("workos__list_users");
     expect(line).toContain("approval-expired");
     expect(line).toContain(EXPIRED);
-    expect(line).toContain("Who can fix it: a workspace admin.");
+    expect(line).toContain("Who can fix it: see the explanation above, which mentions a workspace admin; read it as written.");
     expect(r.stderr).toBe("");
   });
 
@@ -170,36 +170,37 @@ describe("--json", () => {
       reason: "approval-expired",
       explanation: EXPIRED,
       at: new Date(DENIED_CALL.at).toISOString(),
-      fixer: { named: true, who: "a workspace admin" },
+      fixer: { named: true, who: "a workspace admin", roles: ["a workspace admin"], basis: "mentioned in the explanation" },
       window: { read: 3, limit: 50, unreadable: 0 },
       verdict: "failed",
     });
   });
 });
 
-describe("who can fix it", () => {
-  test("no explanation at all gets the labelled fallback, not an invented actor", () => {
-    for (const explanation of [null, undefined, "", "   "]) {
-      const { dir } = withRawCalls([{ ...PROVIDER_CALL, explanation }]);
-      const r = run(dir, ["workos"]);
-      expect(r.status).toBe(0);
-      expect(r.stdout).toContain(
-        "Who can fix it: the record names no one; a workspace owner or admin manages this workspace's MCP servers.",
-      );
-      const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { fixer: { named: boolean; who: string | null } };
-      expect(json.fixer).toEqual({ named: false, who: null });
-    }
-  });
-
+// The script does not decide who can fix a failure: that is free prose, and no rule over it is sound. The line shows
+// the explanation as the cloud wrote it and says only what is true by construction: which listed roles the
+// explanation mentions, that it mentions none, or that there is no explanation.
+describe("who can fix it: the line says what the explanation mentions and decides nothing", () => {
+  const MENTIONS = (roles: string) => `Who can fix it: see the explanation above, which mentions ${roles}; read it as written.`;
   const UNNAMED = "Who can fix it: the explanation does not name one.";
-  const whoSays = (explanation: string) => {
+  const NO_ONE_LINE = "Who can fix it: the record names no one; a workspace owner or admin manages this workspace's MCP servers.";
+  interface Fixer { named: boolean; who: string | null; roles: string[]; basis: string | null }
+  const fixerOf = (dir: string) => (JSON.parse(run(dir, ["workos", "--json"]).stdout) as { fixer: Fixer }).fixer;
+  const say = (explanation: string) => {
     const { dir } = withCalls([{ ...DENIED_CALL, explanation }]);
-    const r = run(dir, ["workos"]);
-    const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { fixer: { named: boolean; who: string | null } };
-    return { r, json };
+    return { r: run(dir, ["workos"]), fixer: fixerOf(dir) };
   };
 
-  test("an explanation that names no role says so, and adds no pointer the explanation may contradict", () => {
+  test("form 1, the canonical explanation: it mentions a workspace admin, and the line claims no more", () => {
+    const { dir } = withCalls([DENIED_CALL]);
+    const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
+    expect(lines(r.stdout)).toHaveLength(1);
+    expect(r.stdout).toContain(EXPIRED);
+    expect(r.stdout).toContain(MENTIONS("a workspace admin"));
+    expect(fixerOf(dir)).toEqual({ named: true, who: "a workspace admin", roles: ["a workspace admin"], basis: "mentioned in the explanation" });
+  });
+
+  test("form 2, an explanation that mentions no listed role: the line says it does not name one, with no pointer of its own", () => {
     const { dir } = withCalls([PROVIDER_CALL]);
     const r = run(dir, ["workos"]);
     expect(r.status).toBe(0);
@@ -208,80 +209,80 @@ describe("who can fix it", () => {
     expect(r.stdout).toContain(UNNAMED);
     expect(r.stdout).not.toContain("manages this workspace");
     expect(r.stdout).not.toContain("the record names no one");
-    const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { fixer: { named: boolean; who: string | null } };
-    expect(json.fixer).toEqual({ named: false, who: null });
+    expect(fixerOf(dir)).toEqual({ named: false, who: null, roles: [], basis: "explanation names none" });
   });
 
-  // A role is named only on an affirmative statement about it. A negation or a restriction anywhere in the
-  // sentence, or in any sentence that mentions the role, means the explanation does not say it can fix this.
-  test.each([
-    ["cannot, then only the provider", "A workspace admin cannot fix this; only the provider can restore the service."],
-    ["can't", "A workspace admin can't fix this."],
-    ["a curly apostrophe", "A workspace admin can\u2019t fix this."],
-    ["only if", "A workspace admin can fix this only if the provider restores the service first."],
-    ["unless", "A workspace admin can approve it unless the provider has blocked the key."],
-    ["no one", "No one can fix this from here; a workspace admin can only wait."],
-    ["no admin", "No workspace admin can fix this."],
-    ["unable", "A workspace admin is unable to fix this."],
-    ["neither nor", "Neither an owner nor an admin can fix this."],
-    ["do not ask", "Do not ask a workspace admin; ask the provider instead."],
-    ["a role mentioned in passing", "The approval page is managed by a workspace admin."],
-    ["a negated sentence anywhere vetoes the role", "A workspace admin can re-approve it. A workspace admin cannot grant new tools."],
-    ["the same role under another name is vetoed too", "A workspace admin cannot fix this. Ask your admin."],
-    ["one negation covers the whole sentence", "A workspace admin cannot fix this, but an operator can."],
-    // The explanation is read whole, never split into sentences: a restriction anywhere takes every role out.
-    ["a restriction in a later sentence", "A workspace admin can re-approve it. Only the provider can fix this failure."],
-    ["a restriction in an earlier sentence", "Only the provider can restore the service. A workspace admin can re-approve the key."],
-    ["a restriction after a semicolon", "Only the provider can fix this; an admin can retry it."],
-    ["a version string before a restriction", "A workspace admin can re-approve it on v1.2. Only the provider can fix this."],
-    ["a negation in an earlier sentence", "The approval was not granted. A workspace admin can grant it."],
-    ["a negation before a semicolon", "The key is not granted; a workspace admin can grant it."],
-    ["nobody, then ask", "Nobody can fix it. Ask your workspace admin."],
-    // Two different actors are ambiguous.
-    ["two different actors", "A workspace admin can re-approve it. An operator can restore the service."],
-    ["an owner or admin, then an admin alone", "An owner or admin can approve it. Ask your admin."],
-    // A modal alone is not a fix: the verb after it must be one the person would act on.
-    ["can see", "An admin can see this call in the audit list."],
-    ["can view", "A workspace admin can view the call."],
-    ["can list", "A workspace admin can list the calls."],
-    // Only a role the person is told to turn to, or who is said to fix it, is named.
-    ["have admin rights", "You have admin rights, but the provider must restore the service."],
-    ["have an admin do it", "Have an admin re-approve it."],
-    ["is able to is not a listed modal", "A workspace admin is able to fix this."],
-    ["ask, then a clause that is neither to, for nor the end", "Ask your workspace admin, who may know."],
-    // A role that belongs to someone else is not the workspace's.
-    ["a possessive owner", "The upstream server's owner can fix it."],
-    ["a possessive operator, curly apostrophe", "The provider\u2019s operator can fix it."],
-  ])("never names a role the explanation negates or restricts: %s", (_why, explanation) => {
-    const { r, json } = whoSays(explanation);
+  test("form 3, no explanation at all (null, absent, blank or not a string): the labelled fallback", () => {
+    for (const explanation of [null, undefined, "", "   ", 42]) {
+      const { dir } = withRawCalls([{ ...PROVIDER_CALL, explanation }]);
+      const r = run(dir, ["workos"]);
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(NO_ONE_LINE);
+      expect(fixerOf(dir)).toEqual({ named: false, who: null, roles: [], basis: "no explanation" });
+    }
+  });
+
+  // Every adversarial sentence the five rounds produced. None may make the line say a role can fix it: the line says
+  // "mentions" or "does not name one", always on one line, with the explanation in it as written.
+  const ADVERSARIAL = [
+    "A workspace admin cannot fix this; only the provider can restore the service.",
+    "A workspace admin can retry the call, but the upstream server is still down. The provider must restore it.",
+    "Only the provider can fix this; an admin can retry it.",
+    "Nobody can fix it. Ask your workspace admin.",
+    "The upstream server's owner can fix it.",
+    "You have admin rights, but the provider must restore the service.",
+    "A workspace admin can't fix this.",
+    "A workspace admin can’t fix this.",
+    "A workspace admin can fix this only if the provider restores the service first.",
+    "A workspace admin can approve it unless the provider has blocked the key.",
+    "No one can fix this from here; a workspace admin can only wait.",
+    "No workspace admin can fix this.",
+    "A workspace admin is unable to fix this.",
+    "Neither an owner nor an admin can fix this.",
+    "Do not ask a workspace admin; ask the provider instead.",
+    "The approval page is managed by a workspace admin.",
+    "A workspace admin can re-approve it. A workspace admin cannot grant new tools.",
+    "A workspace admin cannot fix this. Ask your admin.",
+    "A workspace admin cannot fix this, but an operator can.",
+    "A workspace admin can re-approve it. Only the provider can fix this failure.",
+    "Only the provider can restore the service. A workspace admin can re-approve the key.",
+    "A workspace admin can re-approve it on v1.2. Only the provider can fix this.",
+    "A workspace admin can re-approve it. An operator can restore the service.",
+    "An admin can see this call in the audit list.",
+    "A workspace admin can list the calls.",
+    "Have an admin re-approve it.",
+    "A workspace admin is able to fix this.",
+    "Ask your workspace admin, who may know.",
+    "The provider’s operator can fix it.",
+    "The approval was not granted. A workspace admin can grant it.",
+  ];
+  test.each(ADVERSARIAL)("never says a role can fix it: %s", (explanation) => {
+    const { r, fixer } = say(explanation);
     expect(r.status).toBe(0);
     expect(lines(r.stdout)).toHaveLength(1);
-    expect(r.stdout).toContain(UNNAMED);
-    expect(r.stdout).not.toMatch(/Who can fix it: (?:an?|the|your) (?:workspace |account )?(?:owner|admin|operator)/);
-    expect(json.fixer).toEqual({ named: false, who: null });
+    expect(r.stdout).toContain(explanation);
+    for (const claim of ["Who can fix it: a workspace admin", "Who can fix it: an admin", "Who can fix it: an owner", "Who can fix it: an operator", "Who can fix it: your", "Who can fix it: the workspace"])
+      expect(r.stdout).not.toContain(claim);
+    expect(r.stdout).toMatch(/Who can fix it: (?:see the explanation above, which mentions [^;]+; read it as written|the explanation does not name one)\./);
+    expect(fixer.basis).toMatch(/^(?:mentioned in the explanation|explanation names none)$/);
+    expect(fixer.named).toBe(fixer.roles.length > 0);
+    expect(fixer.who).toBe(fixer.roles[0] ?? null);
   });
 
+  // The roles listed are the roles the explanation mentions, each once, in order of first mention, as written.
   test.each([
-    ["Ask your workspace owner to reconnect it.", "your workspace owner"],
-    ["An operator can lift the hold.", "an operator"],
-    ["A workspace owner or admin can approve it.", "a workspace owner or admin"],
-    ["Ask the account admin.", "the account admin"],
-    ["Only an owner can re-grant it.", "an owner"],
-    ["Contact your workspace admin to re-approve it.", "your workspace admin"],
-    ["The workspace owner must reconnect the server.", "the workspace owner"],
-    ["An owner or admin can approve it.", "an owner or admin"],
-    ["A workspace admin needs to re-approve it.", "a workspace admin"],
-    ["Only a workspace admin can re-approve it.", "a workspace admin"],
-    ["Ask your workspace admin to retry.", "your workspace admin"],
-    ["Ask your workspace admin for help.", "your workspace admin"],
-    ["Contact an operator.", "an operator"],
-    ["A workspace admin may reapprove it on the account's Connections page.", "a workspace admin"],
-    ["A workspace admin can re-approve it. Ask your workspace admin.", "a workspace admin"],
-  ])("takes the actor the explanation names: %s", (explanation, who) => {
-    const { dir } = withCalls([{ ...DENIED_CALL, explanation }]);
-    const r = run(dir, ["workos", "--json"]);
-    const out = JSON.parse(r.stdout) as { fixer: { named: boolean; who: string } };
-    expect(out.fixer).toEqual({ named: true, who });
+    ["A workspace admin can re-approve it. An operator can restore the service.", ["a workspace admin", "an operator"], "a workspace admin and an operator"],
+    ["Ask your workspace owner to reconnect it.", ["your workspace owner"], "your workspace owner"],
+    ["A workspace admin can re-approve it. Ask your workspace admin.", ["a workspace admin"], "a workspace admin"],
+    ["An owner or admin can approve it.", ["an owner or admin"], "an owner or admin"],
+    ["The upstream server's owner can fix it.", ["an owner"], "an owner"],
+    ["Ask the ACCOUNT ADMIN.", ["the account admin"], "the account admin"],
+    ["A workspace owner, an admin and an operator are listed.", ["a workspace owner", "an admin", "an operator"], "a workspace owner, an admin and an operator"],
+  ])("form 1 lists what is mentioned: %s", (explanation, roles, phrase) => {
+    const { r, fixer } = say(explanation);
+    expect(lines(r.stdout)).toHaveLength(1);
+    expect(r.stdout).toContain(`Who can fix it: see the explanation above, which mentions ${phrase}; read it as written.`);
+    expect(fixer).toEqual({ named: true, who: roles[0], roles, basis: "mentioned in the explanation" });
   });
 });
 
@@ -486,7 +487,7 @@ describe("a recorded call with a field of the wrong type", () => {
     ["an object with a non-callable toString", { toString: 5 }],
     ["a nested object", { a: { b: 1 } }],
   ];
-  interface Out { server: string; ticket: string | null; phase: string | null; tool: string | null; outcome: string | null; reason: string | null; explanation: string | null; at: string | null; fixer: { named: boolean; who: string | null }; window: { read: number; limit: number; unreadable: number }; verdict: string }
+  interface Out { server: string; ticket: string | null; phase: string | null; tool: string | null; outcome: string | null; reason: string | null; explanation: string | null; at: string | null; fixer: { named: boolean; who: string | null; roles: string[]; basis: string | null }; window: { read: number; limit: number; unreadable: number }; verdict: string }
   const json = (dir: string, args: string[] = []) => JSON.parse(run(dir, ["workos", ...args, "--json"]).stdout) as Out;
   // Nothing but a clean exit and one line of text: no crash, no stack trace, no value printed raw.
   const clean = (r: ReturnType<typeof run>, why: string) => {
@@ -539,7 +540,7 @@ describe("a recorded call with a field of the wrong type", () => {
   // The other fields are read by type: a value of the wrong type is absent, and the call is still reported.
   const OPTIONAL: [string, (bad: unknown) => unknown, Partial<Out>][] = [
     ["denied_reason", (bad) => ({ ...DENIED_CALL, denied_reason: bad }), { reason: "denied" }],
-    ["explanation", (bad) => ({ ...DENIED_CALL, explanation: bad }), { explanation: null, fixer: { named: false, who: null } }],
+    ["explanation", (bad) => ({ ...DENIED_CALL, explanation: bad }), { explanation: null, fixer: { named: false, who: null, roles: [], basis: "no explanation" } }],
     ["dispatch", (bad) => ({ ...DENIED_CALL, dispatch: bad }), { ticket: null, phase: null }],
     ["dispatch.ticket", (bad) => ({ ...DENIED_CALL, dispatch: { ticket: bad, phase: "implement", generation: 3 } }), { ticket: null }],
     ["dispatch.phase", (bad) => ({ ...DENIED_CALL, dispatch: { ticket: "CTC-1234", phase: bad, generation: 3 } }), { phase: null }],
@@ -547,7 +548,7 @@ describe("a recorded call with a field of the wrong type", () => {
   ];
   const EXPECTED: Out = {
     server: "workos", ticket: "CTC-1234", phase: "implement", tool: "workos__list_users", outcome: "denied", reason: "approval-expired",
-    explanation: EXPIRED, at: new Date(DENIED_CALL.at).toISOString(), fixer: { named: true, who: "a workspace admin" },
+    explanation: EXPIRED, at: new Date(DENIED_CALL.at).toISOString(), fixer: { named: true, who: "a workspace admin", roles: ["a workspace admin"], basis: "mentioned in the explanation" },
     window: { read: 1, limit: 50, unreadable: 0 }, verdict: "failed",
   };
   test.each(
@@ -619,7 +620,7 @@ describe("records the script could not read are counted and never hidden", () =>
     expect(r.status).toBe(0);
     expect(lines(r.stdout)).toHaveLength(1);
     expect(r.stdout).toContain("workos__list_users on workos failed (denied)");
-    expect(r.stdout).toContain("Who can fix it: a workspace admin.");
+    expect(r.stdout).toContain("Who can fix it: see the explanation above, which mentions a workspace admin; read it as written.");
     expect(r.stdout).toContain("2 other recorded calls could not be read, so this may not be the newest failure");
     const json = JSON.parse(run(dir, ["workos", "--ticket", "CTC-1234", "--json"]).stdout) as { verdict: string; window: unknown };
     expect(json.verdict).toBe("failed");
@@ -754,7 +755,7 @@ describe("a call that has not finished is neither a failure nor a success", () =
     const r = run(dir, ["workos", "--ticket", "CTC-1234"]);
     expect(lines(r.stdout)).toHaveLength(1);
     expect(r.stdout).toContain("workos__list_users on workos failed (denied)");
-    expect(r.stdout).toContain("Who can fix it: a workspace admin. A newer call is still running, so it has not finished.");
+    expect(r.stdout).toContain("read it as written. A newer call is still running, so it has not finished.");
     expect(answerOf(dir, ["--ticket", "CTC-1234"])).toMatchObject({ verdict: "failed", outcome: "denied" });
   });
 
@@ -774,7 +775,7 @@ describe("a very long explanation", () => {
     const r = run(dir, ["workos"]);
     expect(r.stdout).toMatch(ONE_LINE);
     expect(r.stdout).toContain(explanation);
-    expect(r.stdout).toContain("Who can fix it: a workspace admin.");
+    expect(r.stdout).toContain("Who can fix it: see the explanation above, which mentions a workspace admin; read it as written.");
     const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { explanation: string };
     expect(json.explanation).toBe(explanation);
   });
@@ -787,7 +788,7 @@ describe("a very long explanation", () => {
     expect(r.stdout.length).toBeGreaterThan(2 * 65536);
     expect(r.stdout).toMatch(ONE_LINE);
     expect(r.stdout).toContain(explanation);
-    expect(r.stdout.endsWith("Who can fix it: a workspace admin.\n")).toBe(true);
+    expect(r.stdout.endsWith("which mentions a workspace admin; read it as written.\n")).toBe(true);
     const json = JSON.parse(run(dir, ["workos", "--json"]).stdout) as { explanation: string };
     expect(json.explanation).toBe(explanation);
   });
@@ -872,6 +873,57 @@ describe("a read that fails", () => {
     const r = run(dir, ["workos"]);
     expect(r.status).toBe(2);
     expect(calls()).toEqual([]);
+  });
+});
+
+describe("a refusal is one line on stderr, whole, and nothing on stdout", () => {
+  const oneStderrLine = (r: ReturnType<typeof run>) => {
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toMatch(ONE_LINE);
+  };
+
+  test("a body that is not JSON and has line breaks in it", () => {
+    const { dir } = setup({ stdout: "this is\nnot json\r\nat all" });
+    const r = run(dir, ["workos"]);
+    oneStderrLine(r);
+    expect(r.stderr).toContain("could not parse the MCP status as JSON: this is not json at all");
+  });
+
+  test("a name that is not a server name and has a line break in it", () => {
+    const { dir } = withCalls([]);
+    const r = run(dir, ["9\n!"]);
+    oneStderrLine(r);
+    expect(r.stderr).toContain("is not a server name");
+  });
+
+  test("a CLI error with line breaks, and one far longer than a pipe holds, is one whole line", () => {
+    const long = "the portal refused the key ".repeat(8000).trim();
+    for (const stderr of [`first\n\nsecond\r\nthird`, long]) {
+      const { dir } = setup({ code: 1, stderr });
+      const r = run(dir, ["workos"]);
+      oneStderrLine(r);
+      expect(r.stderr).toContain(`could not read MCP server workos: ${stderr.startsWith("first") ? "first" : long}`);
+    }
+  });
+
+  test("a status that is not the shape the script knows", () => {
+    const { dir } = setup({ stdout: JSON.stringify({ status: {}, calls: { calls: "no" } }) });
+    oneStderrLine(run(dir, ["workos"]));
+  });
+});
+
+// A reader that closes early (`| head -c 20`) must not turn the script's own output into a stack trace and exit 1.
+describe("a reader that closes the pipe early", () => {
+  test("is not an error: exit 0, nothing on stderr", async () => {
+    const { dir } = withCalls([DENIED_CALL]);
+    const child = spawn(process.execPath, [script, "workos"], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CATALYST_SKILLS_HOME: dir } });
+    let stderr = "";
+    child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+    child.stdout.destroy();
+    const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
   });
 });
 
