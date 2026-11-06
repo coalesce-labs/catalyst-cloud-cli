@@ -33,7 +33,8 @@ function actorIn(explanation) {
   return `${m[1]?.toLowerCase() ?? (/^[aeiou]/.test(actor) ? "an" : "a")} ${actor}`;
 }
 
-const when = (at) => (Number.isFinite(new Date(at).getTime()) ? new Date(at).toISOString() : null);
+// Only a numeric timestamp counts, as in the verb: new Date(null) is the epoch, and the line must not print it.
+const when = (at) => (typeof at === "number" && Number.isFinite(new Date(at).getTime()) ? new Date(at).toISOString() : null);
 
 /** The answer for one read: the fields of the call it rests on, a verdict, and the reason as the verb prints it. */
 function answer(server, ticket, tool, calls) {
