@@ -37,8 +37,8 @@ const oneLine = (s) => s.replace(/\s+/g, " ").trim();
 const text = (v) => (typeof v === "string" && oneLine(v) ? oneLine(v) : null);
 /** A plain object: the only shape a recorded call, or its dispatch, can have. */
 const isRecord = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-/** A string that says something, as the route sent it; any other type, and a blank string, is absent. */
-const str = (v) => (typeof v === "string" && v.trim() ? v : null);
+/** A string that says something, without the spaces around it (" ok " is ok); any other type, and a blank string, is absent. */
+const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
 const sentence = (s) => (/[.!?]$/.test(s) ? s : `${s}.`);
 const normaliseServer = (raw) =>
   raw.trim().toLowerCase().replace(/[\s.]+/g, "-").replace(/[^a-z0-9_-]/g, "");
