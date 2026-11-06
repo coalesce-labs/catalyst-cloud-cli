@@ -2,11 +2,11 @@
 
 ## 0.16.47
 
-`catalyst env shell` now gives each checkout of each repository its own home volume, so repositories on the same image no longer share `/home/catalyst`. Your first shell in each checkout starts with a fresh home, so toolchains download again and shell history starts over. A moved checkout also gets a fresh home, and a directory with no `.git` gets a home that is removed when the shell exits.
+`catalyst env shell` now gives each checkout of each repository its own home volume, so repositories on the same image no longer share `/home/catalyst`. Your first shell in each checkout starts with a fresh home, so toolchains download again and shell history starts over. A moved checkout also gets a fresh home, and a directory with no `.git`, or a checkout on a filesystem that reports no creation time, gets a home that is removed when the shell exits.
 
 The old shared volumes stay on your machine and are never mounted again. To remove them, run `docker volume ls --filter name=catalyst-env-home-` and `docker volume rm` each name that ends after 12 hex characters.
 
-`catalyst env shell` no longer prints part of your registry credential when Docker's error for an image download is long. The credential is now removed before the line is shortened, and a line with terminal control codes is withheld.
+`catalyst env shell` could print part of the short-lived download credential your workspace issued when an image download failed, and no longer does. That credential expires on its own. An error with terminal control codes now shows as `docker pull failed`.
 
 The first image download in `catalyst env shell` now works through a named Docker context that uses TLS, whether you set `DOCKER_CONTEXT` or ran `docker context use`.
 
