@@ -2,9 +2,9 @@
 
 ## 0.16.48
 
-`catalyst mcp add`, `list` and `remove` work again. They had stopped with an error saying the contract could not be read, because the contract lists a route with an HTTP method this CLI's SDK did not know. Update the CLI; nothing else changes.
+`catalyst mcp add`, `list` and `remove` work again. They had stopped with an error saying the contract could not be read, because the contract lists a route with an HTTP method this CLI's SDK did not know. Update the CLI to get this fix.
 
-Your agents can now say in one line why a tool call to a connected MCP server failed: the ticket, the tool, the date of the call, the reason your workspace recorded, and what its explanation says about who can fix it. If no server is registered under the name you gave, the line says so and asks for the exact name.
+Your agents can now say in one line why a tool call to a connected MCP server failed: the ticket, the tool, the date of the call, the reason your workspace recorded, and what its explanation says about who can fix it. If no server is registered under the name you gave, the line says so and asks for the exact name. This ships in the Cloud skills pack: `catalyst update` moves an installed pack, and copied skills need `npx skills update`.
 
 ## 0.16.47
 
