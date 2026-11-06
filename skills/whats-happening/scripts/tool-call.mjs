@@ -15,6 +15,9 @@ const LIMIT = 50; // the verb reads the newest 50 calls, no further back
 const SERVER_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 // Nothing the CLI wrote reaches a refusal: its words can hold a banned word, a route, an address or an instruction the
 // skill must not give. Each refusal is a fixed sentence that names the validated server and the CLI's exit code only.
+// The CLI's own not-connected lines (src/config.ts, src/oauth.ts) start the line. `mcp status` also exits 2 for portal refusals
+// that carry the cloud's words ("... (portal not configured)"), which never start a line that way.
+const CLI_NOT_CONNECTED = /^(not connected|this machine is not connected)\b/im;
 const NOT_CONNECTED = `not connected (this machine is not joined to a workspace) — run: ${CONNECT_COMMAND}`;
 
 // Who can fix a failure is not decided here. The explanation is free prose, and no rule over it is sound: negations,
@@ -185,7 +188,7 @@ try {
   const server = normaliseServer(positionals[0]);
   if (!SERVER_NAME.test(server)) fail("that is not a server name (lowercase letters, digits, - and _, starting with a letter)");
 
-  const r = runCli(["mcp", "status", server, "--json"], { say: () => NOT_CONNECTED });
+  const r = runCli(["mcp", "status", server, "--json"], { say: () => NOT_CONNECTED, notConnected: CLI_NOT_CONNECTED });
   if (r.code === 3) {
     fail(
       `could not read MCP server ${server}: either this workspace registered it under another name or this Catalyst Cloud does not serve tool-call records yet. A workspace owner or admin can list the names with \`catalyst mcp list\`.`,
