@@ -201,7 +201,8 @@ export async function runEnvShell(args: ParsedArgs, ctx: Ctx, deps: EnvShellDeps
     credential = downloaded.credential;
   }
 
-  // 7. Git common directory: a worktree's shared .git outside the root is mounted at its own path.
+  // 7. Git common directory: a worktree's shared .git outside the root is mounted at its own path
+  //    (absolute `gitdir:` pointers) and at the place a relative pointer resolves from /workspace.
   const commonDir = await (deps.gitCommonDir ?? defaultGitCommonDir)(root);
   let gitCommonDir: string | null = null;
   if (commonDir !== null) {
