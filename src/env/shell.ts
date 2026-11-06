@@ -196,12 +196,13 @@ export async function runEnvShell(args: ParsedArgs, ctx: Ctx, deps: EnvShellDeps
               message: "Docker's current context could not be read. Check it with docker context ls, then run catalyst env shell again.",
             },
       );
-    const downloaded = await downloadImage({ ref: image, host: endpoint.host, root, ctx, docker, notify: notice, readRepositoryName });
+    const downloaded = await downloadImage({ ref: image, endpoint, root, ctx, docker, notify: notice, readRepositoryName });
     if (!downloaded.ok) return refuse(downloaded.refusal);
     credential = downloaded.credential;
   }
 
-  // 7. Git common directory: a worktree's shared .git outside the root is mounted at its own path.
+  // 7. Git common directory: a worktree's shared .git outside the root is mounted at its own path
+  //    (absolute `gitdir:` pointers) and at the place a relative pointer resolves from /workspace.
   const commonDir = await (deps.gitCommonDir ?? defaultGitCommonDir)(root);
   let gitCommonDir: string | null = null;
   if (commonDir !== null) {

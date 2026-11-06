@@ -78,13 +78,65 @@ test("check mode: neither -i nor -t; CATALYST_ENV_NAMES carries the declared nam
   expect(argv.slice(-4)).toEqual(["catalyst-env-shell", "check", "node@22", "bun@1.3.14"]);
 });
 
-test("a worktree's git common dir outside the root is mounted at the same absolute path", () => {
-  const argv = shellRunArgs({ ...base, mode: "shell", tty: false, gitCommonDir: "/Users/ana/src/web-main/.git" });
-  const mounts = argv.flatMap((word, i) => (word === "--mount" ? [argv[i + 1]] : []));
-  expect(mounts).toEqual([
+const HOME_MOUNT = "type=volume,src=catalyst-env-home-a19f7b0859a9,dst=/home/catalyst";
+
+/** The `--mount` words of the shell argv for a checkout at `root` whose git common dir is `gitCommonDir`. */
+function mountsFor(root: string, gitCommonDir: string): string[] {
+  const argv = shellRunArgs({ ...base, mode: "shell", tty: false, root, gitCommonDir });
+  return argv.flatMap((word, i) => {
+    const next = argv[i + 1];
+    return word === "--mount" && next !== undefined ? [next] : [];
+  });
+}
+
+test("a worktree's git common dir outside the root is mounted at its absolute path and where a relative pointer lands", () => {
+  expect(mountsFor("/Users/ana/src/web", "/Users/ana/src/web-main/.git")).toEqual([
     "type=bind,src=/Users/ana/src/web,dst=/workspace",
     "type=bind,src=/Users/ana/src/web-main/.git,dst=/Users/ana/src/web-main/.git",
-    "type=volume,src=catalyst-env-home-a19f7b0859a9,dst=/home/catalyst",
+    "type=bind,src=/Users/ana/src/web-main/.git,dst=/web-main/.git",
+    HOME_MOUNT,
+  ]);
+});
+
+test("CTC-6156: a sibling worktree's relative .git pointer finds the common dir under /workspace/..", () => {
+  // /repos/feature/.git says `gitdir: ../main/.git/worktrees/feature`; at /workspace that is /main/.git/...
+  expect(mountsFor("/repos/feature", "/repos/main/.git")).toEqual([
+    "type=bind,src=/repos/feature,dst=/workspace",
+    "type=bind,src=/repos/main/.git,dst=/repos/main/.git",
+    "type=bind,src=/repos/main/.git,dst=/main/.git",
+    HOME_MOUNT,
+  ]);
+});
+
+test("CTC-6156: .. past the container's root clamps at / like the kernel does", () => {
+  // ../../../main/.git from /workspace is /main/.git, the same place git looks in the container.
+  expect(mountsFor("/a/b/c/feature", "/a/main/.git")).toContain("type=bind,src=/a/main/.git,dst=/main/.git");
+});
+
+test.each([
+  ["dst / (a bare repo holding its worktrees)", "/srv/repo.git/wt", "/srv/repo.git"],
+  ["dst /home, an ancestor of the home volume", "/x/feature", "/x/home"],
+  ["dst /usr, a system directory", "/x/feature", "/x/usr"],
+  ["dst /workspace, the checkout itself", "/x/feature", "/x/workspace"],
+  ["dst inside /workspace", "/x/a", "/x/workspace/.git"],
+  ["dst inside the home volume", "/x/a", "/x/home/catalyst/.git"],
+  ["dst inside /proc", "/x/a", "/x/proc/.git"],
+  ["dst equal to the host-path mount", "/workspace", "/main/.git"],
+  ["a Windows host path, not POSIX", "C:\\src\\web", "C:\\src\\web-main\\.git"],
+])("CTC-6156: no relative-pointer mount when %s", (_why, root, gitCommonDir) => {
+  expect(mountsFor(root, gitCommonDir)).toEqual([
+    `type=bind,src=${root},dst=/workspace`,
+    `type=bind,src=${gitCommonDir},dst=${gitCommonDir}`,
+    HOME_MOUNT,
+  ]);
+});
+
+test("CTC-6156: a destination inside a system directory is allowed when it covers nothing", () => {
+  expect(mountsFor("/x/feature", "/x/etc/repo/.git")).toEqual([
+    "type=bind,src=/x/feature,dst=/workspace",
+    "type=bind,src=/x/etc/repo/.git,dst=/x/etc/repo/.git",
+    "type=bind,src=/x/etc/repo/.git,dst=/etc/repo/.git",
+    HOME_MOUNT,
   ]);
 });
 

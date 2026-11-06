@@ -2,9 +2,9 @@
 // it, is the image here, one download through a throwaway config, and the container itself. Modelled
 // on onboard-runner.ts's spawnDocker, endpoint rule and anonymous pull.
 import { spawn, type StdioOptions } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { constants, homedir, tmpdir as osTmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 /** Exactly what the download's throwaway Docker config holds. */
 export interface DockerConfigJson {
@@ -17,12 +17,19 @@ export type EnvShellServer =
   | { state: "not_running" }
   | { state: "not_linux"; os: string };
 
+/** Where the engine is: a host for DOCKER_HOST or the default context, plus the name of a named context. */
+export interface EnvShellEndpoint {
+  host: string;
+  context?: string;
+}
+
 export interface EnvShellDocker {
   server(): Promise<EnvShellServer>;
-  endpoint(): Promise<{ ok: true; host: string } | { ok: false; reason: "conflict" | "unreadable" }>;
+  endpoint(): Promise<({ ok: true } & EnvShellEndpoint) | { ok: false; reason: "conflict" | "unreadable" }>;
   imagePresent(ref: string): Promise<boolean>;
-  /** One pull through a throwaway config holding exactly `config`; the directory is removed in `finally`. */
-  pull(ref: string, host: string, config: DockerConfigJson): Promise<{ ok: boolean; detail: string }>;
+  /** One pull through a throwaway config holding exactly `config`; the directory is removed in `finally`. A named
+   *  context is pulled through by name, with the developer's context store linked in, so Docker applies its TLS. */
+  pull(ref: string, endpoint: EnvShellEndpoint, config: DockerConfigJson): Promise<{ ok: boolean; detail: string }>;
   run(argv: string[], env: NodeJS.ProcessEnv, mode: "interactive" | "capture"): Promise<{ code: number; stdout: string }>;
 }
 
@@ -187,15 +194,18 @@ export function spawnEnvShellDocker(deps: { env: NodeJS.ProcessEnv; tmpdir?: () 
         "inspect",
         ...(env.DOCKER_CONTEXT ? [env.DOCKER_CONTEXT] : []),
         "--format",
-        '{{(index .Endpoints "docker").Host}}',
+        // The name, a tab, then the host. Docker context names cannot contain a tab.
+        '{{.Name}}{{"\\t"}}{{(index .Endpoints "docker").Host}}',
       ]);
-      const host = read.stdout.trim();
-      return read.code === 0 && host !== "" ? { ok: true, host } : { ok: false, reason: "unreadable" };
+      const [name = "", host = ""] = read.stdout.trim().split("\t").map((part) => part.trim());
+      if (read.code !== 0 || host === "") return { ok: false, reason: "unreadable" };
+      // `default` is Docker's built-in context, resolved from the environment: the explicit-host pull covers it.
+      return name !== "" && name !== "default" ? { ok: true, host, context: name } : { ok: true, host };
     },
     async imagePresent(ref) {
       return (await quiet(["image", "inspect", "--format", "{{.Id}}", ref])).code === 0;
     },
-    async pull(ref, host, config) {
+    async pull(ref, endpoint, config) {
       // The config is the only channel for the credential, so nothing it holds may come back in `detail`.
       const secrets = secretsOf(config);
       let dir: string | undefined;
@@ -203,16 +213,25 @@ export function spawnEnvShellDocker(deps: { env: NodeJS.ProcessEnv; tmpdir?: () 
         // mkdtemp creates the directory 0700; the file is 0600 and holds nothing else.
         dir = mkdtempSync(join((deps.tmpdir ?? osTmpdir)(), "catalyst-env-pull-"));
         writeFileSync(join(dir, "config.json"), JSON.stringify(config), { mode: 0o600 });
+        const developerConfig = env.DOCKER_CONFIG || join(env.HOME || homedir(), ".docker");
+        if (endpoint.context) {
+          // `--config` moves Docker's context store with it, and `--host` would mean the default context: link the
+          // developer's own store in and pull through the context by name, so its endpoint, TLS files and
+          // SkipTLSVerify apply exactly as for every other docker command. rmSync removes the link, never the store.
+          symlinkSync(resolve(developerConfig, "contexts"), join(dir, "contexts"), "junction");
+        }
         const pullEnv: NodeJS.ProcessEnv = {
           ...env,
           DOCKER_CONFIG: dir,
-          // A TLS endpoint keeps the developer's own certificates although the config moved.
-          DOCKER_CERT_PATH: env.DOCKER_CERT_PATH || env.DOCKER_CONFIG || join(env.HOME || homedir(), ".docker"),
+          // An explicit host is Docker's default context, whose TLS comes from DOCKER_TLS_VERIFY and DOCKER_CERT_PATH:
+          // keep the developer's certificates although the config moved.
+          DOCKER_CERT_PATH: env.DOCKER_CERT_PATH || developerConfig,
         };
         delete pullEnv.DOCKER_CONTEXT;
         delete pullEnv.DOCKER_AUTH_CONFIG;
+        const selector = endpoint.context ? ["--context", endpoint.context] : ["--host", endpoint.host];
         // Progress goes to our stderr, so `--json` stdout stays one line; the error stream is kept.
-        const result = await spawnWait(["--host", host, "--config", dir, "pull", ref], {
+        const result = await spawnWait([...selector, "--config", dir, "pull", ref], {
           env: pullEnv,
           stdio: ["ignore", 2, "pipe"],
           timeoutMs: 3_600_000,

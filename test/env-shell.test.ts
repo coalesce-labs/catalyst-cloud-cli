@@ -1,9 +1,9 @@
 // env-shell.test.ts — CTC-3550: `catalyst env shell [--check]` end to end through main(), against a
 // recording Docker port and, for the credential fallback, the fixture cloud. No Docker engine runs.
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { main } from "../src/cli";
 import type { DockerConfigJson, EnvShellDocker, EnvShellServer } from "../src/env/shell-docker";
@@ -34,7 +34,7 @@ const RESOLVED: Record<string, string> = { "node@22": "22.23.3", "bun@1.3.14": "
 
 interface Recorded {
   calls: string[];
-  pulls: { ref: string; host: string; config: DockerConfigJson }[];
+  pulls: { ref: string; host: string; context?: string; config: DockerConfigJson }[];
   runs: { argv: string[]; env: NodeJS.ProcessEnv; mode: "interactive" | "capture" }[];
 }
 
@@ -81,9 +81,14 @@ function recordingPort(
         rec.calls.push("imagePresent");
         return present;
       },
-      pull: async (ref, host, config) => {
+      pull: async (ref, endpoint, config) => {
         rec.calls.push("pull");
-        rec.pulls.push({ ref, host, config: structuredClone(config) });
+        rec.pulls.push({
+          ref,
+          host: endpoint.host,
+          ...(endpoint.context ? { context: endpoint.context } : {}),
+          config: structuredClone(config),
+        });
         const answer = pulls.shift() ?? { ok: false, detail: "no more pulls" };
         if (answer.ok) present = true;
         return answer;
@@ -114,6 +119,67 @@ beforeEach(() => {
   ctx = makeCtx(home, { env: { CATALYST_SKILLS_OFFLINE: "1", PATH: process.env.PATH, ...VALUES } });
 });
 afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+// Real git for the worktree tests (CTC-6156). `git worktree add -h` lists --relative-paths from git 2.48.
+const gitEnv = { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+const runGit = (cwd: string, ...args: string[]) => spawnSync("git", args, { cwd, env: gitEnv, encoding: "utf8" });
+const hasGit = spawnSync("git", ["--version"]).status === 0;
+// -h prints its usage and exits 129: read both streams.
+const worktreeHelp = hasGit ? spawnSync("git", ["worktree", "add", "-h"], { encoding: "utf8" }) : undefined;
+const gitRelativePaths = worktreeHelp !== undefined && /relative-paths/.test(`${worktreeHelp.stdout}${worktreeHelp.stderr}`);
+
+/** A repository `main` with one commit and a linked worktree `feature` beside it, both under `parent`.
+ *  "hand" rewrites feature/.git to a relative pointer (any git since 1.7.0 reads it); "git" asks git for one. */
+function mainRepoWithWorktree(parent: string, relativeBy: "hand" | "git"): { main: string; feature: string } {
+  const mainDir = join(parent, "main");
+  const feature = join(parent, "feature");
+  const ok = (r: ReturnType<typeof runGit>) => {
+    if (r.status !== 0) throw new Error(`git failed: ${r.stderr}`);
+  };
+  ok(runGit(parent, "init", "-q", "-b", "main", mainDir));
+  writeFileSync(join(mainDir, "a.txt"), "a\n");
+  ok(runGit(mainDir, "add", "."));
+  ok(runGit(mainDir, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "first"));
+  ok(runGit(mainDir, "worktree", "add", "-q", ...(relativeBy === "git" ? ["--relative-paths"] : []), "-b", "feature", feature));
+  if (relativeBy === "hand") {
+    const gitdir = realpathSync(join(mainDir, ".git", "worktrees", "feature"));
+    writeFileSync(join(feature, ".git"), `gitdir: ${posix.relative(feature, gitdir)}\n`);
+  }
+  writeDeclaration(feature, OAKMONT);
+  return { main: mainDir, feature };
+}
+
+/** The container's filesystem as far as git can tell: each bind mount of the argv copied to its dst under a
+ *  fresh root. Copies, not symlinks: a symlink lets `..` resolve on the host, which hides this bug. */
+function containerFrom(argv: string[]): string {
+  const ctr = realpathSync(mkdtempSync(join(tmpdir(), "catalyst-env-ctr-")));
+  try {
+    argv.forEach((word, i) => {
+      if (argv[i - 1] !== "--mount") return;
+      const fields = new Map(
+        word.split(",").map((field): [string, string] => [field.slice(0, field.indexOf("=")), field.slice(field.indexOf("=") + 1)]),
+      );
+      const src = fields.get("src");
+      const dst = fields.get("dst");
+      if (fields.get("type") !== "bind" || src === undefined || dst === undefined) return;
+      mkdirSync(dirname(join(ctr, dst)), { recursive: true });
+      cpSync(src, join(ctr, dst), { recursive: true });
+    });
+  } catch (error) {
+    rmSync(ctr, { recursive: true, force: true });
+    throw error;
+  }
+  return ctr;
+}
+
+/** git run in the stand-in's /workspace with the container's own git env (shell-plan.ts: safe.directory=*).
+ *  The ceiling keeps discovery from walking out of the stand-in onto the host. */
+const gitIn = (ctr: string, ...args: string[]) =>
+  spawnSync("git", args, {
+    cwd: join(ctr, "workspace"),
+    env: { ...gitEnv, GIT_CEILING_DIRECTORIES: ctr, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: "*" },
+    encoding: "utf8",
+  });
 
 function deps(docker: EnvShellDocker, over: Partial<EnvShellDeps> = {}) {
   return {
@@ -236,6 +302,14 @@ describe("catalyst env shell --check", () => {
     expect(await shell(["--check", "--json"], present.docker)).toBe(0);
     expect(present.rec.calls).not.toContain("pull");
     expect(JSON.parse(ctx.out[0] ?? "").image.source).toBe("present");
+  });
+
+  test("a named Docker context from endpoint() reaches the download (CTC-6154)", async () => {
+    const HOST_TLS = "tcp://remote.example:2376";
+    const { docker, rec } = recordingPort({ present: false, endpoint: { ok: true, host: HOST_TLS, context: "remote-tls" } });
+    expect(await shell(["--check"], docker)).toBe(0);
+    expect(rec.pulls).toHaveLength(1);
+    expect(rec.pulls[0]).toMatchObject({ host: HOST_TLS, context: "remote-tls" });
   });
 
   test("works with no customer.json (not signed in) for Catalyst's image", async () => {
@@ -463,6 +537,37 @@ describe("catalyst env shell (interactive)", () => {
     } finally {
       rmSync(common, { recursive: true, force: true });
     }
+  });
+
+  /** Plan the shell for `feature` through the real CLI path, then run git in the planned container. */
+  async function expectGitWorksInPlannedContainer(mainRepo: string, feature: string): Promise<void> {
+    const { docker, rec } = recordingPort();
+    expect(await main(["env", "shell", "--root", feature], ctx, deps(docker, { gitCommonDir: undefined }))).toBe(0);
+    const argv = rec.runs[0]?.argv ?? [];
+    // absolute pointers still resolve: the host-path mount is kept
+    expect(argv).toContain(`type=bind,src=${join(mainRepo, ".git")},dst=${join(mainRepo, ".git")}`);
+    const ctr = containerFrom(argv);
+    try {
+      const top = gitIn(ctr, "rev-parse", "--show-toplevel");
+      expect({ status: top.status, stderr: top.stderr }).toEqual({ status: 0, stderr: "" });
+      expect(top.stdout.trim()).toBe(join(ctr, "workspace"));
+      expect(gitIn(ctr, "log", "-1", "--format=%s").stdout.trim()).toBe("first");
+      expect(gitIn(ctr, "status", "--porcelain").status).toBe(0);
+    } finally {
+      rmSync(ctr, { recursive: true, force: true });
+    }
+  }
+
+  test.skipIf(!hasGit)("real git: a worktree with a relative .git pointer works at /workspace in the planned container", async () => {
+    const { main: mainRepo, feature } = mainRepoWithWorktree(repo, "hand");
+    expect(readFileSync(join(feature, ".git"), "utf8")).toBe("gitdir: ../main/.git/worktrees/feature\n");
+    await expectGitWorksInPlannedContainer(mainRepo, feature);
+  });
+
+  test.skipIf(!gitRelativePaths)("real git: a worktree made with --relative-paths has a relative .git pointer that works at /workspace", async () => {
+    const { main: mainRepo, feature } = mainRepoWithWorktree(repo, "git");
+    expect(readFileSync(join(feature, ".git"), "utf8")).toMatch(/^gitdir: \.\.\//);
+    await expectGitWorksInPlannedContainer(mainRepo, feature);
   });
 });
 
