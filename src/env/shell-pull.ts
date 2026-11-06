@@ -10,7 +10,7 @@ import type { TenantContract } from "../contract-types.js";
 import { RUNNER_HOST_IMAGES } from "../onboard-runner.js";
 import { readLocalRepositoryName } from "../onboard-settings-context.js";
 import { apiClient } from "../transport.js";
-import type { DockerConfigJson, EnvShellDocker } from "./shell-docker.js";
+import { redactSecrets, type DockerConfigJson, type EnvShellDocker, type EnvShellEndpoint } from "./shell-docker.js";
 
 export interface ShellRefusal {
   code: string;
@@ -96,20 +96,20 @@ function withoutStop(text: string): string {
 
 export async function downloadImage(input: {
   ref: string;
-  host: string;
+  endpoint: EnvShellEndpoint;
   root: string;
   ctx: Ctx;
   docker: EnvShellDocker;
   notify: (line: string) => void;
   readRepositoryName?: (root: string) => Promise<string | null>;
 }): Promise<{ ok: true; credential: "none" | "issued" } | { ok: false; refusal: ShellRefusal }> {
-  const { ref, host, ctx, docker, notify } = input;
+  const { ref, endpoint, ctx, docker, notify } = input;
   notify(
     ref === RUNNER_HOST_IMAGES.runner
       ? "  Downloading it with no credential (about 2.3 GB, once per image)…"
       : "  Downloading it with no credential…",
   );
-  const anonymous = await docker.pull(ref, host, CREDENTIAL_FREE_CONFIG);
+  const anonymous = await docker.pull(ref, endpoint, CREDENTIAL_FREE_CONFIG);
   if (anonymous.ok) {
     notify("  Downloaded.");
     return { ok: true, credential: "none" };
@@ -166,12 +166,13 @@ export async function downloadImage(input: {
   const minutes = Math.max(1, Math.floor((credential.expiresAtMs - nowMs) / 60_000));
   notify(`  Downloading it with a short-lived credential your workspace issued (valid for ${minutes} minutes)…`);
   const auth = Buffer.from(`${credential.username}:${credential.password}`).toString("base64");
-  const issued = await docker.pull(ref, host, { auths: { [credential.registry]: { auth } } });
+  const issued = await docker.pull(ref, endpoint, { auths: { [credential.registry]: { auth } } });
   if (issued.ok) {
     notify("  Downloaded.");
     return { ok: true, credential: "issued" };
   }
-  const detail = withoutStop(issued.detail.split(credential.password).join("[redacted]").split(auth).join("[redacted]"));
+  // The adapter already redacted before its cut; this second layer covers any other EnvShellDocker.
+  const detail = withoutStop(redactSecrets(issued.detail, [credential.password, auth]));
   return refuse(
     "image_download_refused",
     `Could not download ${ref} with the credential your workspace issued: ${detail || "docker pull failed"}.`,

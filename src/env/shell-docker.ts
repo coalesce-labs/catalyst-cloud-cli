@@ -2,9 +2,9 @@
 // it, is the image here, one download through a throwaway config, and the container itself. Modelled
 // on onboard-runner.ts's spawnDocker, endpoint rule and anonymous pull.
 import { spawn, type StdioOptions } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { constants, homedir, tmpdir as osTmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 /** Exactly what the download's throwaway Docker config holds. */
 export interface DockerConfigJson {
@@ -17,12 +17,19 @@ export type EnvShellServer =
   | { state: "not_running" }
   | { state: "not_linux"; os: string };
 
+/** Where the engine is: a host for DOCKER_HOST or the default context, plus the name of a named context. */
+export interface EnvShellEndpoint {
+  host: string;
+  context?: string;
+}
+
 export interface EnvShellDocker {
   server(): Promise<EnvShellServer>;
-  endpoint(): Promise<{ ok: true; host: string } | { ok: false; reason: "conflict" | "unreadable" }>;
+  endpoint(): Promise<({ ok: true } & EnvShellEndpoint) | { ok: false; reason: "conflict" | "unreadable" }>;
   imagePresent(ref: string): Promise<boolean>;
-  /** One pull through a throwaway config holding exactly `config`; the directory is removed in `finally`. */
-  pull(ref: string, host: string, config: DockerConfigJson): Promise<{ ok: boolean; detail: string }>;
+  /** One pull through a throwaway config holding exactly `config`; the directory is removed in `finally`. A named
+   *  context is pulled through by name, with the developer's context store linked in, so Docker applies its TLS. */
+  pull(ref: string, endpoint: EnvShellEndpoint, config: DockerConfigJson): Promise<{ ok: boolean; detail: string }>;
   run(argv: string[], env: NodeJS.ProcessEnv, mode: "interactive" | "capture"): Promise<{ code: number; stdout: string }>;
 }
 
@@ -88,13 +95,82 @@ export function exitCodeOf(status: number | null, signal: NodeJS.Signals | null)
   return signal ? 128 + (constants.signals[signal] ?? 0) : 1;
 }
 
-/** Docker's last non-empty error line, printable characters only. */
-export function lastLine(text: string): string {
-  const lines = text
+/** `text` without every character outside printable ASCII (C0 controls, line breaks, DEL, non-ASCII),
+ *  and where each character that is left sat in `text`. A secret is printable ASCII, so an occurrence
+ *  that is contiguous in `text` stays contiguous here, and one that Docker split with such characters
+ *  becomes contiguous. */
+function printableView(text: string): { kept: string; at: number[] } {
+  let kept = "";
+  const at: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 0x20 || c > 0x7e) continue;
+    kept += text[i];
+    at.push(i);
+  }
+  return { kept, at };
+}
+
+/** Every occurrence of each non-empty secret becomes "[redacted]", also when Docker split it with
+ *  control characters or a line break (CTC-6157): the whole stretch from its first character to its
+ *  last is replaced. Occurrences that overlap, such as one secret inside another, become one marker.
+ *  This is a plain `indexOf` over the text with those characters taken out, never a pattern built from
+ *  a secret, so it cannot backtrack and needs no escaping. The secrets here are printable ASCII: a
+ *  password is `\x21-\x7e` and an `auth` value is base64.
+ *
+ *  Text that holds an escape (U+001B) or a C1 control (U+0080-U+009F) is withheld whole, as "", when
+ *  there is a secret to protect. No model of escape sequences is complete: a malformed one can take a
+ *  secret's own characters as its parameters, and guessing at fragments would redact ordinary words.
+ *  Docker writes its errors to a pipe and does not colour them, so such text comes only from unusual
+ *  daemon or registry output, and losing it costs little. Without a secret the text is returned as is. */
+export function redactSecrets(text: string, secrets: readonly string[]): string {
+  const wanted = secrets.filter((secret) => secret !== "");
+  if (wanted.length === 0) return text;
+  if (/[\x1b\x80-\x9f]/.test(text)) return "";
+  // covered[i] counts the occurrences that start at or before i and have not ended yet.
+  const covered = new Int32Array(text.length + 1);
+  let found = false;
+  const { kept, at } = printableView(text);
+  for (const secret of wanted) {
+    for (let i = kept.indexOf(secret); i >= 0; i = kept.indexOf(secret, i + 1)) {
+      covered[at[i]]++;
+      covered[at[i + secret.length - 1] + 1]--;
+      found = true;
+    }
+  }
+  if (!found) return text;
+  let out = "";
+  let depth = 0;
+  let inside = false;
+  for (let i = 0; i < text.length; i++) {
+    depth += covered[i];
+    if (depth === 0) out += text[i];
+    else if (!inside) out += "[redacted]";
+    inside = depth > 0;
+  }
+  return out;
+}
+
+/** Docker's last non-empty error line, printable characters only. The secrets are redacted from the
+ *  whole raw text, before it is split into lines and stripped and before it is cut to 400 characters,
+ *  so neither a split inside a secret nor the cut can leave a fragment that no replacement matches
+ *  (CTC-6157). The cut can still fall inside "[redacted]". Text with an escape or a C1 control, when
+ *  there is a secret, gives "" (see `redactSecrets`). */
+export function lastLine(text: string, secrets: readonly string[] = []): string {
+  const lines = redactSecrets(text, secrets)
     .split(/\r?\n/)
     .map((line) => line.replace(/[^\x20-\x7e]/g, "").trim())
     .filter((line) => line !== "");
   return (lines.at(-1) ?? "").slice(0, 400);
+}
+
+/** The secrets a pull's config carries: each `auth` value and the password it encodes. */
+function secretsOf(config: DockerConfigJson): string[] {
+  return Object.values(config.auths).flatMap(({ auth }) => {
+    if (!auth) return [];
+    const decoded = Buffer.from(auth, "base64").toString("utf8");
+    return [auth, decoded.slice(decoded.indexOf(":") + 1)];
+  });
 }
 
 export function spawnEnvShellDocker(deps: { env: NodeJS.ProcessEnv; tmpdir?: () => string }): EnvShellDocker {
@@ -118,38 +194,52 @@ export function spawnEnvShellDocker(deps: { env: NodeJS.ProcessEnv; tmpdir?: () 
         "inspect",
         ...(env.DOCKER_CONTEXT ? [env.DOCKER_CONTEXT] : []),
         "--format",
-        '{{(index .Endpoints "docker").Host}}',
+        // The name, a tab, then the host. Docker context names cannot contain a tab.
+        '{{.Name}}{{"\\t"}}{{(index .Endpoints "docker").Host}}',
       ]);
-      const host = read.stdout.trim();
-      return read.code === 0 && host !== "" ? { ok: true, host } : { ok: false, reason: "unreadable" };
+      const [name = "", host = ""] = read.stdout.trim().split("\t").map((part) => part.trim());
+      if (read.code !== 0 || host === "") return { ok: false, reason: "unreadable" };
+      // `default` is Docker's built-in context, resolved from the environment: the explicit-host pull covers it.
+      return name !== "" && name !== "default" ? { ok: true, host, context: name } : { ok: true, host };
     },
     async imagePresent(ref) {
       return (await quiet(["image", "inspect", "--format", "{{.Id}}", ref])).code === 0;
     },
-    async pull(ref, host, config) {
+    async pull(ref, endpoint, config) {
+      // The config is the only channel for the credential, so nothing it holds may come back in `detail`.
+      const secrets = secretsOf(config);
       let dir: string | undefined;
       try {
         // mkdtemp creates the directory 0700; the file is 0600 and holds nothing else.
         dir = mkdtempSync(join((deps.tmpdir ?? osTmpdir)(), "catalyst-env-pull-"));
         writeFileSync(join(dir, "config.json"), JSON.stringify(config), { mode: 0o600 });
+        const developerConfig = env.DOCKER_CONFIG || join(env.HOME || homedir(), ".docker");
+        if (endpoint.context) {
+          // `--config` moves Docker's context store with it, and `--host` would mean the default context: link the
+          // developer's own store in and pull through the context by name, so its endpoint, TLS files and
+          // SkipTLSVerify apply exactly as for every other docker command. rmSync removes the link, never the store.
+          symlinkSync(resolve(developerConfig, "contexts"), join(dir, "contexts"), "junction");
+        }
         const pullEnv: NodeJS.ProcessEnv = {
           ...env,
           DOCKER_CONFIG: dir,
-          // A TLS endpoint keeps the developer's own certificates although the config moved.
-          DOCKER_CERT_PATH: env.DOCKER_CERT_PATH || env.DOCKER_CONFIG || join(env.HOME || homedir(), ".docker"),
+          // An explicit host is Docker's default context, whose TLS comes from DOCKER_TLS_VERIFY and DOCKER_CERT_PATH:
+          // keep the developer's certificates although the config moved.
+          DOCKER_CERT_PATH: env.DOCKER_CERT_PATH || developerConfig,
         };
         delete pullEnv.DOCKER_CONTEXT;
         delete pullEnv.DOCKER_AUTH_CONFIG;
+        const selector = endpoint.context ? ["--context", endpoint.context] : ["--host", endpoint.host];
         // Progress goes to our stderr, so `--json` stdout stays one line; the error stream is kept.
-        const result = await spawnWait(["--host", host, "--config", dir, "pull", ref], {
+        const result = await spawnWait([...selector, "--config", dir, "pull", ref], {
           env: pullEnv,
           stdio: ["ignore", 2, "pipe"],
           timeoutMs: 3_600_000,
         });
         if (result.missing) return { ok: false, detail: "docker is not installed" };
-        return { ok: result.code === 0, detail: lastLine(result.stderr) };
+        return { ok: result.code === 0, detail: lastLine(result.stderr, secrets) };
       } catch (error) {
-        return { ok: false, detail: error instanceof Error ? lastLine(error.message) : "the download could not start" };
+        return { ok: false, detail: error instanceof Error ? lastLine(error.message, secrets) : "the download could not start" };
       } finally {
         if (dir) rmSync(dir, { recursive: true, force: true });
       }

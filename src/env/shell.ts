@@ -2,8 +2,8 @@
 // Every refusal a person can fix in the file or the terminal fires before Docker is touched; the
 // cloud is asked only when a credential-free download is refused (shell-pull.ts).
 import { execFile } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, join, isAbsolute, relative, resolve } from "node:path";
 import { parseEnv, promisify } from "node:util";
 import { flagBool, flagList, flagString, positionals, type ParsedArgs } from "../args.js";
 import type { Ctx } from "../config.js";
@@ -24,6 +24,41 @@ export interface EnvShellDeps {
   readRepositoryName?: (root: string) => Promise<string | null>;
   gitTopLevel?: (cwd: string) => Promise<string | null>;
   gitCommonDir?: (root: string) => Promise<string | null>;
+}
+
+type Stamp = { ino: bigint; birthtimeNs: bigint };
+
+/** What the home volume key is built from: the inode and birth time of the checkout's root directory and of
+ *  its own `.git` entry, or null when either has no birth time or there is no `.git` (CTC-6155). A birth time
+ *  never changes while an entry exists, so the name stays put when entries at the root change and when git
+ *  writes inside `.git`. Replacing a repository in place (emptying the root and putting another's contents
+ *  and `.git` there) creates a new `.git`, hence a new name; so does deleting and re-cloning the directory.
+ *  Without a birth time an inode alone cannot tell a re-created entry from the old one, and without a `.git`
+ *  nothing tells one non-git directory from the next, so the answer is null. Some worktree operations rewrite
+ *  the `.git` file: that only rotates the volume, it never shares one. Boundary: a person who keeps A's
+ *  `.git` and repoints it at B (set-url, fetch, checkout) still has A's repository as far as git can tell;
+ *  A's hooks and config persist in that `.git` anyway, so the home volume adds nothing, and the origin URL
+ *  and other checkout-writable data stay out of the key. */
+export function identityFromStat(root: Stamp, dotGit: Stamp | null): string | null {
+  if (dotGit === null || root.birthtimeNs <= 0n || dotGit.birthtimeNs <= 0n) return null;
+  return `${root.ino}:${root.birthtimeNs}:${dotGit.ino}:${dotGit.birthtimeNs}`;
+}
+
+/** The checkout's identity, read-only with no git call. `root` is already a real path; `.git` is read with
+ *  `lstat`, so a symlink planted there yields the link's own identity and is never followed or written
+ *  through. Null gives the run an anonymous home volume that `--rm` removes with the container, so no later
+ *  run can mount it: toolchains download again on every such run, the price of never sharing a home across
+ *  repositories. Accepted follow-up: where Node synthesizes the birth time from the change time (no statx;
+ *  not on Node 24's supported kernels), the name changes when entries at the root change, so that checkout
+ *  gets a fresh volume and never shares one. */
+export function checkoutIdentity(root: string): string | null {
+  let dotGit: Stamp | null = null;
+  try {
+    dotGit = lstatSync(join(root, ".git"), { bigint: true });
+  } catch {
+    dotGit = null;
+  }
+  return identityFromStat(statSync(root, { bigint: true }), dotGit);
 }
 
 const DECLARATION = ".catalyst/catalyst.toml";
@@ -196,12 +231,13 @@ export async function runEnvShell(args: ParsedArgs, ctx: Ctx, deps: EnvShellDeps
               message: "Docker's current context could not be read. Check it with docker context ls, then run catalyst env shell again.",
             },
       );
-    const downloaded = await downloadImage({ ref: image, host: endpoint.host, root, ctx, docker, notify: notice, readRepositoryName });
+    const downloaded = await downloadImage({ ref: image, endpoint, root, ctx, docker, notify: notice, readRepositoryName });
     if (!downloaded.ok) return refuse(downloaded.refusal);
     credential = downloaded.credential;
   }
 
-  // 7. Git common directory: a worktree's shared .git outside the root is mounted at its own path.
+  // 7. Git common directory: a worktree's shared .git outside the root is mounted at its own path
+  //    (absolute `gitdir:` pointers) and at the place a relative pointer resolves from /workspace.
   const commonDir = await (deps.gitCommonDir ?? defaultGitCommonDir)(root);
   let gitCommonDir: string | null = null;
   if (commonDir !== null) {
@@ -225,6 +261,7 @@ export async function runEnvShell(args: ParsedArgs, ctx: Ctx, deps: EnvShellDeps
     mode: check ? "check" : "shell",
     image,
     root,
+    rootIdentity: checkoutIdentity(root),
     gitCommonDir,
     toolchains: declaration.toolchains,
     passNames: variables.set,
