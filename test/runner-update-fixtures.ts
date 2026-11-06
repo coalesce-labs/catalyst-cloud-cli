@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DesiredReleaseRead, DrainRequest, DrainStatus, ReleaseComponent, RunnerUpdateEngine } from "../src/runner-update";
+import type { CustodyAttestation, DesiredReleaseRead, DrainRequest, DrainStatus, ReleaseComponent, RunnerUpdateEngine } from "../src/runner-update";
 
 export const hex = (c: string) => c.repeat(64);
 export const sha = (c: string) => c.repeat(40);
@@ -71,7 +71,7 @@ export interface FakeOptions {
   /** Whether a container on these images is up. Default: the supervisor unless stopped, the watchdog always. */
   up?: { supervisor?: (images: Images) => boolean; watchdog?: (images: Images) => boolean };
   /** The authority custody returns for these images, or `{ refused }`. Default: the installed one, unchanged. */
-  custody?: (images: Images) => string | { refused: string };
+  custody?: (images: Images) => string | CustodyAttestation;
   /** What is running before the update. Default: what `.env` names. */
   live?: Images;
   stop?: boolean;
