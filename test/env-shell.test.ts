@@ -526,7 +526,6 @@ describe("catalyst env shell (interactive)", () => {
     }
   });
 
-<<<<<<< HEAD
   test("two checkouts with the same origin name and common dir get different home volumes; --check shares the shell's (CTC-6155)", async () => {
     const other = realpathSync(mkdtempSync(join(tmpdir(), "catalyst-env-other-")));
     const common = realpathSync(mkdtempSync(join(tmpdir(), "catalyst-env-common-")));
@@ -548,7 +547,8 @@ describe("catalyst env shell (interactive)", () => {
       rmSync(other, { recursive: true, force: true });
       rmSync(common, { recursive: true, force: true });
     }
-=======
+  });
+
   /** Plan the shell for `feature` through the real CLI path, then run git in the planned container. */
   async function expectGitWorksInPlannedContainer(mainRepo: string, feature: string): Promise<void> {
     const { docker, rec } = recordingPort();
@@ -578,7 +578,6 @@ describe("catalyst env shell (interactive)", () => {
     const { main: mainRepo, feature } = mainRepoWithWorktree(repo, "git");
     expect(readFileSync(join(feature, ".git"), "utf8")).toMatch(/^gitdir: \.\.\//);
     await expectGitWorksInPlannedContainer(mainRepo, feature);
->>>>>>> 7ec44daa2d30e842c57cdb0bdab71d1afa2ab461
   });
 });
 

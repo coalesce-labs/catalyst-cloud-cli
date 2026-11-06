@@ -102,7 +102,7 @@ test("check mode: neither -i nor -t; CATALYST_ENV_NAMES carries the declared nam
   expect(argv.slice(-4)).toEqual(["catalyst-env-shell", "check", "node@22", "bun@1.3.14"]);
 });
 
-const HOME_MOUNT = "type=volume,src=catalyst-env-home-a19f7b0859a9,dst=/home/catalyst";
+const homeMountForRoot = (root: string) => `type=volume,src=${homeVolumeFor(IMAGE, root)},dst=/home/catalyst`;
 
 /** The `--mount` words of the shell argv for a checkout at `root` whose git common dir is `gitCommonDir`. */
 function mountsFor(root: string, gitCommonDir: string): string[] {
@@ -117,11 +117,8 @@ test("a worktree's git common dir outside the root is mounted at its absolute pa
   expect(mountsFor("/Users/ana/src/web", "/Users/ana/src/web-main/.git")).toEqual([
     "type=bind,src=/Users/ana/src/web,dst=/workspace",
     "type=bind,src=/Users/ana/src/web-main/.git,dst=/Users/ana/src/web-main/.git",
-<<<<<<< HEAD
-    "type=volume,src=catalyst-env-home-a19f7b0859a9-0e7676587a0a89966444e3c9,dst=/home/catalyst",
-=======
     "type=bind,src=/Users/ana/src/web-main/.git,dst=/web-main/.git",
-    HOME_MOUNT,
+    homeMountForRoot("/Users/ana/src/web"),
   ]);
 });
 
@@ -131,7 +128,7 @@ test("CTC-6156: a sibling worktree's relative .git pointer finds the common dir 
     "type=bind,src=/repos/feature,dst=/workspace",
     "type=bind,src=/repos/main/.git,dst=/repos/main/.git",
     "type=bind,src=/repos/main/.git,dst=/main/.git",
-    HOME_MOUNT,
+    homeMountForRoot("/repos/feature"),
   ]);
 });
 
@@ -154,7 +151,7 @@ test.each([
   expect(mountsFor(root, gitCommonDir)).toEqual([
     `type=bind,src=${root},dst=/workspace`,
     `type=bind,src=${gitCommonDir},dst=${gitCommonDir}`,
-    HOME_MOUNT,
+    homeMountForRoot(root),
   ]);
 });
 
@@ -163,8 +160,7 @@ test("CTC-6156: a destination inside a system directory is allowed when it cover
     "type=bind,src=/x/feature,dst=/workspace",
     "type=bind,src=/x/etc/repo/.git,dst=/x/etc/repo/.git",
     "type=bind,src=/x/etc/repo/.git,dst=/etc/repo/.git",
-    HOME_MOUNT,
->>>>>>> 7ec44daa2d30e842c57cdb0bdab71d1afa2ab461
+    homeMountForRoot("/x/feature"),
   ]);
 });
 
