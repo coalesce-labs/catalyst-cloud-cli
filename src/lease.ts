@@ -258,12 +258,32 @@ function shownHolder(lease: LeaseRow): { seat: string | null; details: unknown }
   return { seat: lease.holder, details: lease.holderDetails };
 }
 
+/** The running stage that refuses a take while no ticket lease is live. A cloud that predates it
+ *  sends none, and the read says what it always said. */
+interface LiveStage {
+  phase: string;
+  kind: unknown;
+  untilMs: number;
+}
+function liveStage(value: unknown): LiveStage | null {
+  if (!object(value) || !text(value.phase) || typeof value.untilMs !== "number") return null;
+  return { phase: sanitize(value.phase), kind: value.kind, untilMs: value.untilMs };
+}
+function stageLine(ticket: string, stage: LiveStage): string {
+  return stage.kind === "reservation"
+    ? `${ticket}: the ${stage.phase} phase is starting, reserved until ${when(stage.untilMs)}; a take is refused until then`
+    : `${ticket}: the ${stage.phase} phase holds it until ${when(stage.untilMs)}; a take by anyone else is refused until then`;
+}
+
 /** `lease show`: the holder, then last progress, owner, session, external id, contact and, on a
  *  live row, the previous holder. */
-function printShown(ctx: Ctx, ticket: string, lease: LeaseRow): void {
+function printShown(ctx: Ctx, ticket: string, lease: LeaseRow, stage: LiveStage | null): void {
   const shown = shownHolder(lease);
   const label = holderLabel(shown.details, shown.seat);
-  if (lease.live === false) ctx.stdout(`${ticket}: free; last held by ${label}, generation ${lease.generation}`);
+  if (lease.live === false && stage !== null) {
+    ctx.stdout(stageLine(ticket, stage));
+    ctx.stdout(`  last held by ${label}, generation ${lease.generation}`);
+  } else if (lease.live === false) ctx.stdout(`${ticket}: free; last held by ${label}, generation ${lease.generation}`);
   else ctx.stdout(`${ticket}: held by ${label} until ${when(lease.deadlineMs)}, generation ${lease.generation}`);
   if (text(lease.lastProgress)) ctx.stdout(`  last progress: ${sanitize(lease.lastProgress)}`);
   for (const line of detailLines(shown.details)) ctx.stdout(line);
@@ -381,8 +401,9 @@ async function runLease(args: ParsedArgs, ctx: Ctx): Promise<number> {
       return 0;
     }
     const lease = object(res.body) && leaseRow(res.body.lease) ? res.body.lease : null;
-    if (lease === null) ctx.stdout(`${ticket}: no ticket lease`);
-    else printShown(ctx, ticket, lease);
+    const stage = object(res.body) ? liveStage(res.body.liveStage) : null;
+    if (lease === null) ctx.stdout(stage === null ? `${ticket}: no ticket lease` : stageLine(ticket, stage));
+    else printShown(ctx, ticket, lease, stage);
     return 0;
   }
 
