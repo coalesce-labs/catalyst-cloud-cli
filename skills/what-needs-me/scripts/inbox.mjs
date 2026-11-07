@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // inbox.mjs — "what needs me?": the open asks in this cloud account, ranked by what each answer releases.
-// A thin wrapper over `catalyst ask list`, which reads the open tickets carrying the team's
-// ask label (from the contract), follows each one's blocking relations, and ranks by the count of
-// open tickets held, then the oldest ask. By default the CLI keeps only the asks assigned to the
-// connected person; --anyone widens to the whole account. Prints the ranked list; --json prints the
+// A thin wrapper over `catalyst ask list`, which reads the connected person's asks from the workspace's
+// Waiting-on-me view (every ticket for --anyone), follows each one's blocking relations, and ranks by
+// the count of open tickets held, then the oldest ask. By default the CLI keeps only the asks assigned
+// to the connected person; --anyone widens to the whole account. Prints the ranked list; --json prints the
 // CLI's {scope, asks} unchanged.
 import { mustRun, parseFlags, parseJson, printHelp } from "./lib/cli.mjs";
 
