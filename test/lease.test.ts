@@ -185,6 +185,17 @@ describe("lease release and show", () => {
     }
   });
 
+  test("show strips terminal controls from the phase it names", async () => {
+    const untilMs = Date.UTC(2026, 10, 7, 8, 29, 20);
+    respond = () =>
+      json({ ticket: "ENG-123", lease: null, delegations: [], liveStage: { phase: "valid\u001b[31mate", kind: "lease", untilMs } });
+    expect(await main(["lease", "show", "ENG-123"], ctx)).toBe(0);
+    expect(ctx.out.at(-1)).toBe(
+      "ENG-123: the valid[31mate phase holds it until 2026-11-07T08:29:20.000Z; a take by anyone else is refused until then",
+    );
+    expect(ctx.out.at(-1)).not.toContain("\u001b");
+  });
+
   test("show names the stage a take would be refused for, and never reads free over it", async () => {
     const untilMs = Date.UTC(2026, 10, 7, 8, 29, 20);
     const lapsed = { ...lease({ lastHolder: holder }), live: false };
@@ -197,9 +208,9 @@ describe("lease release and show", () => {
       json({ ticket: "ENG-123", lease: null, delegations: [], liveStage: { ...validate, phase: "implement", kind: "reservation" } });
     expect(await main(["lease", "show", "ENG-123"], ctx)).toBe(0);
     expect(ctx.out).toEqual([
-      "ENG-123: the validate phase holds it until 2026-11-07T08:29:20.000Z; a take is refused until then",
+      "ENG-123: the validate phase holds it until 2026-11-07T08:29:20.000Z; a take by anyone else is refused until then",
       `  last held by ${holder}, generation 7`,
-      "ENG-123: the validate phase holds it until 2026-11-07T08:29:20.000Z; a take is refused until then",
+      "ENG-123: the validate phase holds it until 2026-11-07T08:29:20.000Z; a take by anyone else is refused until then",
       "ENG-123: the implement phase is starting, reserved until 2026-11-07T08:29:20.000Z; a take is refused until then",
     ]);
   });

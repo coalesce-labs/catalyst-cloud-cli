@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.49
+
+`catalyst lease show` no longer says a ticket is free while a phase is running on it. It now names the phase and when its hold ends, so you can see why `catalyst lease take` would refuse before you try it. Nothing changes for a ticket with a live lease.
+
 ## 0.16.48
 
 `catalyst mcp list` and `remove` work again. They had stopped with an error saying the contract could not be read, because the contract lists a route with an HTTP method this CLI's SDK did not know. Update the CLI to get this fix. `catalyst mcp add` now works, with no CLI update needed.
