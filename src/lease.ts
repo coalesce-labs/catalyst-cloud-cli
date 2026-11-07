@@ -270,11 +270,9 @@ function liveStage(value: unknown): LiveStage | null {
   return { phase: sanitize(value.phase), kind: value.kind, untilMs: value.untilMs };
 }
 function stageLine(ticket: string, stage: LiveStage): string {
-  const hold =
-    stage.kind === "reservation"
-      ? `the ${stage.phase} phase is starting, reserved until ${when(stage.untilMs)}`
-      : `the ${stage.phase} phase holds it until ${when(stage.untilMs)}`;
-  return `${ticket}: ${hold}; a take is refused until then`;
+  return stage.kind === "reservation"
+    ? `${ticket}: the ${stage.phase} phase is starting, reserved until ${when(stage.untilMs)}; a take is refused until then`
+    : `${ticket}: the ${stage.phase} phase holds it until ${when(stage.untilMs)}; a take by anyone else is refused until then`;
 }
 
 /** `lease show`: the holder, then last progress, owner, session, external id, contact and, on a
