@@ -66,7 +66,6 @@ describe("readWaitingOnMe", () => {
     ["other 409", { status: 409, body: { error: "x" } }, "refused"],
     ["403", { status: 403, body: { error: "personal_credential_required" } }, "refused"],
     ["400", { status: 400, body: {} }, "refused"],
-    ["503", { status: 503, body: {} }, "server-error"],
     ["unknown envelope", { status: 200, body: { nope: 1 } }, "shape"],
     ["row without identifier", { status: 200, body: { rows: [{ assignee_id: ME }] } }, "shape"],
     ["blocks without related_state", { status: 200, body: { rows: [{ identifier: "A-1", assignee_id: ME, relations: [{ type: "blocks", issue_identifier: "A-1", related_identifier: "A-2" }] }] } }, "shape"],
@@ -109,6 +108,10 @@ describe("readWaitingOnMe", () => {
     const err = await readWaitingOnMe(client(), ME).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CliError);
     expect((err as CliError).code).toMatch(/rate-limited|budget/);
+  });
+  test.each([500, 502, 503, 504])("a %i from the view surfaces and never falls back", async (status) => {
+    server.waitingOnMe = { status, body: {} };
+    await expect(readWaitingOnMe(client(), ME)).rejects.toBeInstanceOf(CliError);
   });
   test("a network error surfaces", async () => {
     const boom = (async () => {

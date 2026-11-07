@@ -160,7 +160,6 @@ describe("ask list reads a matched person's view", () => {
   const fallbacks: [string, () => void][] = [
     ["absent", () => (server.waitingOnMe = "absent")],
     ["no_linear_identity", () => (server.waitingOnMe = { status: 409, body: { error: "no_linear_identity" } })],
-    ["503", () => (server.waitingOnMe = { status: 503, body: {} })],
     ["unknown envelope", () => (server.waitingOnMe = { status: 200, body: { nope: 1 } })],
     ["row missing related_state", () => (server.waitingOnMe = { status: 200, body: { rows: [{ identifier: "ENG-7", assignee_id: ME, relations: [{ type: "blocks", issue_identifier: "ENG-7", related_identifier: "ENG-1" }] }] } })],
     ["stale identity", () => (server.meUser = { id: "u", label: "N", email: null, role: "admin", linearUserId: "linear-user-new" })],
@@ -199,6 +198,14 @@ describe("ask list reads a matched person's view", () => {
     await seedJoined(home, server, personal());
     server.waitingOnMe = { status: 429, body: { error: "rate limited" } };
     expect(await main(["ask", "list", "--json"], ctx)).toBe(2);
+    expect(ctx.out).toEqual([]);
+    expect(walkReqs()).toHaveLength(0);
+  });
+
+  test.each([500, 503])("a %i on the view surfaces and never walks", async (status) => {
+    await seedJoined(home, server, personal());
+    server.waitingOnMe = { status, body: {} };
+    expect(await main(["ask", "list", "--json"], ctx)).not.toBe(0);
     expect(ctx.out).toEqual([]);
     expect(walkReqs()).toHaveLength(0);
   });

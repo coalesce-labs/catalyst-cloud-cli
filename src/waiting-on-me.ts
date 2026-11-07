@@ -7,9 +7,9 @@ import type { ApiClient } from "./transport.js";
 
 export const WAITING_ON_ME_PATH = "/api/v1/views/waiting-on-me";
 export const VIEW_MAX_PAGES = 10;
-const FALLBACK_STATUSES = [400, 403, 404, 405, 409, 410, 422, 500, 502, 503, 504];
+const FALLBACK_STATUSES = [400, 403, 404, 405, 409, 410, 422];
 
-export type ViewFallback = "absent" | "refused" | "no-linear-identity" | "server-error" | "shape" | "other-person" | "unpaged" | "stalled" | "overrun";
+export type ViewFallback = "absent" | "refused" | "no-linear-identity" | "shape" | "other-person" | "unpaged" | "stalled" | "overrun";
 export type ViewRead = { ok: true; rows: Record<string, unknown>[]; pages: number } | { ok: false; reason: ViewFallback };
 
 type Row = Record<string, unknown>;
@@ -45,7 +45,6 @@ export function checkViewRows(rows: Row[], linearUserId: string): ViewFallback |
 
 function statusReason(status: number): ViewFallback {
   if (status === 404 || status === 405 || status === 410) return "absent";
-  if (status >= 500) return "server-error";
   return "refused";
 }
 
