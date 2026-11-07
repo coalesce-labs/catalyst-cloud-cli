@@ -1,14 +1,14 @@
 # Changelog
 
-## 0.16.49
+## 0.16.50
 
-<<<<<<< HEAD
 `catalyst ask list` now reads only your own asks when you are connected as yourself with a matched Linear identity, so a status bar or prompt that runs it every few minutes no longer reads every ticket in your workspace. The asks, their order and the `--json` output (`scope`, and each ask's `identifier`, `title`, `state`, `blocks`, `score` and `assigneeId`) are the same as before. `--anyone`, an unmatched identity and the workspace's shared key still read every ticket, and so does a Catalyst Cloud that does not offer the narrower read. A server error on the narrower read is reported, not retried with the full read.
 
 When none of your asks are open, the line now reads `no open asks assigned to <you> (add --anyone to see every open ask in your cloud account)`. It no longer counts everyone's open asks, because that count needs the full read this release avoids. If Catalyst has a different Linear identity for you than the one this machine recorded when you logged in, `ask list` reads every ticket as before and says to run `catalyst login`.
-=======
+
+## 0.16.49
+
 `catalyst lease show` no longer says a ticket is free while a phase is running on it. It now names the phase and when its hold ends, so you can see why `catalyst lease take` would refuse before you try it. Nothing changes for a ticket with a live lease.
->>>>>>> 453a27c986c5d0e1ac94af826030df8896df7887
 
 ## 0.16.48
 
