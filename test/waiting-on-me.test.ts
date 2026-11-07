@@ -68,12 +68,12 @@ describe("readWaitingOnMe", () => {
     ["400", { status: 400, body: {} }, "refused"],
     ["unknown envelope", { status: 200, body: { nope: 1 } }, "shape"],
     ["row without identifier", { status: 200, body: { rows: [{ assignee_id: ME }] } }, "shape"],
-    ["blocks without related_state", { status: 200, body: { rows: [{ identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", relations: [{ type: "blocks", issue_identifier: "A-1", related_identifier: "A-2" }] }] } }, "shape"],
+    ["blocks without related_state", { status: 200, body: { rows: [{ identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", title: "T", updated_at: 1, relations: [{ type: "blocks", issue_identifier: "A-1", related_identifier: "A-2" }] }] } }, "shape"],
     ["relations not an array", { status: 200, body: { rows: [{ identifier: "A-1", assignee_id: ME, relations: "x" }] } }, "shape"],
     ["labels not an array", { status: 200, body: { rows: [{ identifier: "A-1", assignee_id: ME, labels: "x" }] } }, "shape"],
-    ["relation not an object", { status: 200, body: { rows: [{ identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", relations: [null] }] } }, "shape"],
+    ["relation not an object", { status: 200, body: { rows: [{ identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", title: "T", updated_at: 1, relations: [null] }] } }, "shape"],
     ["row not an object", { status: 200, body: { rows: [null] } }, "shape"],
-    ["related_state of a wrong type", { status: 200, body: { rows: [{ identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", relations: [{ type: "blocks", issue_identifier: "A-1", related_identifier: "A-2", related_state: 3 }] }] } }, "shape"],
+    ["related_state of a wrong type", { status: 200, body: { rows: [{ identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", title: "T", updated_at: 1, relations: [{ type: "blocks", issue_identifier: "A-1", related_identifier: "A-2", related_state: 3 }] }] } }, "shape"],
     ["someone else's row", { status: 200, body: { rows: [{ identifier: "A-1", assignee_id: "other" }] } }, "other-person"],
     ["body cursor, no header", { status: 200, body: { rows: [], nextCursor: "x" } }, "unpaged"],
     ["hasMore, no header", { status: 200, body: { rows: [], hasMore: true } }, "unpaged"],
@@ -128,10 +128,22 @@ describe("viewRowsOf and checkViewRows", () => {
     expect(viewRowsOf({ asks: [{ a: 1 }] })).toEqual([{ a: 1 }]);
   });
   test("checkViewRows accepts a clean row and a non-blocks relation without related_state", () => {
-    expect(checkViewRows([{ identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", relations: [{ type: "related", issue_identifier: "A-1" }] }], ME)).toBeNull();
+    expect(checkViewRows([{ identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", title: "T", updated_at: 1, relations: [{ type: "related", issue_identifier: "A-1" }] }], ME)).toBeNull();
   });
-  test.each(["labels", "state", "relations"])("a view row without %s is a shape fallback", async (field) => {
-    const row: Record<string, unknown> = { identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", relations: [] };
+  test("the age key and a blocks relation's identifier are checked", () => {
+    const row = (over: Record<string, unknown>) => ({ identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", title: "T", updated_at: 1, relations: [], ...over });
+    expect(checkViewRows([row({ updated_at: "nope" })], ME)).toBe("shape");
+    expect(checkViewRows([row({ updated_at: "2026-01-01T00:00:00Z", created_at: 5 })], ME)).toBeNull();
+    expect(checkViewRows([row({ created_at: null })], ME)).toBeNull();
+    expect(checkViewRows([row({ created_at: "nope" })], ME)).toBe("shape");
+    expect(checkViewRows([row({ created_at: {} })], ME)).toBe("shape");
+    const blocks = (rel: Record<string, unknown>) => row({ relations: [{ type: "blocks", issue_identifier: "A-1", related_state: null, ...rel }] });
+    expect(checkViewRows([blocks({ related_identifier: "A-2" })], ME)).toBeNull();
+    expect(checkViewRows([blocks({})], ME)).toBe("shape");
+    expect(checkViewRows([blocks({ related_identifier: 7 })], ME)).toBe("shape");
+  });
+  test.each(["labels", "state", "title", "relations", "updated_at"])("a view row without %s is a shape fallback", async (field) => {
+    const row: Record<string, unknown> = { identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", title: "T", updated_at: 1, relations: [] };
     expect(checkViewRows([row], ME)).toBeNull();
     delete row[field];
     expect(checkViewRows([row], ME)).toBe("shape");

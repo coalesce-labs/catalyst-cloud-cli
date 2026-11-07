@@ -27,16 +27,25 @@ export function viewRowsOf(body: unknown): Row[] | null {
   return null;
 }
 
-/** The D4 row rules: anything the CLI cannot prove it can rank like the walk is a fallback reason. */
+function validAge(v: unknown): boolean {
+  return (typeof v === "number" && Number.isFinite(v)) || (typeof v === "string" && Number.isFinite(Date.parse(v)));
+}
+
+/** The D4 row rules: anything the CLI cannot prove it can rank like the walk is a fallback reason.
+ *  This requires every row field `rankAsks` (src/ask.ts) reads, as the walk's rows always carry it:
+ *  identifier, title, state, assignee_id, labels, relations (type, issue_identifier, and for a blocks
+ *  relation related_identifier and related_state) and the age key (updated_at; created_at when present).
+ *  A change to what `rankAsks` reads must update this check. */
 export function checkViewRows(rows: Row[], linearUserId: string): ViewFallback | null {
   for (const r of rows) {
     if (!r || typeof r !== "object" || typeof r.identifier !== "string") return "shape";
     if (r.assignee_id !== linearUserId) return "other-person";
-    // rankAsks needs all three: labels to know it is an ask, state to know it is open, relations to score it.
-    if (!Array.isArray(r.labels) || typeof r.state !== "string" || !Array.isArray(r.relations)) return "shape";
+    if (!Array.isArray(r.labels) || typeof r.state !== "string" || typeof r.title !== "string" || !Array.isArray(r.relations)) return "shape";
+    if (!validAge(r.updated_at) || (r.created_at != null && !validAge(r.created_at))) return "shape";
     for (const rel of r.relations as Row[]) {
       if (!rel || typeof rel !== "object") return "shape";
       if (rel.type !== "blocks" || rel.issue_identifier !== r.identifier) continue;
+      if (typeof rel.related_identifier !== "string") return "shape";
       if (!("related_state" in rel) || (rel.related_state !== null && typeof rel.related_state !== "string")) return "shape";
     }
   }

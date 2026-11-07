@@ -161,10 +161,12 @@ describe("ask list reads a matched person's view", () => {
     ["absent", () => (server.waitingOnMe = "absent")],
     ["no_linear_identity", () => (server.waitingOnMe = { status: 409, body: { error: "no_linear_identity" } })],
     ["unknown envelope", () => (server.waitingOnMe = { status: 200, body: { nope: 1 } })],
-    ["row missing related_state", () => (server.waitingOnMe = { status: 200, body: { rows: [{ identifier: "ENG-7", assignee_id: ME, labels: [], state: "Todo", relations: [{ type: "blocks", issue_identifier: "ENG-7", related_identifier: "ENG-1" }] }] } })],
-    ["row missing labels", () => (server.waitingOnMe = { status: 200, body: { rows: [{ identifier: "ENG-52", assignee_id: ME, state: "Todo", relations: [] }] } })],
-    ["row missing state", () => (server.waitingOnMe = { status: 200, body: { rows: [{ identifier: "ENG-52", assignee_id: ME, labels: [{ id: "label-ask-unscoped", name: "catalyst-ask" }], relations: [] }] } })],
-    ["row missing relations", () => (server.waitingOnMe = { status: 200, body: { rows: [{ identifier: "ENG-52", assignee_id: ME, labels: [{ id: "label-ask-unscoped", name: "catalyst-ask" }], state: "Todo" }] } })],
+    ["row missing related_state", () => (server.waitingOnMe = { status: 200, body: { rows: [{ identifier: "ENG-7", assignee_id: ME, labels: [], state: "Todo", title: "T", updated_at: 1, relations: [{ type: "blocks", issue_identifier: "ENG-7", related_identifier: "ENG-1" }] }] } })],
+    ["row missing labels", () => (server.waitingOnMe = { status: 200, body: { rows: [{ identifier: "ENG-52", assignee_id: ME, title: "T", updated_at: 1, state: "Todo", relations: [] }] } })],
+    ["row missing state", () => (server.waitingOnMe = { status: 200, body: { rows: [{ identifier: "ENG-52", assignee_id: ME, title: "T", updated_at: 1, labels: [{ id: "label-ask-unscoped", name: "catalyst-ask" }], relations: [] }] } })],
+    ["row missing relations", () => (server.waitingOnMe = { status: 200, body: { rows: [{ identifier: "ENG-52", assignee_id: ME, title: "T", updated_at: 1, labels: [{ id: "label-ask-unscoped", name: "catalyst-ask" }], state: "Todo" }] } })],
+    ["row missing title", () => (server.waitingOnMe = { status: 200, body: { rows: [{ identifier: "ENG-52", assignee_id: ME, labels: [], state: "Todo", updated_at: 1, relations: [] }] } })],
+    ["row missing updated_at", () => (server.waitingOnMe = { status: 200, body: { rows: [{ identifier: "ENG-52", assignee_id: ME, labels: [], state: "Todo", title: "T", relations: [] }] } })],
     ["stale identity", () => (server.meUser = { id: "u", label: "N", email: null, role: "admin", linearUserId: "linear-user-new" })],
   ];
   test.each(fallbacks)("fallback (%s) keeps today's answer", async (_n, arm) => {
