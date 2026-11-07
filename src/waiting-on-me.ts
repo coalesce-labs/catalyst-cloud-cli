@@ -32,9 +32,9 @@ export function checkViewRows(rows: Row[], linearUserId: string): ViewFallback |
   for (const r of rows) {
     if (!r || typeof r !== "object" || typeof r.identifier !== "string") return "shape";
     if (r.assignee_id !== linearUserId) return "other-person";
-    if (r.labels !== undefined && !Array.isArray(r.labels)) return "shape";
-    if (r.relations !== undefined && !Array.isArray(r.relations)) return "shape";
-    for (const rel of (r.relations as Row[] | undefined) ?? []) {
+    // rankAsks needs all three: labels to know it is an ask, state to know it is open, relations to score it.
+    if (!Array.isArray(r.labels) || typeof r.state !== "string" || !Array.isArray(r.relations)) return "shape";
+    for (const rel of r.relations as Row[]) {
       if (!rel || typeof rel !== "object") return "shape";
       if (rel.type !== "blocks" || rel.issue_identifier !== r.identifier) continue;
       if (!("related_state" in rel) || (rel.related_state !== null && typeof rel.related_state !== "string")) return "shape";
