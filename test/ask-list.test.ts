@@ -185,7 +185,31 @@ describe("ask list reads a matched person's view", () => {
     expect(ctx.out.join("\n")).toBe(expected);
     expect(viewReqs()).toHaveLength(1);
     expect(walkReqs().filter((r) => r.path.startsWith("/api/v1/issues?"))).toHaveLength(1);
-    expect(ctx.err).toEqual([]);
+    expect(ctx.err.length === 0 || ["no_linear_identity", "stale identity"].includes(_n)).toBe(true);
+    if (["no_linear_identity", "stale identity"].includes(_n)) expect(ctx.err.join("\n")).toMatch(/catalyst login/);
+  });
+
+  test.each([404, 405, 410])("a %i on the view (a route this cloud does not serve) falls back to the walk", async (status) => {
+    await seedJoined(home, server, personal());
+    server.waitingOnMe = { status, body: { error: "gone" } };
+    expect(await main(["ask", "list", "--json"], ctx)).toBe(0);
+    expect(parse().asks.map((a) => a.identifier)).toEqual(["ENG-7"]);
+    expect(viewReqs()).toHaveLength(1);
+    expect(walkReqs().filter((r) => r.path.startsWith("/api/v1/issues?"))).toHaveLength(1);
+  });
+
+  test.each([
+    [400, { error: "bad_request" }],
+    [403, { error: "forbidden" }],
+    [409, { error: "conflict" }],
+    [422, { error: "unprocessable" }],
+  ])("a %i refusal on the view surfaces, prints nothing on stdout and never walks", async (status, body) => {
+    await seedJoined(home, server, personal());
+    server.waitingOnMe = { status, body };
+    expect(await main(["ask", "list", "--json"], ctx)).toBe(2);
+    expect(ctx.out).toEqual([]);
+    expect(ctx.err.join("\n")).toContain(String(status));
+    expect(walkReqs()).toHaveLength(0);
   });
 
   test("a 401 on the view surfaces and never walks", async () => {

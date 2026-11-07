@@ -63,9 +63,8 @@ describe("readWaitingOnMe", () => {
   test.each([
     ["absent", { status: 404, body: {} }, "absent"],
     ["no identity", { status: 409, body: { error: "no_linear_identity" } }, "no-linear-identity"],
-    ["other 409", { status: 409, body: { error: "x" } }, "refused"],
-    ["403", { status: 403, body: { error: "personal_credential_required" } }, "refused"],
-    ["400", { status: 400, body: {} }, "refused"],
+    ["405", { status: 405, body: {} }, "absent"],
+    ["410", { status: 410, body: {} }, "absent"],
     ["unknown envelope", { status: 200, body: { nope: 1 } }, "shape"],
     ["row without identifier", { status: 200, body: { rows: [{ assignee_id: ME }] } }, "shape"],
     ["blocks without related_state", { status: 200, body: { rows: [{ identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", title: "T", updated_at: 1, relations: [{ type: "blocks", issue_identifier: "A-1", related_identifier: "A-2" }] }] } }, "shape"],
@@ -81,6 +80,15 @@ describe("readWaitingOnMe", () => {
   ] as const)("%s falls back as %s", async (_n, reply, reason) => {
     server.waitingOnMe = { ...reply, headers: "headers" in reply ? { ...reply.headers } : undefined };
     expect(await readWaitingOnMe(client(), ME)).toEqual({ ok: false, reason });
+  });
+  test.each([
+    [400, {}],
+    [403, { error: "personal_credential_required" }],
+    [409, { error: "x" }],
+    [422, {}],
+  ])("a %i refusal throws instead of falling back", async (status, body) => {
+    server.waitingOnMe = { status, body };
+    await expect(readWaitingOnMe(client(), ME)).rejects.toThrow(new RegExp(`\\(${status}\\)`));
   });
   test("a non-JSON 200 body is a shape fallback", async () => {
     const f = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {

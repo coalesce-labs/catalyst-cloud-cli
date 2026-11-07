@@ -1,15 +1,18 @@
 // waiting-on-me.ts — the self-scoped Waiting-on-me view for `ask list` (CTC-5644). The route's contract
 // is not defined anywhere this repository can read, so every reply is checked and anything unproven is
 // a fallback reason: the caller walks /api/v1/issues instead, and the answer stays today's.
-import { MeError } from "./errors.js";
+import { CliError, MeError } from "./errors.js";
 import { NEXT_CURSOR_HEADER, readTotal, SERVER_PAGE_CAP } from "./pagination.js";
 import type { ApiClient } from "./transport.js";
 
 export const WAITING_ON_ME_PATH = "/api/v1/views/waiting-on-me";
 export const VIEW_MAX_PAGES = 10;
-const FALLBACK_STATUSES = [400, 403, 404, 405, 409, 410, 422];
+// Only a route this Catalyst Cloud does not serve (404, 405, 410) and the 409 `no_linear_identity` reply
+// (a stale local identity; the walk still answers right) fall back. Any other 400, 403, 409 or 422 is a
+// refusal that would repeat on every run, so it surfaces instead of silently walking every issue (CTC-5644).
+const FALLBACK_STATUSES = [404, 405, 409, 410];
 
-export type ViewFallback = "absent" | "refused" | "no-linear-identity" | "shape" | "other-person" | "unpaged" | "stalled" | "overrun";
+export type ViewFallback = "absent" | "no-linear-identity" | "shape" | "other-person" | "unpaged" | "stalled" | "overrun";
 export type ViewRead = { ok: true; rows: Record<string, unknown>[]; pages: number } | { ok: false; reason: ViewFallback };
 
 type Row = Record<string, unknown>;
@@ -52,11 +55,6 @@ export function checkViewRows(rows: Row[], linearUserId: string): ViewFallback |
   return null;
 }
 
-function statusReason(status: number): ViewFallback {
-  if (status === 404 || status === 405 || status === 410) return "absent";
-  return "refused";
-}
-
 function bodyHasMore(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
   const b = body as Row;
@@ -91,7 +89,10 @@ export async function readWaitingOnMe(api: ApiClient, linearUserId: string): Pro
     }
     if (res.status !== 200) {
       const code = (res.body as { error?: unknown } | undefined)?.error;
-      return { ok: false, reason: res.status === 409 && code === "no_linear_identity" ? "no-linear-identity" : statusReason(res.status) };
+      if (res.status === 409 && code !== "no_linear_identity") {
+        throw new CliError(`GET ${WAITING_ON_ME_PATH} failed (409)${typeof code === "string" && code ? `: ${code}` : ""}`, "http", 2, 409);
+      }
+      return { ok: false, reason: res.status === 409 ? "no-linear-identity" : "absent" };
     }
     const page = viewRowsOf(res.body);
     if (page === null) return { ok: false, reason: "shape" };

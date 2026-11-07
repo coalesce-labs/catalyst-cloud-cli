@@ -477,6 +477,8 @@ export function openStateFrom(states: { name: string; type: string }[]): (issue:
   return (issue) => !terminal.has(String(issue.state ?? "").toLowerCase());
 }
 
+const STALE_IDENTITY_HINT = `[catalyst] Catalyst now has a different Linear identity for you than this machine recorded at login, so this read every ticket; run catalyst login to refresh it`;
+
 async function list(args: ParsedArgs, ctx: Ctx, doc: TenantContract, api: ApiClient, cfg: CustomerConfig): Promise<number> {
   // ⛔ THE INBOX IS THE WHOLE SCOPE, NOT A PAGE. For one person that scope is their own view (CTC-5644);
   // for everyone it is every issue. The mirror caps every page at 500 rows regardless of the requested
@@ -504,6 +506,8 @@ async function list(args: ParsedArgs, ctx: Ctx, doc: TenantContract, api: ApiCli
     ranked = rankAsks(inbox.rows, doc, openStateFrom(states));
   }
   if (args.json) {
+    // stderr only: stdout stays exactly {scope, asks}. A stale identity makes every run walk, so say so.
+    if (staleIdentity) ctx.stderr(STALE_IDENTITY_HINT);
     ctx.stdout(JSON.stringify({ scope, asks: ranked }));
     return 0;
   }
@@ -513,7 +517,7 @@ async function list(args: ParsedArgs, ctx: Ctx, doc: TenantContract, api: ApiCli
     ctx.stderr(`[catalyst] connected with your cloud account's shared key, which names no person — this is every open ask; log in with your personal key to see only yours`);
   }
   if (staleIdentity) {
-    ctx.stderr(`[catalyst] Catalyst now has a different Linear identity for you than this machine recorded at login, so this read every ticket; run catalyst login to refresh it`);
+    ctx.stderr(STALE_IDENTITY_HINT);
   }
   if (ranked.length === 0) {
     if (scope.kind !== "mine") ctx.stdout("no open asks");

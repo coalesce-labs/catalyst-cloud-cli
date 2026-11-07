@@ -2,9 +2,9 @@
 
 ## 0.16.50
 
-`catalyst ask list` now reads only your own asks when you are connected as yourself with a matched Linear identity, so a status bar or prompt that runs it every few minutes no longer reads every ticket in your workspace. The asks, their order and the `--json` output (`scope`, and each ask's `identifier`, `title`, `state`, `blocks`, `score` and `assigneeId`) are the same as before. `--anyone`, an unmatched identity and the workspace's shared key still read every ticket, and so does a Catalyst Cloud that does not offer the narrower read. A server error on the narrower read is reported, not retried with the full read.
+`catalyst ask list` now reads only your own asks when you are connected as yourself with a matched Linear identity, so a status bar or prompt that runs it every few minutes no longer reads every ticket in your workspace. The asks, their order and the `--json` output (`scope`, and each ask's `identifier`, `title`, `state`, `blocks`, `score` and `assigneeId`) are the same as before. `--anyone`, an unmatched identity and the workspace's shared key still read every ticket, and so does a Catalyst Cloud that does not offer the narrower read. A server error on the narrower read, or a refusal of it (a 400, 403, 409 or 422), is reported with its status, not retried with the full read.
 
-When none of your asks are open, the line now reads `no open asks assigned to <you> (add --anyone to see every open ask in your cloud account)`. It no longer counts everyone's open asks, because that count needs the full read this release avoids. If Catalyst has a different Linear identity for you than the one this machine recorded when you logged in, `ask list` reads every ticket as before and says to run `catalyst login`.
+When none of your asks are open, the line now reads `no open asks assigned to <you> (add --anyone to see every open ask in your cloud account)`. It no longer counts everyone's open asks, because that count needs the full read this release avoids. If Catalyst has a different Linear identity for you than the one this machine recorded when you logged in, `ask list` reads every ticket as before and says to run `catalyst login`, on stderr as well when you pass `--json`, so what you parse from stdout does not change.
 
 ## 0.16.49
 
