@@ -113,6 +113,27 @@ describe("readWaitingOnMe", () => {
     server.waitingOnMe = { status, body: {} };
     await expect(readWaitingOnMe(client(), ME)).rejects.toBeInstanceOf(CliError);
   });
+  describe("a total the rows do not reach", () => {
+    const row = { identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", title: "T", updated_at: 1, relations: [] };
+    const read = async (body: unknown, headers: Record<string, string> = {}) => {
+      server.waitingOnMe = { status: 200, body, headers };
+      return readWaitingOnMe(client(), ME);
+    };
+    test("a header total above the rows is unpaged", async () => {
+      expect(await read({ rows: [row] }, { "x-mirror-total": "2" })).toEqual({ ok: false, reason: "unpaged" });
+    });
+    test("a body total above the rows is unpaged", async () => {
+      expect(await read({ rows: [row], total: 2 })).toEqual({ ok: false, reason: "unpaged" });
+    });
+    test("a total equal to the rows, or one that is absent or not a whole number, is complete", async () => {
+      for (const [body, h] of [[{ rows: [row], total: 1 }, { "x-mirror-total": "1" }], [{ rows: [row] }, {}], [{ rows: [row], total: "2" }, { "x-mirror-total": "many" }], [{ rows: [row], total: 2.5 }, { "x-mirror-total": "-3" }]] as const) {
+        expect(await read(body, { ...h })).toMatchObject({ ok: true });
+      }
+    });
+    test("a bare array reply with a header total is checked too", async () => {
+      expect(await read([row], { "x-mirror-total": "3" })).toEqual({ ok: false, reason: "unpaged" });
+    });
+  });
   test("a network error surfaces", async () => {
     const boom = (async () => {
       throw new TypeError("fetch failed");

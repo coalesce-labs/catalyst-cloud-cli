@@ -2,7 +2,7 @@
 // is not defined anywhere this repository can read, so every reply is checked and anything unproven is
 // a fallback reason: the caller walks /api/v1/issues instead, and the answer stays today's.
 import { MeError } from "./errors.js";
-import { NEXT_CURSOR_HEADER, SERVER_PAGE_CAP } from "./pagination.js";
+import { NEXT_CURSOR_HEADER, readTotal, SERVER_PAGE_CAP } from "./pagination.js";
 import type { ApiClient } from "./transport.js";
 
 export const WAITING_ON_ME_PATH = "/api/v1/views/waiting-on-me";
@@ -64,6 +64,18 @@ function bodyHasMore(body: unknown): boolean {
   return (typeof cursor === "string" && cursor !== "") || b.hasMore === true;
 }
 
+/** The row count a reply says it has in all: the `x-mirror-total` header, else a body `total`. Read on the
+ *  last page only, where the accumulated rows must reach it. Absent or not a whole number is "unknown",
+ *  never a fallback, as on the walk. */
+function claimedTotals(headers: Headers, body: unknown): number[] {
+  const out: number[] = [];
+  const h = readTotal(headers);
+  if (h !== null) out.push(h);
+  const t = body && typeof body === "object" && !Array.isArray(body) ? (body as Row).total : undefined;
+  if (typeof t === "number" && Number.isInteger(t) && t >= 0) out.push(t);
+  return out;
+}
+
 /** Read the calling member's asks. 401 and 429 throw, as the walk's first page would. */
 export async function readWaitingOnMe(api: ApiClient, linearUserId: string): Promise<ViewRead> {
   const rows: Row[] = [];
@@ -88,7 +100,7 @@ export async function readWaitingOnMe(api: ApiClient, linearUserId: string): Pro
     rows.push(...page);
     const next = res.headers.get(NEXT_CURSOR_HEADER);
     if (next === null || next === "") {
-      if (bodyHasMore(res.body)) return { ok: false, reason: "unpaged" };
+      if (bodyHasMore(res.body) || claimedTotals(res.headers, res.body).some((n) => rows.length < n)) return { ok: false, reason: "unpaged" };
       return { ok: true, rows, pages };
     }
     if (seen.has(next)) return { ok: false, reason: "stalled" };
