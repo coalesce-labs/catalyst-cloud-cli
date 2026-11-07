@@ -4,6 +4,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { main } from "../src/cli";
 import { fixtureIssue, fixtureIssues, manyIssues, startMeFixture, waitingOnMeFixture, type FixtureServer } from "./fixture";
+import type { CustomerConfig } from "../src/config";
 import { openStateFrom, rankAsks } from "../src/ask";
 import { FIXTURE_ME_USER } from "./fixture";
 import { makeCtx, seedJoined, tempHome, type TestCtx } from "./helpers";
@@ -69,7 +70,7 @@ describe("ask list reads the whole scope", () => {
 
 // ── CTC-5644: a matched person reads their own view, never the whole issue table ──────────────────
 const ME = FIXTURE_ME_USER.linearUserId;
-const personal = (linearUserId: string | null = ME) => ({
+const personal = (linearUserId: string | null = ME): { config: Partial<CustomerConfig> } => ({
   config: { key: "fixture-user-key", user: { id: "d1-user-tony", label: "Tony", email: null, role: "admin", linearUserId } },
 });
 type Out = { scope: { kind: string }; asks: { identifier: string; score: number; blocks: string[]; assigneeId: string | null }[] };
