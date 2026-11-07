@@ -9,6 +9,7 @@ import type { TenantContract } from "./contract-types.js";
 import { CliError, UsageError } from "./errors.js";
 import { apiClient, type ApiClient } from "./transport.js";
 import { fetchAllPages } from "./pagination.js";
+import { readWaitingOnMe } from "./waiting-on-me.js";
 import { fetchWorkflowStates, postAgent, resolveIssue } from "./write.js";
 
 export interface AskDeps {
@@ -421,7 +422,9 @@ export function inboxScope(cfg: { user?: { label: string; linearUserId: string |
 
 /** Rank open asks the way the cloud's own Waiting-on-me feed does: the most open tickets blocked
  *  first, then the oldest ask first, then the identifier. `score` is the count of open tickets the
- *  ask blocks. Priority is not a weight here, and age only breaks a tie. */
+ *  ask blocks. Priority is not a weight here, and age only breaks a tie. A blocked ticket that is not
+ *  among `issues` is judged by the relation's `related_state` (the Waiting-on-me view sends only asks),
+ *  and counts as open when that is null or missing. */
 export function rankAsks(issues: Record<string, unknown>[], doc: TenantContract, openState: (issue: Record<string, unknown>) => boolean): RankedAsk[] {
   const askIds = new Set<string>();
   for (const team of doc.teams) for (const l of team.labels.ask) for (const id of [l.unscopedId, l.teamScopedId, l.preferredId]) if (id) askIds.add(id);
@@ -443,14 +446,15 @@ export function rankAsks(issues: Record<string, unknown>[], doc: TenantContract,
   const ranked: { ask: RankedAsk; age: number }[] = [];
   for (const issue of issues) {
     if (!isAsk(issue) || !openState(issue)) continue;
-    const relations = Array.isArray(issue.relations) ? (issue.relations as { type?: unknown; issue_identifier?: unknown; related_identifier?: unknown }[]) : [];
+    const relations = Array.isArray(issue.relations) ? (issue.relations as { type?: unknown; issue_identifier?: unknown; related_identifier?: unknown; related_state?: unknown }[]) : [];
     const blocked = relations
       .filter((r) => r.type === "blocks" && r.issue_identifier === issue.identifier && typeof r.related_identifier === "string")
-      .map((r) => r.related_identifier as string)
-      .filter((id) => {
-        const t = byIdentifier.get(id);
-        return !t || openState(t);
-      });
+      .filter((r) => {
+        const t = byIdentifier.get(r.related_identifier as string);
+        if (t) return openState(t);
+        return typeof r.related_state === "string" ? openState({ state: r.related_state }) : true;
+      })
+      .map((r) => r.related_identifier as string);
     ranked.push({
       age: ageKey(issue),
       ask: {
@@ -467,17 +471,38 @@ export function rankAsks(issues: Record<string, unknown>[], doc: TenantContract,
   return ranked.map((r) => r.ask);
 }
 
-async function list(args: ParsedArgs, ctx: Ctx, doc: TenantContract, api: ApiClient, cfg: CustomerConfig): Promise<number> {
-  // ⛔ THE INBOX IS THE WHOLE SCOPE, NOT A PAGE. The mirror caps every page at 500 rows regardless of
-  // the requested limit, so a single `limit: 500` read drops every ask past the cap — and, worse,
-  // scores the asks it does show against a partial view of what they block (rankAsks below).
-  const [inbox, states] = await Promise.all([fetchAllPages(api, "/api/v1/issues", {}), fetchWorkflowStates(api)]);
-  const issues = inbox.rows;
+/** The terminal-state test shared by both `ask list` paths: stage types completed and canceled. */
+export function openStateFrom(states: { name: string; type: string }[]): (issue: Record<string, unknown>) => boolean {
   const terminal = new Set(states.filter((s) => ["completed", "canceled", "cancelled"].includes(s.type.toLowerCase())).map((s) => s.name.toLowerCase()));
-  const openState = (issue: Record<string, unknown>) => !terminal.has(String(issue.state ?? "").toLowerCase());
-  const all = rankAsks(issues, doc, openState);
+  return (issue) => !terminal.has(String(issue.state ?? "").toLowerCase());
+}
+
+async function list(args: ParsedArgs, ctx: Ctx, doc: TenantContract, api: ApiClient, cfg: CustomerConfig): Promise<number> {
+  // ⛔ THE INBOX IS THE WHOLE SCOPE, NOT A PAGE. For one person that scope is their own view (CTC-5644);
+  // for everyone it is every issue. The mirror caps every page at 500 rows regardless of the requested
+  // limit, so a single `limit: 500` read drops every ask past the cap — and, worse, scores the asks it
+  // does show against a partial view of what they block (rankAsks below).
   const scope = inboxScope(cfg, flagBool(args, "anyone"));
-  const ranked = scope.kind === "mine" ? all.filter((a) => a.assigneeId === scope.linearUserId) : all;
+  let ranked: RankedAsk[];
+  let wider: number | null = null; // the workspace-wide open count, known only after a walk
+  let staleIdentity = false;
+  const walk = () => fetchAllPages(api, "/api/v1/issues", {});
+  if (scope.kind === "mine") {
+    const [view, states] = await Promise.all([readWaitingOnMe(api, scope.linearUserId), fetchWorkflowStates(api)]);
+    const openState = openStateFrom(states);
+    if (view.ok) {
+      // The filter is a guard: a later loosening of the view checks must never show someone else's asks as "mine".
+      ranked = rankAsks(view.rows, doc, openState).filter((a) => a.assigneeId === scope.linearUserId);
+    } else {
+      staleIdentity = view.reason === "other-person" || view.reason === "no-linear-identity";
+      const all = rankAsks((await walk()).rows, doc, openState);
+      ranked = all.filter((a) => a.assigneeId === scope.linearUserId);
+      wider = all.length;
+    }
+  } else {
+    const [inbox, states] = await Promise.all([walk(), fetchWorkflowStates(api)]);
+    ranked = rankAsks(inbox.rows, doc, openStateFrom(states));
+  }
   if (args.json) {
     ctx.stdout(JSON.stringify({ scope, asks: ranked }));
     return 0;
@@ -487,8 +512,13 @@ async function list(args: ParsedArgs, ctx: Ctx, doc: TenantContract, api: ApiCli
   } else if (scope.kind === "no-person") {
     ctx.stderr(`[catalyst] connected with your cloud account's shared key, which names no person — this is every open ask; log in with your personal key to see only yours`);
   }
+  if (staleIdentity) {
+    ctx.stderr(`[catalyst] Catalyst now has a different Linear identity for you than this machine recorded at login, so this read every ticket; run catalyst login to refresh it`);
+  }
   if (ranked.length === 0) {
-    ctx.stdout(scope.kind === "mine" ? `no open asks assigned to ${scope.label} (${all.length} open in your cloud account — add --anyone to see them)` : "no open asks");
+    if (scope.kind !== "mine") ctx.stdout("no open asks");
+    else if (wider === null) ctx.stdout(`no open asks assigned to ${scope.label} (add --anyone to see every open ask in your cloud account)`);
+    else ctx.stdout(`no open asks assigned to ${scope.label} (${wider} open in your cloud account — add --anyone to see them)`);
     return 0;
   }
   for (const a of ranked) ctx.stdout(`${a.identifier}  holds ${a.blocks.length} ticket${a.blocks.length === 1 ? "" : "s"}${a.blocks.length ? `: ${a.blocks.join(", ")}` : ""}  ${a.title}`);
