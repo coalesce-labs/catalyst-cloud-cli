@@ -1262,7 +1262,8 @@ export function dockerRunnerUpdateEngine(
       // No `--all`: `docker ps` lists running containers only, which is what "a phase is running" means
       // (deploy/self-host README, "What a drain does"). A container the supervisor was about to start is
       // covered by the post-stop count: if it started before the stop it is running there and the update
-      // waits; if it had not, nothing starts it once the supervisor stops.
+      // waits. If it had not, the supervisor that comes back after the update can re-adopt its recorded
+      // launch and start it then, under the new release; that is one late phase, not a drain held open.
       const listed = await docker(["ps", "--filter", `label=${ATTEMPT_HOST_LABEL}=${hostId}`, "--format", `{{.ID}}\t{{.Label "${ATTEMPT_ID_LABEL}"}}`], { signal });
       return listed.code === 0 ? new Set(listed.stdout.split("\n").filter(Boolean).map((line) => {
         const [id, attempt] = line.trim().split("\t");
