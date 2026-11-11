@@ -427,7 +427,9 @@ export interface RunnerUpdateEngine {
   /** `fresh` reads again even after a shared read answered, and that read answers later readers. */
   desiredRelease(dir: string, signal?: AbortSignal, report?: string, fresh?: boolean): Promise<DesiredReleaseRead>;
   updateDrain(dir: string, request: DrainRequest | null, signal?: AbortSignal): Promise<DesiredReleaseRead>;
-  /** Phase attempts with a container for this host, counted once per attempt id; null when unreadable. */
+  /** Phase attempts with a RUNNING container for this host (paused and restarting count; created and
+   *  exited do not), counted once per attempt id; null when unreadable. CTC-10408: a container that
+   *  never started or already exited is no phase, and counting it held a drain open indefinitely. */
   attemptContainers(dir: string, hostId: string, signal?: AbortSignal): Promise<number | null>;
   /** Pull and verify each image natively for this engine. Null when ready, else why not. */
   prepare(images: string[], signal?: AbortSignal): Promise<string | null>;
@@ -1257,7 +1259,12 @@ export function dockerRunnerUpdateEngine(
     },
     async attemptContainers(_dir, hostId, signal) {
       if (!HOST_ID.test(hostId)) return null;
-      const listed = await docker(["ps", "--all", "--filter", `label=${ATTEMPT_HOST_LABEL}=${hostId}`, "--format", `{{.ID}}\t{{.Label "${ATTEMPT_ID_LABEL}"}}`], { signal });
+      // No `--all`: `docker ps` lists running containers only, which is what "a phase is running" means
+      // (deploy/self-host README, "What a drain does"). A container the supervisor was about to start is
+      // covered by the post-stop count: if it started before the stop it is running there and the update
+      // waits. If it had not, the supervisor that comes back after the update can re-adopt its recorded
+      // launch and start it then, under the new release; that is one late phase, not a drain held open.
+      const listed = await docker(["ps", "--filter", `label=${ATTEMPT_HOST_LABEL}=${hostId}`, "--format", `{{.ID}}\t{{.Label "${ATTEMPT_ID_LABEL}"}}`], { signal });
       return listed.code === 0 ? new Set(listed.stdout.split("\n").filter(Boolean).map((line) => {
         const [id, attempt] = line.trim().split("\t");
         return attempt || id;
