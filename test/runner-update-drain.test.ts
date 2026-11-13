@@ -879,6 +879,27 @@ describe("CTC-10412: a drain the cloud calls idle past its soft limit tells the 
     expect(report.detail).toContain(TOKEN);
   });
 
+  it("runner update --auto prints the owner's line after the soft-limit pass when the counts disagree", async () => {
+    const dir = machine311();
+    // The drain was requested just over its soft limit ago on the real clock the update runs on; the
+    // first look counts 2 running phases and every later look counts 0, so the run goes on to update.
+    const requestedAtMs = Date.now() - DRAIN_SOFT_LIMIT_MS - 60_000;
+    const requestId = "d6b01f48-9f7e-4d13-8c4d-e99b8efcb360";
+    const cloud = fakeDrainCloud({ live: () => 0 });
+    cloud.setDrain({ requestId, generation: 311, requestedAtMs, admissionBlocked: true });
+    writeReleaseState(dir, { ...readReleaseState(dir),
+      drain: { requestId, generation: 311, revision: cloud.status().revision, acknowledgedAtMs: requestedAtMs, softLimitReported: false, countsCompared: false },
+      deferral: { sinceMs: requestedAtMs - DRAIN_AFTER_MS, offered: 311, offeredSinceMs: requestedAtMs - DRAIN_AFTER_MS } });
+    const fake = fakeEngine(dir, { read: offered311(), busy: [2, 0, 0, 0], drain: cloud.call });
+    const ctx = makeCtx(tempHome(), { now: () => new Date("2026-11-13T04:00:00.000Z") });
+    expect(await main(["runner", "update", "--auto", "--dir", dir], ctx, { runner: { engine: fake.engine, custody: { platform: "linux" } } })).toBe(0);
+    expect(ctx.out[0]).toMatch(/^2026-11-13T04:00:00\.000Z drain_soft_limit .*,drain_counts_disagree:311:2:0 generation=303$/);
+    expect(ctx.out[1]).toBe(drainCountsLine("host_abc", 311, 2, 0));
+    expect(ctx.out.some((line) => line.includes(" updated ") && line.includes("generation=311"))).toBe(true);
+    expect(ctx.out.filter((line) => line.includes("This machine (host "))).toHaveLength(1);
+    expect(cloud.drain).toBeNull();
+  });
+
   it("POSITIVE CONTROL: a count of 0 after the drain opens updates, then reads current", async () => {
     const dir = machine311();
     const time = clock(OPENED_AT);
