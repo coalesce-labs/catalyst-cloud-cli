@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CUSTODY_UNATTESTED_LINE, DRAIN_AFTER_MS, dockerRepinLine, DRAIN_SOFT_LIMIT_MS, lastProblemLines, readReleaseState, RELEASE_STATE_FILE, releaseLock,
+import { CUSTODY_UNATTESTED_LINE, DRAIN_AFTER_MS, dockerRepinLine, drainCountsDetail, drainCountsLine, DRAIN_SOFT_LIMIT_MS, lastProblemLines, readReleaseState, RELEASE_STATE_FILE, releaseLock,
   releaseUpdateDrain, runRunnerUpdate, takeLock, updateReport, updateResultLines, writeReleaseState, type UpdateResult } from "../src/runner-update";
 import { main } from "../src/cli";
 import { canonicalDarwinThoughtsJson } from "../vendor/self-host/darwin-thoughts-custody/verifier.mjs";
@@ -632,6 +632,292 @@ describe("CTC-7749: a drain's soft limit never ends a running phase", () => {
     const second = fakeEngine(dir, { read: offered(), phases: () => 1, drain: cloud.call });
     const resumed = await runRunnerUpdate(second.engine, { dir, drain: true, now: time.now, sleep: async () => secondAbort.abort(), signal: secondAbort.signal });
     expect(resumed.outcome).toBe("draining_for_update");
+  });
+});
+
+describe("CTC-10412: a drain the cloud calls idle past its soft limit tells the operator", () => {
+  // The ticket's replay: a machine on 303 is offered 311, the first busy look opens the drain, and a
+  // pass follows every 15 minutes (waitForIdle's cadence) until `until`.
+  const machine311 = () => {
+    const dir = install();
+    writeReleaseState(dir, { ...readReleaseState(dir), generation: 303, journal: null });
+    return dir;
+  };
+  const offered311 = () => answered(release({ generation: 311 }));
+  const OPENED_AT = A + DRAIN_AFTER_MS;
+  const SOFT_AT = OPENED_AT + DRAIN_SOFT_LIMIT_MS;
+  const TOKEN = "drain_counts_disagree:311:2:0";
+  const REQUESTED = ["GET", "request:311"];
+  type Time = ReturnType<typeof clock>;
+  type Cloud = ReturnType<typeof fakeDrainCloud>;
+  async function replay(dir: string, time: Time, cloud: Cloud, { phases, until, onPass }: {
+    phases: () => number | null; until: number; onPass?: (pass: UpdateResult, at: number) => void;
+  }) {
+    const abort = new AbortController();
+    const fake = fakeEngine(dir, { read: offered311(), phases, drain: cloud.call });
+    const passes: Array<{ at: number; result: UpdateResult }> = [];
+    const result = await runRunnerUpdate(fake.engine, { dir, drain: true, now: time.now, sleep: time.sleep, signal: abort.signal,
+      onPass: (pass) => {
+        passes.push({ at: time.now(), result: pass });
+        onPass?.(pass, time.now());
+        if (time.now() >= until) abort.abort();
+      } });
+    return { fake, passes, result };
+  }
+  const reports = (fake: { reports: Array<string | undefined> }) =>
+    fake.reports.filter((raw): raw is string => raw !== undefined).map((raw) => JSON.parse(raw) as { outcome: string; detail: string });
+  const signalled = (passes: Array<{ at: number; result: UpdateResult }>) =>
+    passes.filter(({ result }) => result.detail.includes("drain_counts_disagree"));
+
+  it("a drain the cloud says is idle tells the operator once at the soft limit, naming the machine, generation and both counts", async () => {
+    const dir = machine311();
+    const time = clock(OPENED_AT);
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
+    const before = readFileSync(join(dir, ".env"), "utf8");
+    const { fake, passes } = await replay(dir, time, cloud, { phases: () => 2, until: OPENED_AT + 4 * 3_600_000 });
+    // Exactly one pass carries the signal: the soft-limit pass, which keeps its outcome.
+    const hits = signalled(passes);
+    expect(hits).toHaveLength(1);
+    const hit = hits[0]!;
+    expect(hit.at).toBe(SOFT_AT);
+    expect(hit.result.outcome).toBe("drain_soft_limit");
+    expect(hit.result.detail).toContain("phases_running:2");
+    expect(hit.result.detail).toContain("live_generations:0");
+    expect(hit.result.detail).toContain(TOKEN);
+    // The owner's line names the machine, the generation, the local count and the cloud's zero.
+    const [line] = hit.result.notices ?? [];
+    expect(hit.result.notices).toEqual([drainCountsLine("host_abc", 311, 2, 0)]);
+    expect(line).toContain("host_abc");
+    expect(line).toContain("generation 311");
+    expect(line).toContain("2 running phases");
+    expect(line).toContain("Catalyst counts 0 running");
+    expect(line).toContain("Nothing was stopped");
+    // A person's run prints it too (AC9).
+    expect(updateResultLines(hit.result)).toContain(line);
+    // The cloud hears it at once, as the pass's own report.
+    expect(reports(fake).some((report) => report.outcome === "drain_soft_limit" && report.detail.includes(TOKEN))).toBe(true);
+    // One extra GET in all: the comparison.
+    expect(cloud.calls).toEqual([...REQUESTED, "GET"]);
+    // The drain keeps waiting and no phase is touched (CTC-6933).
+    expect(fake.calls).not.toContain("stop");
+    expect(fake.calls).not.toContain("up");
+    expect(cloud.calls).not.toContain("release");
+    expect(readFileSync(join(dir, ".env"), "utf8")).toBe(before);
+    expect(readReleaseState(dir).drain).toMatchObject({ softLimitReported: true, countsCompared: true });
+    expect(passes.filter(({ result }) => result.outcome === "drain_soft_limit")).toHaveLength(1);
+  }, 15_000);
+
+  it("a restarted process does not compare the counts or signal again", async () => {
+    const dir = machine311();
+    const time = clock(OPENED_AT);
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
+    const first = await replay(dir, time, cloud, { phases: () => 2, until: SOFT_AT });
+    expect(signalled(first.passes)).toHaveLength(1);
+    const comparisons = cloud.calls.length;
+    const second = await replay(dir, time, cloud, { phases: () => 2, until: SOFT_AT + 2 * 3_600_000 });
+    expect(second.passes.length).toBeGreaterThan(1);
+    expect(signalled(second.passes)).toHaveLength(0);
+    expect(second.passes.some(({ result }) => result.notices !== undefined)).toBe(false);
+    expect(cloud.calls).toHaveLength(comparisons);
+    expect(reports(second.fake).some((report) => report.detail.includes("drain_counts_disagree") && report.outcome !== "drain_soft_limit")).toBe(false);
+  }, 15_000);
+
+  it("a drain held by a phase the cloud counts keeps waiting past the soft limit without a signal", async () => {
+    const dir = machine311();
+    const time = clock(OPENED_AT);
+    const cloud = fakeDrainCloud({ live: () => 1, now: time.now });
+    const before = readFileSync(join(dir, ".env"), "utf8");
+    const { fake, passes } = await replay(dir, time, cloud, { phases: () => 1, until: SOFT_AT + 3_600_000 });
+    const soft = passes.find(({ at }) => at === SOFT_AT)!;
+    expect(soft.result.outcome).toBe("drain_soft_limit");
+    expect(soft.result.detail).toContain("phases_running:1");
+    expect(soft.result.detail).toContain("live_generations:1");
+    // The cloud was asked once, at the soft limit, and the counts agreed.
+    expect(cloud.calls).toEqual([...REQUESTED, "GET"]);
+    expect(signalled(passes)).toHaveLength(0);
+    expect(passes.some(({ result }) => result.notices !== undefined)).toBe(false);
+    expect(reports(fake).some((report) => report.detail.includes("drain_counts_disagree"))).toBe(false);
+    // It goes on waiting as before.
+    expect(passes.filter(({ at }) => at > SOFT_AT).every(({ result }) => result.outcome === "draining_for_update")).toBe(true);
+    expect(fake.calls).not.toContain("stop");
+    expect(fake.calls).not.toContain("up");
+    expect(cloud.calls).not.toContain("release");
+    expect(readFileSync(join(dir, ".env"), "utf8")).toBe(before);
+    expect(readReleaseState(dir).drain).toMatchObject({ softLimitReported: true, countsCompared: true });
+  }, 15_000);
+
+  it("no comparison and no signal before the soft limit", async () => {
+    const dir = machine311();
+    const time = clock(OPENED_AT);
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
+    const { passes } = await replay(dir, time, cloud, { phases: () => 2, until: SOFT_AT - FIFTEEN_MINUTES });
+    expect(passes.at(-1)?.at).toBe(SOFT_AT - FIFTEEN_MINUTES);
+    expect(cloud.calls).toEqual(REQUESTED);
+    expect(signalled(passes)).toHaveLength(0);
+    expect(passes.some(({ result }) => result.outcome === "drain_soft_limit")).toBe(false);
+    expect(readReleaseState(dir).drain?.countsCompared).toBe(false);
+  });
+
+  it("a refused cloud read at the soft limit gives no signal and tries the comparison again", async () => {
+    const dir = machine311();
+    const time = clock(OPENED_AT);
+    let failing = false;
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now,
+      refuse: (request) => request === null && failing ? { kind: "unreachable", detail: "TimeoutError", hostId: "host_abc" } : null });
+    const compared: boolean[] = [];
+    const { passes } = await replay(dir, time, cloud, { phases: () => 2, until: SOFT_AT + 3_600_000,
+      onPass: (_pass, at) => {
+        if (at === OPENED_AT) failing = true;
+        if (at === SOFT_AT) { failing = false; compared.push(readReleaseState(dir).drain?.countsCompared ?? true); }
+      } });
+    const soft = passes.find(({ at }) => at === SOFT_AT)!;
+    expect(soft.result.outcome).toBe("drain_soft_limit");
+    expect(soft.result.detail).toContain(",read:unreachable");
+    expect(soft.result.detail).not.toContain("drain_counts_disagree");
+    expect(soft.result.notices).toBeUndefined();
+    expect(compared).toEqual([false]);
+    // The retry convention: the next pass starts 60 seconds later, and the answered read signals there.
+    const next = passes.find(({ at }) => at > SOFT_AT)!;
+    expect(next.at - soft.at).toBe(60_000);
+    expect(next.result.outcome).toBe("draining_for_update");
+    expect(next.result.detail).toContain(TOKEN);
+    expect(next.result.notices).toEqual([drainCountsLine("host_abc", 311, 2, 0)]);
+    expect(signalled(passes)).toHaveLength(1);
+    // Two comparison reads in all, then none.
+    expect(cloud.calls).toEqual([...REQUESTED, "GET", "GET"]);
+    expect(passes.filter(({ result }) => result.outcome === "drain_soft_limit")).toHaveLength(1);
+    expect(readReleaseState(dir).drain?.countsCompared).toBe(true);
+  }, 15_000);
+
+  it("a second refused read on a pass after the soft limit still leaves the comparison owed", async () => {
+    const dir = machine311();
+    const time = clock(OPENED_AT);
+    let failing = false;
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now,
+      refuse: (request) => request === null && failing ? { kind: "unreachable", detail: "TimeoutError", hostId: "host_abc" } : null });
+    const compared: Array<boolean | undefined> = [];
+    const { passes } = await replay(dir, time, cloud, { phases: () => 2, until: SOFT_AT + 3_600_000,
+      onPass: (_pass, at) => {
+        if (at === OPENED_AT) failing = true;
+        if (at === SOFT_AT + 60_000) failing = false;
+        if (at >= SOFT_AT && at <= SOFT_AT + 60_000) compared.push(readReleaseState(dir).drain?.countsCompared);
+      } });
+    const around = passes.filter(({ at }) => at >= SOFT_AT && at <= SOFT_AT + 120_000);
+    expect(around.map(({ at }) => at - SOFT_AT)).toEqual([0, 60_000, 120_000]);
+    expect(around.map(({ result }) => result.outcome)).toEqual(["drain_soft_limit", "draining_for_update", "draining_for_update"]);
+    expect(around[0]!.result.detail).toContain(",read:unreachable");
+    expect(around[1]!.result.detail).toContain(",read:unreachable");
+    expect(compared).toEqual([false, false]);
+    expect(around[2]!.result.detail).toContain(TOKEN);
+    expect(signalled(passes)).toHaveLength(1);
+    expect(cloud.calls).toEqual([...REQUESTED, "GET", "GET", "GET"]);
+  }, 15_000);
+
+  it("an unreadable local count makes no comparison until a count is read", async () => {
+    const dir = machine311();
+    const time = clock(OPENED_AT);
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
+    const unreadable = () => time.now() >= SOFT_AT && time.now() < SOFT_AT + 30 * 60_000;
+    const during: Array<{ at: number; gets: number; compared: boolean | undefined }> = [];
+    const { passes } = await replay(dir, time, cloud, { phases: () => unreadable() ? null : 2, until: SOFT_AT + 3_600_000,
+      onPass: (_pass, at) => { if (unreadable()) during.push({ at, gets: cloud.calls.length, compared: readReleaseState(dir).drain?.countsCompared }); } });
+    expect(during.map(({ at }) => at)).toEqual([SOFT_AT, SOFT_AT + FIFTEEN_MINUTES]);
+    expect(during.every(({ gets, compared }) => gets === 2 && compared === false)).toBe(true);
+    const soft = passes.find(({ at }) => at === SOFT_AT)!;
+    expect(soft.result.outcome).toBe("drain_soft_limit");
+    expect(soft.result.detail).toContain("phases_running:unknown");
+    expect(soft.result.detail).not.toContain("drain_counts_disagree");
+    const hits = signalled(passes);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.at).toBe(SOFT_AT + 30 * 60_000);
+    expect(hits[0]!.result.detail).toContain("phases_running:2");
+    expect(cloud.calls).toEqual([...REQUESTED, "GET"]);
+  }, 15_000);
+
+  it.each([
+    { label: "no drain", other: null },
+    { label: "another drain", other: { requestId: "6f1d5a52-3b1c-4c3a-9a3e-5b7d1c0e2f44", generation: 312, requestedAtMs: OPENED_AT + 60_000, admissionBlocked: true as const } },
+  ])("a cloud answer with $label gives no signal", async ({ other }) => {
+    const dir = machine311();
+    const time = clock(OPENED_AT);
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
+    const { fake, passes } = await replay(dir, time, cloud, { phases: () => 2, until: SOFT_AT + 3_600_000,
+      onPass: (_pass, at) => { if (at === SOFT_AT - FIFTEEN_MINUTES) cloud.setDrain(other); } });
+    expect(passes.some(({ at, result }) => at === SOFT_AT && result.outcome === "drain_soft_limit")).toBe(true);
+    expect(signalled(passes)).toHaveLength(0);
+    expect(passes.some(({ result }) => result.notices !== undefined)).toBe(false);
+    expect(cloud.calls).toEqual([...REQUESTED, "GET"]);
+    // The answer is a comparison done; the machine keeps waiting under its own drain record.
+    expect(readReleaseState(dir).drain).toMatchObject({ generation: 311, countsCompared: true });
+    expect(passes.filter(({ at }) => at > SOFT_AT).every(({ result }) => result.outcome === "draining_for_update")).toBe(true);
+    expect(fake.calls).not.toContain("stop");
+    expect(cloud.calls).not.toContain("release");
+  }, 15_000);
+
+  it("a drain record written before CTC-10412 is still read", () => {
+    const record = { requestId: "d6b01f48-9f7e-4d13-8c4d-e99b8efcb360", generation: 311, revision: 1, acknowledgedAtMs: OPENED_AT, softLimitReported: true };
+    const drainFrom = (extra: Record<string, unknown>) => {
+      const dir = machine311();
+      writeFileSync(join(dir, RELEASE_STATE_FILE), JSON.stringify({ version: 1, generation: 303, drain: { ...record, ...extra } }));
+      return readReleaseState(dir).drain;
+    };
+    expect(drainFrom({})).toEqual({ ...record, countsCompared: false });
+    expect(drainFrom({ countsCompared: true })).toEqual({ ...record, countsCompared: true });
+    expect(drainFrom({ countsCompared: false })).toEqual({ ...record, countsCompared: false });
+    expect(drainFrom({ countsCompared: "yes" })).toEqual({ ...record, countsCompared: false });
+    // The other fields still gate the record, as before.
+    expect(drainFrom({ softLimitReported: "yes" })).toBeNull();
+  });
+
+  it("the report token and the owner's line carry the generation and both counts", () => {
+    expect(drainCountsDetail(311, 2, 0)).toBe(TOKEN);
+    expect(drainCountsDetail(4096, 17, 0)).toBe("drain_counts_disagree:4096:17:0");
+    expect(drainCountsLine("host_abc", 311, 1, 0)).toContain("1 running phase,");
+    expect(drainCountsLine("host_abc", 311, 2, 0)).toContain("2 running phases,");
+    // Every character of the token is inside the cloud's detail set, so the report keeps it whole.
+    const report = JSON.parse(updateReport({ ...readReleaseState(machine311()), last: { atMs: A, outcome: "drain_soft_limit", detail: `phases_running:2,live_generations:0,${TOKEN}`, generation: 303 } }, "0.1.0")!) as { detail: string };
+    expect(report.detail).toContain(TOKEN);
+  });
+
+  it("runner update --auto prints the owner's line after the soft-limit pass when the counts disagree", async () => {
+    const dir = machine311();
+    // The drain was requested just over its soft limit ago on the real clock the update runs on; the
+    // first look counts 2 running phases and every later look counts 0, so the run goes on to update.
+    const requestedAtMs = Date.now() - DRAIN_SOFT_LIMIT_MS - 60_000;
+    const requestId = "d6b01f48-9f7e-4d13-8c4d-e99b8efcb360";
+    const cloud = fakeDrainCloud({ live: () => 0 });
+    cloud.setDrain({ requestId, generation: 311, requestedAtMs, admissionBlocked: true });
+    writeReleaseState(dir, { ...readReleaseState(dir),
+      drain: { requestId, generation: 311, revision: cloud.status().revision, acknowledgedAtMs: requestedAtMs, softLimitReported: false, countsCompared: false },
+      deferral: { sinceMs: requestedAtMs - DRAIN_AFTER_MS, offered: 311, offeredSinceMs: requestedAtMs - DRAIN_AFTER_MS } });
+    const fake = fakeEngine(dir, { read: offered311(), busy: [2, 0, 0, 0], drain: cloud.call });
+    const ctx = makeCtx(tempHome(), { now: () => new Date("2026-11-13T04:00:00.000Z") });
+    expect(await main(["runner", "update", "--auto", "--dir", dir], ctx, { runner: { engine: fake.engine, custody: { platform: "linux" } } })).toBe(0);
+    expect(ctx.out[0]).toMatch(/^2026-11-13T04:00:00\.000Z drain_soft_limit .*,drain_counts_disagree:311:2:0 generation=303$/);
+    expect(ctx.out[1]).toBe(drainCountsLine("host_abc", 311, 2, 0));
+    expect(ctx.out.some((line) => line.includes(" updated ") && line.includes("generation=311"))).toBe(true);
+    expect(ctx.out.filter((line) => line.includes("This machine (host "))).toHaveLength(1);
+    expect(cloud.drain).toBeNull();
+  });
+
+  it("POSITIVE CONTROL: a count of 0 after the drain opens updates, then reads current", async () => {
+    const dir = machine311();
+    const time = clock(OPENED_AT);
+    const cloud = fakeDrainCloud({ live: () => 0, now: time.now });
+    const opening = await replay(dir, time, cloud, { phases: () => 2, until: OPENED_AT });
+    expect(opening.passes.map(({ result }) => result.outcome)).toEqual(["draining_for_update"]);
+    time.advance(FIFTEEN_MINUTES);
+    const idle = fakeEngine(dir, { read: offered311(), phases: () => 0, drain: cloud.call });
+    const updated = await runRunnerUpdate(idle.engine, { dir, drain: true, now: time.now, sleep: time.sleep });
+    expect(updated).toMatchObject({ outcome: "updated", generation: 311 });
+    expect(cloud.drain).toBeNull();
+    expect(readReleaseState(dir)).toMatchObject({ generation: 311, drain: null });
+    const again = await runRunnerUpdate(fakeEngine(dir, { read: offered311(), phases: () => 0, drain: cloud.call }).engine,
+      { dir, drain: true, now: time.now, sleep: time.sleep });
+    expect(again.outcome).toBe("current");
+    for (const result of [...opening.passes.map(({ result }) => result), updated, again])
+      expect(`${result.detail} ${(result.notices ?? []).join(" ")}`).not.toContain("drain_counts_disagree");
+    expect(reports(idle).some((report) => report.detail.includes("drain_counts_disagree"))).toBe(false);
   });
 });
 
