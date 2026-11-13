@@ -235,7 +235,11 @@ export interface ReleaseState {
   windowSettledMs: number | null;
   /** The first busy look at a pending release, preserved across newer approvals. */
   deferral: { sinceMs: number; offered: number; offeredSinceMs: number } | null;
-  drain: { requestId: string; generation: number; revision: number; acknowledgedAtMs: number | null; softLimitReported: boolean } | null;
+  drain: {
+    requestId: string; generation: number; revision: number; acknowledgedAtMs: number | null; softLimitReported: boolean;
+    /** The soft-limit comparison of the local count with the cloud's live grants was answered for this drain (CTC-10412). */
+    countsCompared: boolean;
+  } | null;
   last: { atMs: number; outcome: UpdateOutcome; detail: string; generation: number | null; offered?: number | null } | null;
   /** The unproven release `.env` names, kept through a preparation stop, and when its wait began. While
    *  this is set, the previous file names the release the machine last proved. */
@@ -267,7 +271,7 @@ export function readReleaseState(dir: string): ReleaseState {
       drain: isRecord(parsed.drain) && typeof parsed.drain.requestId === "string" && UUID.test(parsed.drain.requestId) &&
         posInt(parsed.drain.generation) && Number.isSafeInteger(parsed.drain.revision) && (parsed.drain.revision as number) >= 0 &&
         (parsed.drain.acknowledgedAtMs === null || posInt(parsed.drain.acknowledgedAtMs)) && typeof parsed.drain.softLimitReported === "boolean"
-        ? parsed.drain as ReleaseState["drain"] : null,
+        ? { ...parsed.drain, countsCompared: parsed.drain.countsCompared === true } as ReleaseState["drain"] : null,
       last: isRecord(parsed.last) ? { ...parsed.last, offered: posInt(parsed.last.offered) ? parsed.last.offered : null } as ReleaseState["last"] : null,
     };
   } catch {
@@ -421,6 +425,20 @@ export function dockerRepinDetail(repin: DockerRepin): string {
   return `docker_cli_repinned:${repin.oldSha256.slice(0, 12)}:${repin.newSha256.slice(0, 12)}:${repin.teamIdentifier.toLowerCase()}`;
 }
 
+/** CTC-10412: the report detail token for a drain past its soft limit whose local count the cloud
+ *  contradicts. The generation and both counts are digits, so it stays inside the cloud's detail
+ *  characters; the cloud attributes the report to the host that sent it. */
+export function drainCountsDetail(generation: number, local: number, cloud: number): string {
+  return `drain_counts_disagree:${generation}:${local}:${cloud}`;
+}
+/** CTC-10412: the owner's line for that drain: the machine, the generation and both counts. It says
+ *  nothing was stopped, because the wait goes on (CTC-6933). */
+export function drainCountsLine(hostId: string, generation: number, local: number, cloud: number): string {
+  return `This machine (host ${hostId}) has waited over 2 hours to move to generation ${generation}. It counts ${local} running ${local === 1 ? "phase" : "phases"}, ` +
+    `but Catalyst counts ${cloud} running for it, so the wait may not end by itself. Nothing was stopped. ` +
+    `To see what it counts: docker ps --filter label=${ATTEMPT_HOST_LABEL}=${hostId}. To stop waiting and turn automatic updates off: catalyst runner auto-update off`;
+}
+
 /** Everything the update touches outside its own files. The docker one is below; tests use fakes. */
 export interface RunnerUpdateEngine {
   /** `report` is the previous run's outcome (`updateReport`), sent on the read so the cloud sees it. */
@@ -530,7 +548,8 @@ export async function releaseUpdateDrain(
     }
     const drain = looked.status.drain;
     const adopted: ReleaseState = { ...state, drain: { requestId: drain.requestId, generation: drain.generation, revision: looked.status.revision,
-      acknowledgedAtMs: drain.requestedAtMs, softLimitReported: state.drain?.softLimitReported ?? false } };
+      acknowledgedAtMs: drain.requestedAtMs, softLimitReported: state.drain?.softLimitReported ?? false,
+      countsCompared: state.drain?.countsCompared ?? false } };
     writeReleaseState(dir, adopted);
     if (!(await releaseDrain(engine, dir, adopted, undefined, sleep))) return "failed";
     writeReleaseState(dir, { ...readReleaseState(dir), drain: null, deferral: null });
@@ -579,7 +598,7 @@ export async function runRunnerUpdate(engine: RunnerUpdateEngine, options: Runne
         if ("status" in looked && looked.status.drain !== null) {
           const active = looked.status.drain;
           state = { ...state, drain: { requestId: active.requestId, generation: active.generation, revision: looked.status.revision,
-            acknowledgedAtMs: active.requestedAtMs, softLimitReported: false } };
+            acknowledgedAtMs: active.requestedAtMs, softLimitReported: false, countsCompared: false } };
           writeReleaseState(dir, state);
         }
       }
@@ -753,7 +772,22 @@ async function drainedLook({ engine, options, state, release, target, hostId, no
   const { dir, signal } = options;
   const busy = await engine.attemptContainers(dir, hostId, signal);
   if (state.drain?.acknowledgedAtMs != null) {
-    if (busy !== 0) return drainingResult(dir, state, now(), busy, undefined, undefined, tagged);
+    if (busy !== 0) {
+      // CTC-10412: once per drain, at its soft limit, a positive local count is set against the cloud's.
+      const held = state.drain;
+      const since = state.drain.acknowledgedAtMs;
+      const due = busy !== null && busy > 0 && !held.countsCompared && now() - since >= DRAIN_SOFT_LIMIT_MS;
+      if (!due) return drainingResult(dir, state, now(), busy, undefined, undefined, tagged);
+      const counted = await drainAnswer(engine, dir, null, signal);
+      if ("refused" in counted) return drainingResult(dir, state, now(), busy, undefined, `read:${counted.refused}`, tagged);
+      const compared: ReleaseState = { ...state, drain: { ...held, countsCompared: true } };
+      writeReleaseState(dir, compared);
+      const same = counted.status.drain?.requestId === held.requestId;
+      if (same && counted.status.liveGenerations === 0)
+        return drainingResult(dir, compared, now(), busy, 0, drainCountsDetail(held.generation, busy, 0),
+          { ...tagged, notices: [drainCountsLine(hostId, held.generation, busy, 0)] });
+      return drainingResult(dir, compared, now(), busy, same ? counted.status.liveGenerations : undefined, undefined, tagged);
+    }
     const looked = await drainAnswer(engine, dir, null, signal);
     if ("refused" in looked) return drainingResult(dir, state, now(), 0, undefined, `read:${looked.refused}`, tagged);
     if (looked.status.drain?.requestId === state.drain.requestId && looked.status.liveGenerations > 0)
@@ -777,7 +811,7 @@ async function drainedLook({ engine, options, state, release, target, hostId, no
     let revision = looked.status.revision;
     const requestId = state.drain?.requestId ?? randomUUID();
     if (drain === null) {
-      const pending: NonNullable<ReleaseState["drain"]> = { requestId, generation: release.generation, revision, acknowledgedAtMs: null, softLimitReported: false };
+      const pending: NonNullable<ReleaseState["drain"]> = { requestId, generation: release.generation, revision, acknowledgedAtMs: null, softLimitReported: false, countsCompared: false };
       writeReleaseState(dir, { ...readReleaseState(dir), drain: pending });
       const requested = await drainAnswer(engine, dir, { action: "request", requestId, expectedRevision: revision, generation: release.generation }, signal);
       if ("refused" in requested) {
@@ -800,7 +834,7 @@ async function drainedLook({ engine, options, state, release, target, hostId, no
     }
     if (drain === null) return done("drain_unavailable", `${detail},drain:response_invalid`, tagged);
     const heldDrain: NonNullable<ReleaseState["drain"]> = { requestId: drain.requestId, generation: drain.generation, revision,
-      acknowledgedAtMs: drain.requestedAtMs, softLimitReported: false };
+      acknowledgedAtMs: drain.requestedAtMs, softLimitReported: false, countsCompared: false };
     writeReleaseState(dir, { ...readReleaseState(dir), drain: heldDrain });
     return drainingResult(dir, readReleaseState(dir), now(), busy, looked.status.liveGenerations, undefined, tagged);
   }
@@ -848,7 +882,7 @@ async function update(engine: RunnerUpdateEngine, options: RunnerUpdateOptions, 
     if ("status" in looked && looked.status.drain !== null) {
       const active = looked.status.drain;
       state = { ...state, drain: { requestId: active.requestId, generation: active.generation, revision: looked.status.revision,
-        acknowledgedAtMs: active.requestedAtMs, softLimitReported: state.drain.softLimitReported } };
+        acknowledgedAtMs: active.requestedAtMs, softLimitReported: state.drain.softLimitReported, countsCompared: state.drain.countsCompared } };
       writeReleaseState(dir, state);
     }
   }
