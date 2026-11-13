@@ -381,7 +381,7 @@ describe("ask", () => {
     server.issues = fixtureIssues().map((i) => (i.identifier === "ENG-7" ? { ...i, assignee_id: "someone-else" } : i));
     const c3 = makeCtx(home);
     expect(await main(["ask", "list"], c3)).toBe(0);
-    expect(c3.out.join("\n")).toBe("no open asks assigned to Tony (2 open in your cloud account — add --anyone to see them)");
+    expect(c3.out.join("\n")).toBe("no open asks assigned to Tony (add --anyone to see every open ask in your cloud account)");
     // Unmatched Linear identity: the whole list plus one named stderr line, never a silently empty one.
     await seedJoined(home, server, { config: { key: "fixture-user-key", user: { id: "d1-user-tony", label: "Tony", email: null, role: "admin", linearUserId: null } } });
     const c4 = makeCtx(home);
@@ -399,6 +399,28 @@ describe("ask", () => {
     ];
     const ranked = rankAsks(issues, server.contract, (i) => i.state !== "Done");
     expect(ranked).toEqual([{ identifier: "ENG-5", title: "q", state: "Todo", blocks: [], score: 0, assigneeId: null }]);
+  });
+  test("rankAsks decides a blocked ticket outside the rows by its related_state, and counts a null one as open", () => {
+    const ask = {
+      identifier: "ENG-5",
+      state: "Todo",
+      title: "q",
+      labels: [{ id: "x", name: "catalyst-ask" }],
+      relations: [
+        { type: "blocks", issue_identifier: "ENG-5", related_identifier: "ENG-1", related_state: "Done" },
+        { type: "blocks", issue_identifier: "ENG-5", related_identifier: "ENG-2", related_state: "Todo" },
+        { type: "blocks", issue_identifier: "ENG-5", related_identifier: "ENG-404", related_state: null },
+        { type: "blocks", issue_identifier: "ENG-5", related_identifier: "ENG-405" },
+      ],
+    };
+    expect(rankAsks([ask], server.contract, (i) => i.state !== "Done")[0]).toMatchObject({ blocks: ["ENG-2", "ENG-404", "ENG-405"], score: 3 });
+  });
+  test("a row in the list wins over related_state", () => {
+    const issues = [
+      { identifier: "ENG-1", state: "Todo" },
+      { identifier: "ENG-5", state: "Todo", title: "q", labels: [{ id: "x", name: "catalyst-ask" }], relations: [{ type: "blocks", issue_identifier: "ENG-5", related_identifier: "ENG-1", related_state: "Done" }] },
+    ];
+    expect(rankAsks(issues, server.contract, (i) => i.state !== "Done")[0]).toMatchObject({ blocks: ["ENG-1"] });
   });
   test("firstStateOfType names the types seen when none matches", () => {
     expect(() => firstStateOfType([{ id: "a", name: "A", type: "started", teamId: "t" }], "t", "backlog")).toThrow(/types seen: started/);

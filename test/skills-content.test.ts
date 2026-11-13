@@ -157,6 +157,15 @@ const lineCount = (text: string) => {
   return lines.length;
 };
 
+describe("what-needs-me reading-the-inbox copy (CTC-5644)", () => {
+  test("names the person's own view and keeps --anyone", () => {
+    const text = readFileSync(join(pkgRoot, "skills/what-needs-me/references/reading-the-inbox.md"), "utf8");
+    expect(text).toContain("only your asks");
+    expect(text).toContain("`--anyone`");
+    expect(text).not.toContain("reads every page, so an empty list is real");
+  });
+});
+
 describe("the customer skills ship, with provenance", () => {
   test("exactly the skills the design names are present, sorted, and equal the CLI's constant", () => {
     const dirs = readdirSync(skillsRoot, { withFileTypes: true })
