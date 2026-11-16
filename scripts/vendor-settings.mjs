@@ -14,7 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const commit = "90d646c7d2f1e52348625e76aeb504d56042e54e";
+const commit = "ac9fd5d07d717d1f15cac931dc2e7af796cd0e39";
 const target = join(root, "vendor/settings");
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const declaration = `export type FullSettingsValidation =
