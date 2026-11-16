@@ -87,6 +87,13 @@ export interface FixtureServer {
   issues: Record<string, unknown>[];
   /** Override the pull list the read routes serve; falls back to the module-level `PULLS`. */
   pulls?: Record<string, unknown>[];
+  /** CTC-5644 — how the fake Waiting-on-me view answers. `"absent"` is a 404 (an older cloud); an object
+   *  is answered verbatim (status, JSON body, headers). Unset: the modelled route. */
+  waitingOnMe?: "absent" | { status: number; body: unknown; headers?: Record<string, string> };
+  /** CTC-5644 — serve the view's rows in the reverse of the modelled order. */
+  waitingOnMeOrder?: "reversed";
+  /** CTC-5644 — serve the view as a bare array instead of `{ rows }`. */
+  waitingOnMeEnvelope?: "bare";
   /** The server-side page cap the keyset routes (`/issues`, `/pulls`) enforce (production: 500). */
   pageCap?: number;
   /** CTC-4556 — serve `/issues` as a mirror before `state_name` and `x-mirror-scope`: team and
@@ -196,6 +203,10 @@ export interface OauthFixture {
 
 // ── the tenant's data ─────────────────────────────────────────────────────────────────────────────
 
+export function fixtureIssue(over: Record<string, unknown>): Record<string, unknown> {
+  return issue(over);
+}
+
 function issue(over: Record<string, unknown>): Record<string, unknown> {
   return {
     id: `lin-${String(over.identifier).toLowerCase()}`,
@@ -275,6 +286,26 @@ export function fixtureIssues(): Record<string, unknown>[] {
       ],
     }),
     issue({ identifier: "OPS-1", team_id: "team-ops", project_id: "proj-b" }),
+  ];
+}
+
+/** CTC-5644 — the scenario 2 rows: asks that block 0, 1 (plus one Done target), 3 (one not mirrored) open
+ *  tickets, a tie broken by identifier, an ask for someone else and a Done ask. */
+export function waitingOnMeFixture(): Record<string, unknown>[] {
+  const me = FIXTURE_ME_USER.linearUserId;
+  const label = [{ id: "label-ask-unscoped", name: "catalyst-ask", color: null }];
+  const blocks = (from: string, ...to: string[]) => to.map((t) => ({ type: "blocks", issue_identifier: from, related_identifier: t }));
+  return [
+    issue({ identifier: "ENG-1" }),
+    issue({ identifier: "ENG-2", state: "In Progress" }),
+    issue({ identifier: "ENG-3" }),
+    issue({ identifier: "ENG-9", state: "Done" }),
+    issue({ identifier: "ENG-50", assignee_id: me, labels: label, updated_at: 1000 }),
+    issue({ identifier: "ENG-51", assignee_id: me, labels: label, updated_at: 3000, relations: blocks("ENG-51", "ENG-1", "ENG-9") }),
+    issue({ identifier: "ENG-52", assignee_id: me, labels: label, updated_at: 4000, relations: blocks("ENG-52", "ENG-1", "ENG-2", "ENG-404") }),
+    issue({ identifier: "ENG-53", assignee_id: me, labels: label, updated_at: 3000, relations: blocks("ENG-53", "ENG-3") }),
+    issue({ identifier: "ENG-54", assignee_id: "someone-else", labels: label, relations: blocks("ENG-54", "ENG-1") }),
+    issue({ identifier: "ENG-55", assignee_id: me, labels: label, state: "Done" }),
   ];
 }
 
@@ -1122,6 +1153,33 @@ export async function startMeFixture(
         unproven_legs: [],
         server_time_ms: Date.now(),
       });
+    }
+    if (path === "/api/v1/views/waiting-on-me") {
+      // ASSUMED CONTRACT (CTC-5644): this models the mirror view from the ticket text and the read-model's
+      // predicate; check it against catalyst-cloud `apps/mirror` before relying on it.
+      if (state.waitingOnMe === "absent") return send(404, { error: "not found" });
+      if (state.waitingOnMe) return send(state.waitingOnMe.status, state.waitingOnMe.body, state.waitingOnMe.headers ?? {});
+      const isPerson = auth === `Bearer ${FIXTURE_USER_KEY}` || isOauthPerson;
+      const member = state.meUser === undefined ? FIXTURE_ME_USER : state.meUser;
+      if (!isPerson || member === null) return send(403, { error: "personal_credential_required" });
+      if (member.linearUserId === null) return send(409, { error: "no_linear_identity" });
+      const closed = ["done", "completed", "canceled", "cancelled", "duplicate", "released"];
+      const mine = state.issues.filter((r) => {
+        const names = Array.isArray(r.labels) ? (r.labels as { name?: unknown }[]).map((l) => String(l.name)) : [];
+        return r.assignee_id === member.linearUserId && !closed.includes(String(r.state ?? "").toLowerCase()) && names.some((n) => n === "catalyst-ask" || n.startsWith("ask/"));
+      });
+      const stateOf = new Map(state.issues.map((r) => [String(r.identifier), String(r.state ?? "")]));
+      const hydrated: Record<string, unknown>[] = mine.map((r) => ({
+        ...r,
+        relations: (Array.isArray(r.relations) ? (r.relations as Record<string, unknown>[]) : []).map((rel) => ({ ...rel, related_state: stateOf.get(String(rel.related_identifier)) ?? null })),
+      }));
+      const open = (r: Record<string, unknown>) =>
+        (r.relations as Record<string, unknown>[]).filter((rel) => rel.type === "blocks" && rel.issue_identifier === r.identifier && !closed.includes(String(rel.related_state ?? "").toLowerCase())).length;
+      hydrated.sort((a, b) => open(b) - open(a) || Number(a.updated_at) - Number(b.updated_at) || String(a.id).localeCompare(String(b.id)));
+      if (state.waitingOnMeOrder === "reversed") hydrated.reverse();
+      const p = keysetPage(hydrated, url, state, "/api/v1/views/waiting-on-me");
+      if (p.bad) return send(400, { error: p.bad });
+      return send(200, state.waitingOnMeEnvelope === "bare" ? p.rows : { rows: p.rows, total: p.total }, p.headers);
     }
     if (path === "/api/v1/issues") {
       // The mirror's contract (CTC-4556): `team_key` and `state_name` narrow, `team` and a state

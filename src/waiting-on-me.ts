@@ -1,0 +1,112 @@
+// waiting-on-me.ts — the self-scoped Waiting-on-me view for `ask list` (CTC-5644). The route's contract
+// is not defined anywhere this repository can read, so every reply is checked and anything unproven is
+// a fallback reason: the caller walks /api/v1/issues instead, and the answer stays today's.
+import { CliError, MeError } from "./errors.js";
+import { NEXT_CURSOR_HEADER, readTotal, SERVER_PAGE_CAP } from "./pagination.js";
+import type { ApiClient } from "./transport.js";
+
+export const WAITING_ON_ME_PATH = "/api/v1/views/waiting-on-me";
+export const VIEW_MAX_PAGES = 10;
+// Only a route this Catalyst Cloud does not serve (404, 405, 410) and the 409 `no_linear_identity` reply
+// (a stale local identity; the walk still answers right) fall back. Any other 400, 403, 409 or 422 is a
+// refusal that would repeat on every run, so it surfaces instead of silently walking every issue (CTC-5644).
+const FALLBACK_STATUSES = [404, 405, 409, 410];
+
+export type ViewFallback = "absent" | "no-linear-identity" | "shape" | "other-person" | "unpaged" | "stalled" | "overrun";
+export type ViewRead = { ok: true; rows: Record<string, unknown>[]; pages: number } | { ok: false; reason: ViewFallback };
+
+type Row = Record<string, unknown>;
+
+/** The rows of a view reply: a bare array, or the first array under a known key. `null` for any other
+ *  shape, never `[]`, so an unknown envelope is not read as "no asks". */
+export function viewRowsOf(body: unknown): Row[] | null {
+  if (Array.isArray(body)) return body as Row[];
+  if (body && typeof body === "object") {
+    for (const key of ["rows", "items", "issues", "asks", "data"]) {
+      const v = (body as Row)[key];
+      if (Array.isArray(v)) return v as Row[];
+    }
+  }
+  return null;
+}
+
+function validAge(v: unknown): boolean {
+  return (typeof v === "number" && Number.isFinite(v)) || (typeof v === "string" && Number.isFinite(Date.parse(v)));
+}
+
+/** The D4 row rules: anything the CLI cannot prove it can rank like the walk is a fallback reason.
+ *  This requires every row field `rankAsks` (src/ask.ts) reads, as the walk's rows always carry it:
+ *  identifier, title, state, assignee_id, labels, relations (type, issue_identifier, and for a blocks
+ *  relation related_identifier and related_state) and the age key (updated_at; created_at when present).
+ *  A change to what `rankAsks` reads must update this check. */
+export function checkViewRows(rows: Row[], linearUserId: string): ViewFallback | null {
+  for (const r of rows) {
+    if (!r || typeof r !== "object" || typeof r.identifier !== "string") return "shape";
+    if (r.assignee_id !== linearUserId) return "other-person";
+    if (!Array.isArray(r.labels) || typeof r.state !== "string" || typeof r.title !== "string" || !Array.isArray(r.relations)) return "shape";
+    if (!validAge(r.updated_at) || (r.created_at != null && !validAge(r.created_at))) return "shape";
+    for (const rel of r.relations as Row[]) {
+      if (!rel || typeof rel !== "object") return "shape";
+      if (rel.type !== "blocks" || rel.issue_identifier !== r.identifier) continue;
+      if (typeof rel.related_identifier !== "string") return "shape";
+      if (!("related_state" in rel) || (rel.related_state !== null && typeof rel.related_state !== "string")) return "shape";
+    }
+  }
+  return null;
+}
+
+function bodyHasMore(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const b = body as Row;
+  const cursor = b.nextCursor ?? b.next_cursor;
+  return (typeof cursor === "string" && cursor !== "") || b.hasMore === true;
+}
+
+/** The row count a reply says it has in all: the `x-mirror-total` header, else a body `total`. Read on the
+ *  last page only, where the accumulated rows must reach it. Absent or not a whole number is "unknown",
+ *  never a fallback, as on the walk. */
+function claimedTotals(headers: Headers, body: unknown): number[] {
+  const out: number[] = [];
+  const h = readTotal(headers);
+  if (h !== null) out.push(h);
+  const t = body && typeof body === "object" && !Array.isArray(body) ? (body as Row).total : undefined;
+  if (typeof t === "number" && Number.isInteger(t) && t >= 0) out.push(t);
+  return out;
+}
+
+/** Read the calling member's asks. 401 and 429 throw, as the walk's first page would. */
+export async function readWaitingOnMe(api: ApiClient, linearUserId: string): Promise<ViewRead> {
+  const rows: Row[] = [];
+  const seen = new Set<string>();
+  let after: string | undefined;
+  for (let pages = 1; pages <= VIEW_MAX_PAGES; pages++) {
+    let res;
+    try {
+      res = await api.getJson<unknown>(WAITING_ON_ME_PATH, { query: { limit: SERVER_PAGE_CAP, after }, accept: FALLBACK_STATUSES, parseAccepted: true });
+    } catch (e) {
+      if (e instanceof MeError && e.kind === "shape") return { ok: false, reason: "shape" };
+      throw e;
+    }
+    if (res.status !== 200) {
+      const code = (res.body as { error?: unknown } | undefined)?.error;
+      if (res.status === 409 && code !== "no_linear_identity") {
+        throw new CliError(`GET ${WAITING_ON_ME_PATH} failed (409)${typeof code === "string" && code ? `: ${code}` : ""}`, "http", 2, 409);
+      }
+      return { ok: false, reason: res.status === 409 ? "no-linear-identity" : "absent" };
+    }
+    const page = viewRowsOf(res.body);
+    if (page === null) return { ok: false, reason: "shape" };
+    const bad = checkViewRows(page, linearUserId);
+    if (bad) return { ok: false, reason: bad };
+    rows.push(...page);
+    const next = res.headers.get(NEXT_CURSOR_HEADER);
+    if (next === null || next === "") {
+      if (bodyHasMore(res.body) || claimedTotals(res.headers, res.body).some((n) => rows.length < n)) return { ok: false, reason: "unpaged" };
+      return { ok: true, rows, pages };
+    }
+    if (seen.has(next)) return { ok: false, reason: "stalled" };
+    seen.add(next);
+    after = next;
+  }
+  return { ok: false, reason: "overrun" };
+}
