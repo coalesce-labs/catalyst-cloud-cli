@@ -59,7 +59,7 @@ describe("the credential-shape check matches the vendored one", () => {
   // The vendored bundle exports only its settings validator, so its secret-material section is
   // evaluated alone, in an empty context, from the trusted generated file.
   const source = readFileSync(new URL("../vendor/settings/index.js", import.meta.url), "utf8");
-  const start = source.indexOf("// packages/environment/src/secret-material.ts");
+  const start = source.indexOf("var TOKEN_START_SEPARATOR_CLASS");
   const end = source.indexOf("function secretTokenMessage", start);
   const vendored = runInNewContext(`${source.slice(start, end)}\n({ SECRET_ASSIGNMENT_RE, SECRET_TOKEN_SHAPES, secretTokenIn })`, {}) as {
     SECRET_ASSIGNMENT_RE: RegExp;
