@@ -70,8 +70,9 @@ function validateRelativePath(value, path) {
   }
   return value;
 }
+var MAX_PROVENANCE_ID_REFS = 16;
 function validateProvenanceIdRefs(value, path, knownIds) {
-  return sortedUnique(boundedArray(value, path, 16).map((entry, i) => {
+  return sortedUnique(boundedArray(value, path, MAX_PROVENANCE_ID_REFS).map((entry, i) => {
     const id = boundedString(entry, `${path}[${i}]`, PROVENANCE_ID_RE, 64, "a lowercase kebab-case provenance id");
     if (!knownIds.has(id)) {
       throw new EnvironmentContractError(`${path}[${i}] references unknown provenance id ${JSON.stringify(id)}`);
@@ -123,12 +124,7 @@ function validateProvenanceRecord(value, path) {
   };
 }
 
-// packages/environment/src/secret-material.ts
-var SECRET_ASSIGNMENT_RE = /\b([A-Za-z_][A-Za-z0-9_]*(?:_TOKEN|_SECRET|_KEY|_PASSWORD|_CREDENTIAL)|TOKEN|SECRET|PASSWORD)=(\S{4,})/;
-var AUTH_KEY_RE = /(^authorization$|api[-_]?key$|_token$|_secret$|_key$|_password$|_credential$|^token$|^secret$|^password$)/i;
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+// packages/protocol/src/secret-token-shapes.ts
 var TOKEN_START_SEPARATOR_CLASS = `[\\s=:,;"'/?&@]`;
 function mixedBody(chars, min) {
   return `(?=[${chars}]*[0-9])(?=[${chars}]*[A-Z])[${chars}]{${min},}`;
@@ -177,6 +173,13 @@ var SECRET_TOKEN_SHAPES = [
     source: "(-----BEGIN) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----"
   }
 ];
+
+// packages/environment/src/secret-material.ts
+var SECRET_ASSIGNMENT_RE = /\b([A-Za-z_][A-Za-z0-9_]*(?:_TOKEN|_SECRET|_KEY|_PASSWORD|_CREDENTIAL)|TOKEN|SECRET|PASSWORD)=(\S{4,})/;
+var AUTH_KEY_RE = /(^authorization$|api[-_]?key$|_token$|_secret$|_key$|_password$|_credential$|^token$|^secret$|^password$)/i;
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 var SECRET_TOKEN_RES = SECRET_TOKEN_SHAPES.map((shape) => ({
   kind: shape.kind,
   re: new RegExp(`(?:^|${TOKEN_START_SEPARATOR_CLASS})${shape.source}`)
@@ -205,19 +208,92 @@ var PERSONAL_GITHUB_TOKEN_PREFIXES = [
 ];
 var PERSONAL_TOKEN_START_RE = new RegExp(`(?:^|${TOKEN_START_SEPARATOR_CLASS})(${PERSONAL_GITHUB_TOKEN_PREFIXES.map(escapeRegExp).join("|")})`);
 
+// packages/environment/src/item-notes.ts
+var DESCRIPTION_MAX = 512;
+var AGENT_PROMPT_MAX = 2048;
+var NOTE_TEXT_RE = /^[^\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+$/;
+var CREDENTIAL_NAME = String.raw`(?:[A-Za-z0-9]+[_.-])*` + String.raw`(?:[A-Za-z0-9]*(?:api[_-]?key|token|secret|password|passwd|passphrase)` + String.raw`|key|pwd|pass|credentials?)`;
+var NAME_START = String.raw`(?<![A-Za-z0-9_.-])`;
+var NAME_END = String.raw`(?![A-Za-z0-9_.-])`;
+var PROSE_VALUE = String.raw`[\`"']?[ \t]*[:=][ \t]*[\`"']?(\S{8,})`;
+var PROSE_SECRET_RE = new RegExp(`${NAME_START}(${CREDENTIAL_NAME})${NAME_END}${PROSE_VALUE}`, "i");
+function escapeRegExp2(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function declaredSecretProseRe(secretNames) {
+  if (secretNames.length === 0)
+    return;
+  const names = [...new Set(secretNames)].map(escapeRegExp2).join("|");
+  return new RegExp(`${NAME_START}(${names})${NAME_END}${PROSE_VALUE}`, "i");
+}
+function noteSubject(kind, name) {
+  return typeof name === "string" && NOTE_SUBJECT_NAME_RE.test(name) ? `${kind} ${name}` : undefined;
+}
+var NOTE_SUBJECT_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9+._@/-]{0,127}$/;
+function scanNoteText(value, path, secretNames = [], subject) {
+  const where = subject === undefined ? path : `${path} (${subject})`;
+  const assignment = SECRET_ASSIGNMENT_RE.exec(value);
+  if (assignment) {
+    throw new EnvironmentContractError(`${where} appears to contain an inline secret assignment (${assignment[1]}=...); ` + "a description or agent prompt names where a value lives, never the value", "literal_secret");
+  }
+  const prose = PROSE_SECRET_RE.exec(value) ?? declaredSecretProseRe(secretNames)?.exec(value);
+  if (prose) {
+    throw new EnvironmentContractError(`${where} appears to write a secret value after ${prose[1]}; ` + "a description or agent prompt names where a value lives, never the value", "literal_secret");
+  }
+  const token = secretTokenIn(value);
+  if (token !== null) {
+    throw new EnvironmentContractError(secretTokenMessage(where, token.kind), "literal_secret");
+  }
+}
+function noteText(value, path, max, reason, subject) {
+  let text;
+  try {
+    text = boundedString(value, path, NOTE_TEXT_RE, max, `non-empty text of at most ${max} characters`);
+  } catch (err) {
+    if (err instanceof EnvironmentContractError && reason !== undefined) {
+      throw new EnvironmentContractError(err.message.replace(/^invalid repo environment declaration: /, ""), reason);
+    }
+    throw err;
+  }
+  scanNoteText(text, path, [], subject);
+  return text;
+}
+function validateItemNotes(raw, path, reason, subject) {
+  const notes = {};
+  if (raw.description !== undefined) {
+    notes.description = noteText(raw.description, `${path}.description`, DESCRIPTION_MAX, reason, subject);
+  }
+  if (raw.agentPrompt !== undefined) {
+    notes.agentPrompt = noteText(raw.agentPrompt, `${path}.agentPrompt`, AGENT_PROMPT_MAX, reason, subject);
+  }
+  return notes;
+}
+function assertNoSecretMaterialInNotes(notes, path, secretNames = [], subject) {
+  if (notes.description !== undefined)
+    scanNoteText(notes.description, `${path}.description`, secretNames, subject);
+  if (notes.agentPrompt !== undefined)
+    scanNoteText(notes.agentPrompt, `${path}.agentPrompt`, secretNames, subject);
+}
+var NOTE_KEYS = ["description", "agentPrompt"];
+var NOTE_AND_REQUIRED_KEYS = [...NOTE_KEYS, "required"];
+
 // packages/environment/src/agent-assets.ts
-var AGENT_ASSET_KINDS = ["skill", "mcp-server", "cli"];
+var AGENT_ASSET_KINDS = ["skill", "mcp-server", "cli", "plugin"];
 var AGENT_ASSET_HARNESSES = ["claude", "codex", "opencode"];
 var TIERS = ["platform", "repository", "tenant-channel"];
+var COMMON_FIELDS = ["required", "description", "agentPrompt"];
 var SKILL_FIELDS = new Set([
   "kind",
   "id",
   "tier",
   "reference",
   "digest",
+  "source",
   "requiredEnvNames",
-  "provenanceIds"
+  "provenanceIds",
+  ...COMMON_FIELDS
 ]);
+var SKILL_SOURCE_FIELDS = new Set(["repository", "path", "commit"]);
 var MCP_STDIO_FIELDS = new Set([
   "kind",
   "id",
@@ -227,7 +303,9 @@ var MCP_STDIO_FIELDS = new Set([
   "env",
   "requiredEnvNames",
   "harnesses",
-  "provenanceIds"
+  "allowedTools",
+  "provenanceIds",
+  ...COMMON_FIELDS
 ]);
 var MCP_HTTP_FIELDS = new Set([
   "kind",
@@ -237,7 +315,9 @@ var MCP_HTTP_FIELDS = new Set([
   "headers",
   "requiredEnvNames",
   "harnesses",
-  "provenanceIds"
+  "allowedTools",
+  "provenanceIds",
+  ...COMMON_FIELDS
 ]);
 var MCP_PORTAL_FIELDS = new Set([
   "kind",
@@ -246,11 +326,24 @@ var MCP_PORTAL_FIELDS = new Set([
   "via",
   "requiredEnvNames",
   "harnesses",
-  "provenanceIds"
+  "provenanceIds",
+  ...COMMON_FIELDS
 ]);
-var CLI_FIELDS = new Set(["kind", "id", "install", "provenanceIds"]);
+var CLI_FIELDS = new Set(["kind", "id", "install", "provenanceIds", ...COMMON_FIELDS]);
 var CLI_IMAGE_FIELDS = new Set(["source"]);
 var CLI_NPM_FIELDS = new Set(["source", "package", "version"]);
+var PLUGIN_FIELDS = new Set([
+  "kind",
+  "id",
+  "name",
+  "version",
+  "marketplace",
+  "harnesses",
+  "requiredEnvNames",
+  "provenanceIds",
+  ...COMMON_FIELDS
+]);
+var PLUGIN_MARKETPLACE_FIELDS = new Set(["name", "url", "ref"]);
 var ID_RE = /^[a-z][a-z0-9._-]{0,127}$/;
 var TOOL_ID_MAX = 64;
 var TOOL_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -270,8 +363,17 @@ var HEADER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-_]{0,127}$/;
 var LITERAL_RE = /^[\x20-\x7E]{0,1024}$/;
 var NPM_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 var NPM_VERSION_RE = /^[A-Za-z0-9^~<>=][A-Za-z0-9.+_\-^~<>=*]{0,63}$/;
+var HTTPS_GIT_URL_RE = /^https:\/\/[A-Za-z0-9.-]+\/[\x21-\x7E]{1,2000}$/;
+var MARKETPLACE_NAME_RE = /^[a-z][a-z0-9._-]{0,63}$/;
+var PLUGIN_NAME_RE = /^[a-z][a-z0-9._-]{0,127}$/;
+var PINNED_VERSION_RE = /^[0-9][0-9A-Za-z.+_-]{0,63}$/;
+var GITHUB_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+var COMMIT_RE = /^[0-9a-f]{40}$/;
 var MAX_ARGS = 64;
 var MAX_MAP_ENTRIES = 32;
+var MCP_TOOL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+var MAX_ALLOWED_TOOLS = 128;
+var PORTAL_ALLOWED_TOOLS_MESSAGE = "allowedTools is not accepted on a portal server; the tool portal keeps its own allow-list " + "under Settings → Environment → Portal tools";
 var NON_PORTABLE_AUTH_KEYS = [
   "auth",
   "oauth",
@@ -336,12 +438,34 @@ function vaultNames(value, path) {
   });
   return sortedUnique(names, (name) => name);
 }
+function allowedToolNames(value, path) {
+  const names = tagged("invalid_shape", () => boundedArray(value, path, MAX_ALLOWED_TOOLS)).map((entry, i) => {
+    if (typeof entry !== "string" || !MCP_TOOL_NAME_RE.test(entry) || entry.includes("__")) {
+      refuse(`${path}[${i}] must be a tool name matching ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ without "__" (dots collide with underscores in Claude and OpenCode)`, "invalid_name");
+    }
+    return entry;
+  });
+  if (names.length === 0) {
+    refuse(`${path} must name at least one tool (omit it to allow every tool)`, "invalid_shape");
+  }
+  return sortedUnique(names, (name) => name);
+}
 function toolId(value, path) {
   return tagged("invalid_name", () => boundedString(value, path, TOOL_ID_RE, TOOL_ID_MAX, `a lowercase identifier of at most ${TOOL_ID_MAX} characters without "."`));
+}
+function validateCommon(raw, path) {
+  if (raw.required !== undefined && raw.required !== false) {
+    refuse(`${path}.required must be false when present; omit it for a required asset`, "invalid_shape");
+  }
+  return {
+    ...raw.required === false ? { required: false } : {},
+    ...validateItemNotes(raw, path, "invalid_shape", noteSubject(typeof raw.kind === "string" ? raw.kind : "asset", raw.id))
+  };
 }
 function validateSkill(raw, path, known) {
   tagged("invalid_shape", () => closedRecord(raw, SKILL_FIELDS, path));
   const id = tagged("invalid_name", () => boundedString(raw.id, `${path}.id`, ID_RE, 128, "a lowercase identifier of at most 128 characters"));
+  const common = validateCommon(raw, path);
   return tagged("invalid_shape", () => {
     const tier = enumValue(raw.tier, TIERS, `${path}.tier`);
     const reference = tier === "repository" ? validateRelativePath(raw.reference, `${path}.reference`) : boundedString(raw.reference, `${path}.reference`, REFERENCE_RE, 512, "a printable reference of at most 512 characters");
@@ -352,7 +476,14 @@ function validateSkill(raw, path, known) {
     if (tier === "repository" && digest === undefined) {
       throw new EnvironmentContractError(`${path}.digest is required for tier "repository"`);
     }
-    const requiredEnvNames = sortedUnique(boundedArray(raw.requiredEnvNames, `${path}.requiredEnvNames`, 32).map((entry, i) => boundedString(entry, `${path}.requiredEnvNames[${i}]`, ENV_NAME_RE, 128, "an environment variable name")), (name) => name);
+    let source;
+    if (raw.source !== undefined) {
+      if (tier !== "tenant-channel") {
+        refuse(`${path}.source is admitted for tier "tenant-channel" only`, "invalid_shape");
+      }
+      source = validateSkillSource(raw.source, `${path}.source`);
+    }
+    const requiredEnvNames = sortedUnique(boundedArray(raw.requiredEnvNames, `${path}.requiredEnvNames`, 32).map((entry, i) => boundedString(entry, `${path}.requiredEnvNames[${i}]`, source !== undefined ? VAULT_NAME_RE : ENV_NAME_RE, 128, "an environment variable name")), (name) => name);
     const provenanceIds = validateProvenanceIdRefs(raw.provenanceIds, `${path}.provenanceIds`, known);
     return {
       kind: "skill",
@@ -360,10 +491,19 @@ function validateSkill(raw, path, known) {
       tier,
       reference,
       ...digest !== undefined ? { digest } : {},
+      ...source !== undefined ? { source } : {},
       requiredEnvNames,
+      ...common,
       provenanceIds
     };
   });
+}
+function validateSkillSource(value, path) {
+  const raw = tagged("invalid_shape", () => closedRecord(value, SKILL_SOURCE_FIELDS, path));
+  const repository = tagged("invalid_reference", () => boundedString(raw.repository, `${path}.repository`, GITHUB_REPO_RE, 256, "`owner/repo` on github.com"));
+  const commit = tagged("invalid_reference", () => boundedString(raw.commit, `${path}.commit`, COMMIT_RE, 40, "a lowercase 40-hex commit"));
+  const skillPath = tagged("invalid_reference", () => validateRelativePath(raw.path, `${path}.path`));
+  return { repository, path: skillPath, commit };
 }
 function validateUrl(value, path) {
   if (typeof value !== "string" || !URL_RE.test(value)) {
@@ -426,8 +566,12 @@ function validateMcpServer(raw, path, known) {
   if (via !== undefined && (via !== "portal" || transport !== "http")) {
     refuse(`${path}.via must be "portal" on an http server`, "invalid_shape");
   }
+  if (via === "portal" && raw.allowedTools !== undefined) {
+    refuse(`${path}.allowedTools: ${PORTAL_ALLOWED_TOOLS_MESSAGE}`, "invalid_shape");
+  }
   tagged("invalid_shape", () => closedRecord(raw, transport === "stdio" ? MCP_STDIO_FIELDS : via === "portal" ? MCP_PORTAL_FIELDS : MCP_HTTP_FIELDS, path));
   const id = toolId(raw.id, `${path}.id`);
+  const common = validateCommon(raw, path);
   let harnesses;
   if (raw.harnesses !== undefined) {
     harnesses = tagged("invalid_shape", () => {
@@ -438,6 +582,7 @@ function validateMcpServer(raw, path, known) {
     });
   }
   const provenanceIds = tagged("invalid_shape", () => validateProvenanceIdRefs(raw.provenanceIds, `${path}.provenanceIds`, known));
+  const allowedTools = raw.allowedTools === undefined ? undefined : allowedToolNames(raw.allowedTools, `${path}.allowedTools`);
   if (transport === "stdio") {
     const command = tagged("invalid_shape", () => boundedString(raw.command, `${path}.command`, COMMAND_RE, 512, "a printable executable of at most 512 characters"));
     let args;
@@ -468,6 +613,8 @@ function validateMcpServer(raw, path, known) {
       ...env !== undefined ? { env } : {},
       requiredEnvNames,
       ...harnesses !== undefined ? { harnesses } : {},
+      ...allowedTools !== undefined ? { allowedTools } : {},
+      ...common,
       provenanceIds
     };
   }
@@ -482,6 +629,7 @@ function validateMcpServer(raw, path, known) {
       via: "portal",
       requiredEnvNames: [],
       ...harnesses !== undefined ? { harnesses } : {},
+      ...common,
       provenanceIds
     };
   }
@@ -495,12 +643,15 @@ function validateMcpServer(raw, path, known) {
     ...headers !== undefined ? { headers } : {},
     requiredEnvNames: [],
     ...harnesses !== undefined ? { harnesses } : {},
+    ...allowedTools !== undefined ? { allowedTools } : {},
+    ...common,
     provenanceIds
   };
 }
 function validateCli(raw, path, known) {
   tagged("invalid_shape", () => closedRecord(raw, CLI_FIELDS, path));
   const id = toolId(raw.id, `${path}.id`);
+  const common = validateCommon(raw, path);
   const install = tagged("invalid_shape", () => {
     const installPath = `${path}.install`;
     if (!isRecord(raw.install))
@@ -518,7 +669,72 @@ function validateCli(raw, path, known) {
     return { source, package: pkg, version };
   });
   const provenanceIds = tagged("invalid_shape", () => validateProvenanceIdRefs(raw.provenanceIds, `${path}.provenanceIds`, known));
-  return { kind: "cli", id, install, provenanceIds };
+  return { kind: "cli", id, install, ...common, provenanceIds };
+}
+function validatePlugin(raw, path, known) {
+  tagged("invalid_shape", () => closedRecord(raw, PLUGIN_FIELDS, path));
+  const id = toolId(raw.id, `${path}.id`);
+  const common = validateCommon(raw, path);
+  const name = tagged("invalid_shape", () => boundedString(raw.name, `${path}.name`, PLUGIN_NAME_RE, 128, "a lowercase identifier of at most 128 characters"));
+  const marketplacePath = `${path}.marketplace`;
+  const marketplaceRaw = raw.marketplace;
+  const marketplace = tagged("invalid_shape", () => {
+    if (!isRecord(marketplaceRaw))
+      throw new EnvironmentContractError(`${marketplacePath} must be an object`);
+    closedRecord(marketplaceRaw, PLUGIN_MARKETPLACE_FIELDS, marketplacePath);
+    const marketplaceName = boundedString(marketplaceRaw.name, `${marketplacePath}.name`, MARKETPLACE_NAME_RE, 64, "a lowercase identifier of at most 64 characters");
+    const url = tagged("invalid_reference", () => boundedString(marketplaceRaw.url, `${marketplacePath}.url`, HTTPS_GIT_URL_RE, 2048, "an https URL of at most 2048 characters"));
+    try {
+      const parsed = new URL(url);
+      if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+        refuse(`${marketplacePath}.url must not contain credentials, query, or fragment`, "invalid_reference");
+      }
+    } catch (error) {
+      if (error instanceof EnvironmentContractError)
+        throw error;
+      refuse(`${marketplacePath}.url must be a valid https git URL`, "invalid_reference");
+    }
+    if (carriesReference(url)) {
+      refuse(`${marketplacePath}.url must not carry a reference; a plugin's credential is named in requiredEnvNames`, "invalid_reference");
+    }
+    let ref;
+    if (marketplaceRaw.ref !== undefined) {
+      ref = tagged("invalid_reference", () => boundedString(marketplaceRaw.ref, `${marketplacePath}.ref`, COMMIT_RE, 40, "a lowercase 40-hex commit"));
+    }
+    return { name: marketplaceName, url, ...ref !== undefined ? { ref } : {} };
+  });
+  let version;
+  if (raw.version !== undefined) {
+    version = tagged("invalid_reference", () => boundedString(raw.version, `${path}.version`, PINNED_VERSION_RE, 64, "an exact version pin (leading digit, no range operator)"));
+    if (version.includes("*") || version.split(".").some((segment) => segment === "x" || segment === "X")) {
+      refuse(`${path}.version must be an exact pin, not a range`, "invalid_reference");
+    }
+  }
+  if (version === undefined && marketplace.ref === undefined) {
+    refuse(`${path} carries no pin: declare an exact version or a marketplace.ref commit, or the install ` + "selector is not pinned (D4)", "invalid_reference");
+  }
+  let harnesses;
+  if (raw.harnesses !== undefined) {
+    harnesses = tagged("invalid_shape", () => {
+      const list = boundedArray(raw.harnesses, `${path}.harnesses`, AGENT_ASSET_HARNESSES.length).map((h, i) => enumValue(h, AGENT_ASSET_HARNESSES, `${path}.harnesses[${i}]`));
+      if (list.length === 0)
+        throw new EnvironmentContractError(`${path}.harnesses must not be empty (omit it for all)`);
+      return sortedUnique(list, (h) => h);
+    });
+  }
+  const requiredEnvNames = vaultNames(raw.requiredEnvNames, `${path}.requiredEnvNames`);
+  const provenanceIds = tagged("invalid_shape", () => validateProvenanceIdRefs(raw.provenanceIds, `${path}.provenanceIds`, known));
+  return {
+    kind: "plugin",
+    id,
+    name,
+    ...version !== undefined ? { version } : {},
+    marketplace,
+    ...harnesses !== undefined ? { harnesses } : {},
+    requiredEnvNames,
+    ...common,
+    provenanceIds
+  };
 }
 function validateAgentAssetEntry(value, path, knownProvenanceIds) {
   if (!isRecord(value))
@@ -535,9 +751,11 @@ function validateAgentAssetEntry(value, path, knownProvenanceIds) {
       return validateMcpServer(value, path, knownProvenanceIds);
     case "cli":
       return validateCli(value, path, knownProvenanceIds);
+    case "plugin":
+      return validatePlugin(value, path, knownProvenanceIds);
   }
 }
-function assertNoSecretMaterialInAgentAssets(agentAssets) {
+function assertNoSecretMaterialInAgentAssets(agentAssets, secretNames = []) {
   agentAssets.forEach((asset, i) => {
     const at = `agentAssets[${i}]`;
     const scan = (value, path) => {
@@ -549,9 +767,21 @@ function assertNoSecretMaterialInAgentAssets(agentAssets) {
       if (token !== null)
         refuse(secretTokenMessage(path, token.kind), "literal_secret");
     };
+    assertNoSecretMaterialInNotes(asset, at, secretNames, noteSubject(asset.kind, asset.id));
     switch (asset.kind) {
       case "skill":
         scan(asset.reference, `${at}.reference`);
+        if (asset.source !== undefined) {
+          scan(asset.source.repository, `${at}.source.repository`);
+          scan(asset.source.path, `${at}.source.path`);
+        }
+        return;
+      case "plugin":
+        scan(asset.marketplace.url, `${at}.marketplace.url`);
+        scan(asset.marketplace.name, `${at}.marketplace.name`);
+        scan(asset.name, `${at}.name`);
+        if (asset.version !== undefined)
+          scan(asset.version, `${at}.version`);
         return;
       case "mcp-server":
         if (asset.command !== undefined)
@@ -603,7 +833,14 @@ var EXECUTABLE_STEP_FIELDS = new Set([
 var SERVICE_FIELDS = new Set(["name", "image", "readiness", "provenanceIds"]);
 var SERVICE_READINESS_COMMAND_FIELDS = new Set(["kind", "command", "timeoutSeconds"]);
 var SERVICE_READINESS_PORT_FIELDS = new Set(["kind", "port"]);
-var ENVIRONMENT_NAME_FIELDS = new Set(["name", "required", "secret", "provenanceIds"]);
+var ENVIRONMENT_NAME_FIELDS = new Set([
+  "name",
+  "required",
+  "secret",
+  "description",
+  "agentPrompt",
+  "provenanceIds"
+]);
 var DECLARATION_NAME_RE = /^[a-z][a-z0-9+._-]{0,63}$/;
 var DECLARATION_VERSION_RE = /^[A-Za-z0-9^~*<>=][A-Za-z0-9.+_\-^~*<>=| ]{0,63}$/;
 var STEP_ID_RE = /^[a-z][a-z0-9-]{0,63}$/;
@@ -727,11 +964,13 @@ function validateEnvironmentNameRef(value, path, knownProvenanceIds) {
     }
     secret = raw.secret;
   }
+  const notes = validateItemNotes(raw, path, undefined, noteSubject("variable", name));
   const provenanceIds = validateProvenanceIdRefs(raw.provenanceIds, `${path}.provenanceIds`, knownProvenanceIds);
   return {
     name,
     required: raw.required,
     ...secret !== undefined ? { secret } : {},
+    ...notes,
     provenanceIds
   };
 }
@@ -775,7 +1014,15 @@ function assertNoSecretMaterial(declaration) {
       scanForSecretMaterial(service.image, `services[${i}].image`);
   });
   assertNoSecretMaterialInProvenance(declaration.provenance);
-  assertNoSecretMaterialInAgentAssets(declaration.agentAssets);
+  assertNoSecretMaterialInEnvironmentRefs(declaration.environment);
+  assertNoSecretMaterialInAgentAssets(declaration.agentAssets, declaredSecretNames(declaration.environment));
+}
+function declaredSecretNames(environment) {
+  return environment.filter((ref) => ref.secret === true).map((ref) => ref.name);
+}
+function assertNoSecretMaterialInEnvironmentRefs(environment) {
+  const secretNames = declaredSecretNames(environment);
+  environment.forEach((ref, i) => assertNoSecretMaterialInNotes(ref, `environment[${i}]`, secretNames, noteSubject("variable", ref.name)));
 }
 function assertNoSecretMaterialInProvenance(provenance) {
   provenance.forEach((record, i) => scanForSecretMaterial(record.explanation, `provenance[${i}].explanation`));
@@ -827,11 +1074,11 @@ var RERUN_WHEN_CHANGED_KEY = "cache_key_files";
 var EXCLUDED_SEGMENTS = new Set(["node_modules", ".git"]);
 // packages/environment/src/local-image/runner-base.ts
 var RUNNER_BASE_REF_PREFIX = "registry.cloudflare.com/080cccc297a4b9cceca559f1095c0d10/catalyst-runner";
-var RUNNER_BASE_IMAGE_TAG = "catalyst-runner:1c477b2690b68d0b14386741156ee70b1fd48137";
+var RUNNER_BASE_IMAGE_TAG = "catalyst-runner:75a17fe9fdf5959ead1e52a85c380aee87715e36";
 var RUNNER_BASE_REF = `${RUNNER_BASE_REF_PREFIX}:${RUNNER_BASE_IMAGE_TAG.split(":")[1]}`;
 var BAKED_TOOLCHAINS = Object.freeze({
   bun: "1.4.2",
-  node: "22.23.2",
+  node: "24.21.0",
   python: "3.12.14",
   go: "1.27.1",
   ruby: "3.4.10",
@@ -852,6 +1099,29 @@ var MISE_RIDING_TOOLS = Object.freeze({
   nodejs: "node",
   python: "python"
 });
+// packages/protocol/src/work.ts
+var MAX_PHASE_DISK_BUDGET_GIB = 1048576;
+var GIB_BYTES = 1024 ** 3;
+var DECIDED_ASK_PHASES = new Set(["remediate", "validate"]);
+// packages/protocol/src/lane-custody.ts
+var common = ["action", "requestId"];
+var existing = [...common, "custodyId", "expectedVersion"];
+var fields = {
+  claim: [...common, "repository", "lane", "holderSeat", "backup", "coordinator", "inventory"],
+  heartbeat: existing,
+  report: [...existing, "detail"],
+  inventory: [...existing, "inventory"],
+  pause: [...existing, "until", "reason"],
+  resume: [...existing, "detail"],
+  accept: [...existing, "offerId", "backup"],
+  reassign: [...existing, "reason"],
+  release: [...existing, "detail"]
+};
+// packages/protocol/src/host-enrollment.ts
+var JOIN_TOKEN_DEFAULT_TTL_MS = 60 * 60 * 1000;
+var JOIN_TOKEN_MAX_TTL_MS = 24 * 60 * 60 * 1000;
+var HOST_CREDENTIAL_ROTATE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+
 // packages/protocol/src/usage-accounting.ts
 var USAGE_RECORD_MAX_BYTES = 64 * 1024;
 var USAGE_COUNTER_DESCRIPTORS = {
@@ -944,15 +1214,32 @@ var USAGE_COUNTER_DESCRIPTORS = {
     kind: "reliability"
   }
 };
-var COUNTER_KEYS = Object.keys(USAGE_COUNTER_DESCRIPTORS);
 var counterAggregations = Object.fromEntries(Object.entries(USAGE_COUNTER_DESCRIPTORS).map(([key, descriptor]) => [
   key,
   descriptor.aggregation
 ]));
 
+// packages/protocol/src/supervisor-protocol.ts
+var STEP_OF_PREPARATION_CODE = new Map([
+  ["workspace_unavailable", "workspace_prepare"],
+  ["image_unavailable", "image"],
+  ["mount_unavailable", "mount"],
+  ["thoughts_checkout_failed", "thoughts"],
+  ["preparation_failed", "preparation"]
+]);
+var STEP_OF_CAUSE = new Map([
+  ["image_pull_failed", "image"],
+  ["launch_refused_disk", "workspace_prepare"]
+]);
+// packages/protocol/src/project-publication.ts
+var PROJECT_RECOVERY_COPY_MAX_PART_BYTES = 8 * 1024 * 1024;
+var PROJECT_RECOVERY_COPY_MAX_BYTES = 512 * 1024 * 1024;
 // packages/protocol/src/project-workspace.ts
 var PROJECT_WORKSPACE_MAX_REPOSITORIES = 16;
 var INTAKE_MAX_REPOSITORIES = PROJECT_WORKSPACE_MAX_REPOSITORIES - 1;
+// packages/protocol/src/remediate-budget.ts
+var REMEDIATE_CONFLICT_NO_PROGRESS_CLASS = "remediate_conflict_no_progress";
+var REMEDIATE_CONFLICT_NO_PROGRESS_PREFIX = `${REMEDIATE_CONFLICT_NO_PROGRESS_CLASS}: `;
 // packages/protocol/src/provider-retry-window.ts
 var RESET_VOCAB = String.raw`\b(?:will\s+reset|resets?|limit\s+resets?|try\s+again)\b[^\n]{0,40}?\bat\b`;
 var ANCHORED_ISO = new RegExp(RESET_VOCAB + String.raw`[^\n]{0,10}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)`, "i");
@@ -962,9 +1249,27 @@ var CLOCK_RESET_PASSED_GRACE_MS = 60 * 60 * 1000;
 var QUARTER_HOUR_MS = 15 * 60 * 1000;
 var MAX_ZONE_OFFSET_MS = 14 * 60 * 60 * 1000;
 var MAX_FOLD_MS = 60 * 60 * 1000;
+// packages/protocol/src/decision-comments.ts
+var DECISION_COMMENT_PHASES = new Set(["plan", "validate"]);
+// packages/protocol/src/ticket-narration-copy.ts
+var USAGE_LIMIT_MODES = new Set(["claude_usage_limit", "usage_limit"]);
+var PROVIDER_LIMIT_EVIDENCE = new RegExp([
+  /\bexceeded your account'?s?\s+(?:usage|rate)\s+limit\b/.source,
+  /\b(?:5-hour|five-hour|7-day|seven-day|weekly)\s+limit\b/.source,
+  /\b(?:claude ai )?usage limit (?:reached|has reset)\b/.source,
+  /\byou(?:'ve| have)\s+(?:hit|reached)\s+your\b[^\n]{0,60}\blimit\b/.source,
+  /\b(?:you'?re|org is)\s+out of usage credits?\b/.source
+].join("|"), "i");
 // packages/protocol/src/worker-agent-id.ts
 var ROSTER_LIVE_WITHIN_MS = 10 * 60000;
+var PHASE_STALLED_AFTER_MS = 20 * 60000;
+// packages/protocol/src/coding-account-identity.ts
+var MAX_DOCUMENT_BYTES = 64 * 1024;
+var MAX_WITNESS_MS = 30 * 24 * 60 * 60 * 1000;
 // packages/protocol/src/context-policy.ts
+var CONTEXT_POLICY_MIN_HANDOFF_AT = 1e5;
+var CONTEXT_POLICY_MAX_TOKENS = 1e6;
+var CONTEXT_POLICY_MIN_GAP = 50000;
 var DEFAULT_CONTEXT_POLICY = Object.freeze({
   default: Object.freeze({ handoffAt: 250000, nativeCompactAt: 350000 }),
   phases: Object.freeze({
@@ -972,6 +1277,28 @@ var DEFAULT_CONTEXT_POLICY = Object.freeze({
     pr: Object.freeze({ handoffAt: 200000, nativeCompactAt: 350000 })
   })
 });
+function validateContextLimits(limits) {
+  const { handoffAt, nativeCompactAt } = limits;
+  if (handoffAt !== null && !isTokenCount(handoffAt))
+    return "handoffAt is not a token count";
+  if (nativeCompactAt !== null && !isTokenCount(nativeCompactAt))
+    return "nativeCompactAt is not a token count";
+  if (handoffAt !== null && handoffAt < CONTEXT_POLICY_MIN_HANDOFF_AT)
+    return `handoffAt ${handoffAt} is under ${CONTEXT_POLICY_MIN_HANDOFF_AT}`;
+  if (handoffAt !== null && handoffAt > CONTEXT_POLICY_MAX_TOKENS)
+    return `handoffAt ${handoffAt} is over ${CONTEXT_POLICY_MAX_TOKENS}`;
+  if (nativeCompactAt !== null && nativeCompactAt > CONTEXT_POLICY_MAX_TOKENS)
+    return `nativeCompactAt ${nativeCompactAt} is over ${CONTEXT_POLICY_MAX_TOKENS}`;
+  if (nativeCompactAt !== null && nativeCompactAt < CONTEXT_POLICY_MIN_HANDOFF_AT)
+    return `nativeCompactAt ${nativeCompactAt} is under ${CONTEXT_POLICY_MIN_HANDOFF_AT}`;
+  if (handoffAt !== null && nativeCompactAt !== null) {
+    if (handoffAt >= nativeCompactAt)
+      return `handoffAt ${handoffAt} is not under nativeCompactAt ${nativeCompactAt}`;
+    if (nativeCompactAt - handoffAt < CONTEXT_POLICY_MIN_GAP)
+      return `the gap ${nativeCompactAt - handoffAt} between handoffAt and nativeCompactAt is under ${CONTEXT_POLICY_MIN_GAP}`;
+  }
+  return null;
+}
 var OFF_CONTEXT_POLICY = Object.freeze({
   mode: "off",
   handoffAt: null,
@@ -983,11 +1310,38 @@ var MODES = new Set([
   "shadow",
   "enforce"
 ]);
-// packages/protocol/src/subscription-account.ts
-var MAX_DECLARED_VALIDITY_MS = 180 * 24 * 60 * 60 * 1000;
+function contextLimitDeclarationIssue(value) {
+  if (value === "off")
+    return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value))
+    return `must be "off" or a whole token count between ${CONTEXT_POLICY_MIN_HANDOFF_AT} and ${CONTEXT_POLICY_MAX_TOKENS}`;
+  if (value < CONTEXT_POLICY_MIN_HANDOFF_AT || value > CONTEXT_POLICY_MAX_TOKENS)
+    return `must be between ${CONTEXT_POLICY_MIN_HANDOFF_AT} and ${CONTEXT_POLICY_MAX_TOKENS} tokens, or "off"`;
+  return null;
+}
+function contextDeclarationPairIssue(declaration, phase) {
+  const row = phase !== undefined && declaration.phases !== undefined && Object.hasOwn(declaration.phases, phase) ? declaration.phases[phase] : undefined;
+  const handoff = row?.handoff_at ?? declaration.handoff_at;
+  const native = row?.native_compact_at ?? declaration.native_compact_at;
+  if (handoff === undefined || native === undefined)
+    return null;
+  return validateContextLimits({
+    handoffAt: handoff === "off" ? null : handoff,
+    nativeCompactAt: native === "off" ? null : native
+  });
+}
+function isTokenCount(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
 // packages/protocol/src/providers.ts
 var CATALOG = {
   claude: { protocol: "anthropic", harness: "claude-cli" },
+  anthropic: { protocol: "anthropic", harness: "claude-cli", anthropicAuth: "api-key" },
+  openrouter: {
+    protocol: "anthropic",
+    harness: "claude-cli",
+    anthropicBaseUrl: "https://openrouter.ai/api"
+  },
   codex: { protocol: "openai", harness: "codex" },
   glm: {
     protocol: "anthropic",
@@ -1003,7 +1357,8 @@ var CATALOG = {
     protocol: "anthropic",
     harness: "opencode",
     anthropicBaseUrl: "https://api.z.ai/api/anthropic",
-    credentialProvider: "glm"
+    credentialProvider: "glm",
+    openCodeModelLimits: { "glm-5.3": { context: 1e6, output: 131072 } }
   },
   "qwen-opencode": {
     protocol: "anthropic",
@@ -1017,13 +1372,12 @@ var RUNTIME_PROVIDERS = CATALOG;
 function isRuntimeProvider(value) {
   return Object.hasOwn(RUNTIME_PROVIDERS, value);
 }
-// packages/protocol/src/session-messages.ts
-var SESSION_MESSAGE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-var SESSION_MESSAGE_INBOX_MAX_BYTES = 1024 * 1024;
-var SESSION_MESSAGE_DELIVERED_MAX_BYTES = 256 * 1024;
-
 // packages/protocol/src/prompt-run.ts
-var PROMPT_CAPABLE_PROVIDERS = new Set(["claude"]);
+var PROMPT_CAPABLE_PROVIDERS = new Set([
+  "claude",
+  "codex",
+  "qwen-opencode"
+]);
 
 // packages/protocol/src/job-execution.ts
 var EXECUTION_JOB_MAX_BYTES = 64 * 1024;
@@ -1032,6 +1386,10 @@ var EXECUTION_RESULT_MAX_BYTES = 64 * 1024;
 var EXECUTION_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 var EXECUTION_MAX_TOTAL_ARTIFACT_BYTES = 256 * 1024 * 1024;
 var PREPARATION_MAX_PART_BYTES = 32 * 1024 * 1024;
+var EXECUTION_MAIN_RED_PHASES = new Set([
+  "remediate",
+  "validate"
+]);
 var EXECUTION_HANDOVER_GATE_PHASES = new Set(["implement", "remediate"]);
 var EXECUTION_NO_REPO_SECRETS_PHASES = new Set(["intake", "respond"]);
 var utf8Bytes = (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
@@ -1049,11 +1407,31 @@ var VERDICT_UNREPORTED_REASONS = [
 var BUILD_UNREPORTED_REASONS = [...VERDICT_UNREPORTED_REASONS, "missing_attempted"];
 var GATE_UNREPORTED_REASONS = [...VERDICT_UNREPORTED_REASONS, "missing_ran"];
 
+// packages/protocol/src/native-session-checkpoint.ts
+var NATIVE_SESSION_SET_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+// packages/protocol/src/session-messages.ts
+var SESSION_MESSAGE_SAFETY_PULL_MS = 5 * 60000;
+var SESSION_MESSAGE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+var SESSION_MESSAGE_INBOX_MAX_BYTES = 1024 * 1024;
+var SESSION_MESSAGE_DELIVERED_MAX_BYTES = 256 * 1024;
+
 // packages/protocol/src/client.ts
 var LADDER_MAX_SERIALIZED_BYTES = 8 * 1024;
 var OFF_PLAN_MAX_SERIALIZED_BYTES = 16 * 1024;
-// packages/protocol/src/environment-check.ts
-var ENV_CHECK_REPORT_MAX_BYTES = 8 * 1024;
+var SOURCE_RESPONSE_MAX_BYTES = 16 * 1024;
+var SOURCE_REFUSALS = new Set([
+  "malformed",
+  "authority_unavailable",
+  "branch_busy",
+  "clock_rollback",
+  "claim_exhausted",
+  "provider_unavailable",
+  "head_moved",
+  "claim_unavailable"
+]);
+// packages/protocol/src/transcript-checkpoint.ts
+var TRANSCRIPT_SESSION_DESCRIPTOR_BYTES = 16 * 1024;
 // packages/protocol/src/container-instance.ts
 var CONTAINER_INSTANCE_SPECS = {
   lite: { vcpu: 1 / 16, memoryMiB: 256, diskGB: 2 },
@@ -1071,30 +1449,34 @@ var RUNNER_SIZE_CLASSES = ["standard", "large"];
 // packages/protocol/src/phase-resources.ts
 var GiB = 1024 ** 3;
 var PHASE_SIZE_CLASSES = Object.freeze({
-  gate: Object.freeze({ cpuMillis: 6000, memoryBytes: 9 * GiB, pidsLimit: 4096 }),
-  standard: Object.freeze({ cpuMillis: 2000, memoryBytes: 6 * GiB, pidsLimit: 512 })
+  gate: Object.freeze({ cpuMillis: 6000, memoryBytes: 12 * GiB, pidsLimit: 4096 }),
+  standard: Object.freeze({ cpuMillis: 2000, memoryBytes: 9 * GiB, pidsLimit: 4096 }),
+  operator: Object.freeze({ cpuMillis: 2000, memoryBytes: 9 * GiB, pidsLimit: 4096 }),
+  light: Object.freeze({ cpuMillis: 1000, memoryBytes: 9 * GiB, pidsLimit: 4096 }),
+  response: Object.freeze({ cpuMillis: 1000, memoryBytes: 9 * GiB, pidsLimit: 4096 })
 });
 var GATE_PHASES = Object.freeze(["implement", "validate", "remediate"]);
 var PHASE_SIZE_CLASS = Object.freeze({
-  intake: "standard",
+  intake: "light",
   research: "standard",
   plan: "standard",
   implement: "gate",
   validate: "gate",
   pr: "standard",
   remediate: "gate",
-  respond: "standard",
-  prompt: "standard",
-  "ask-triage": "standard"
+  respond: "response",
+  prompt: "operator",
+  "ask-triage": "operator",
+  "ask-clear": "operator"
 });
 // packages/protocol/src/container-pricing.ts
 var MAX_DURATION_MS = 7 * 24 * 60 * 60000;
+// packages/protocol/src/job.ts
+var JOB_QUEUE_TTL_MS = 6 * 3600000;
 // packages/protocol/src/attempt-git.ts
+var ATTEMPT_NOTHING_PUSHED_PHASES = ["research", "plan", "merge"];
+var NOTHING_PUSHED_PHASES = new Set(ATTEMPT_NOTHING_PUSHED_PHASES);
 var ATTEMPT_GIT_TOKEN_MAX_TTL_MS = 60 * 60 * 1000;
-// packages/protocol/src/host-enrollment.ts
-var JOIN_TOKEN_DEFAULT_TTL_MS = 60 * 60 * 1000;
-var JOIN_TOKEN_MAX_TTL_MS = 24 * 60 * 60 * 1000;
-var HOST_CREDENTIAL_ROTATE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 // packages/protocol/src/phase-prerequisites.ts
 var PHASE_PREREQUISITES = [
   {
@@ -1152,13 +1534,13 @@ var PHASE_PREREQUISITES = [
     id: "browser.chromium",
     probe: { kind: "cli", names: ["chromium"] },
     severity: { container: "required" },
-    remedy: "the runner image must bake Debian's `chromium` wrapper on PATH"
+    remedy: "the runner image must bake its `chromium` wrapper on PATH"
   },
   {
     id: "browser.chromium-flags",
-    probe: { kind: "file", path: "/etc/chromium.d/zz-catalyst" },
+    probe: { kind: "file", path: "/usr/local/bin/chromium" },
     severity: { container: "required" },
-    remedy: "the runner image must write /etc/chromium.d/zz-catalyst (--no-sandbox, --disable-dev-shm-usage); without it Chromium dies in the container"
+    remedy: "the runner image's Chromium wrapper must pass --no-sandbox and --disable-dev-shm-usage"
   },
   {
     id: "browser.chrome",
@@ -1195,11 +1577,12 @@ var PHASE_PREREQUISITES = [
     probe: {
       kind: "env",
       anyOf: [
-        ["OTEL_INGEST_CLIENT_ID", "OTEL_INGEST_CLIENT_SECRET", "CATALYST_SUBSTRATE_HOST_NAME"]
+        ["OTEL_INGEST_CLIENT_ID", "OTEL_INGEST_CLIENT_SECRET", "CATALYST_SUBSTRATE_HOST_NAME"],
+        ["OTEL_EXPORTER_OTLP_HEADERS", "CATALYST_SUBSTRATE_HOST_NAME"]
       ]
     },
     severity: { container: "required" },
-    remedy: "the host must pass the OTel ingest client id and secret and CATALYST_SUBSTRATE_HOST_NAME to the phase container; without them the phase is neither billed nor observed"
+    remedy: "the host must supply CATALYST_SUBSTRATE_HOST_NAME and either the OTel ingest pair or a valid gateway telemetry bearer; without them the phase is neither billed nor observed"
   },
   {
     id: "env.claude-code-telemetry",
@@ -1261,6 +1644,27 @@ var PHASE_PREREQUISITES = [
   }
 ];
 var PREREQUISITE_HARNESS_CLIS = PHASE_PREREQUISITES.flatMap((entry) => entry.harness !== undefined && entry.probe.kind === "cli" ? entry.probe.names : []);
+// packages/protocol/src/fleet-remediation-diagnostic.ts
+var FIELDS = new Set([
+  "version",
+  "diagnosis",
+  "targetKey",
+  "observedAtMs",
+  "policyRevision",
+  "status",
+  "desired",
+  "evidence",
+  "repository"
+]);
+// packages/protocol/src/phase-context.ts
+var encoder = new TextEncoder;
+// packages/protocol/src/model-ref.ts
+var CODEX_MODEL_FAMILIES = Object.freeze({
+  sol: { minMajor: 6 },
+  astra: { minMajor: 6 },
+  terra: {},
+  luna: {}
+});
 // packages/environment/src/import/agents.ts
 var SHELL_LANGS = new Set(["bash", "sh", "shell", "zsh"]);
 
@@ -1314,54 +1718,6 @@ class IdAllocator {
 var TOKEN_BODY_CHARS = "A-Za-z0-9_+/=-";
 var OPAQUE_TOKEN_RE = new RegExp(`(?=[${TOKEN_BODY_CHARS}]*[0-9])(?=[${TOKEN_BODY_CHARS}]*[A-Za-z])[${TOKEN_BODY_CHARS}]{20,}`, "g");
 var ABSOLUTE_PATH_RE = new RegExp(`(?<![${TOKEN_BODY_CHARS}])/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+`, "g");
-// packages/environment/src/declaration-path.ts
-var ENVIRONMENT_DECLARATION_PATH = "catalyst.env.json";
-var RULES = [
-  {
-    rule: "environment declaration under .catalyst/",
-    re: /\.catalyst\/environment\.(?:json|toml|ya?ml)\b/
-  },
-  {
-    rule: "environment declaration under catalyst/",
-    re: /(?:^|[\s(`"'])catalyst\/environment\.(?:json|toml|ya?ml)\b/
-  }
-];
-var MISNAMED_DECLARATION_RULE_NAMES = RULES.map((r) => r.rule);
-// packages/environment/src/minimal-example.ts
-var MINIMAL_DECLARATION_EXAMPLE = {
-  version: 1,
-  toolchains: [{ name: "bun", version: "1.3.14", provenanceIds: ["human-1"] }],
-  systemPackages: [],
-  setup: [
-    {
-      id: "install",
-      command: ["bun", "install"],
-      timeoutSeconds: 900,
-      provenanceIds: ["human-1"]
-    }
-  ],
-  verify: [
-    {
-      id: "check",
-      command: ["bun", "run", "check"],
-      timeoutSeconds: 3600,
-      provenanceIds: ["human-1"]
-    }
-  ],
-  services: [],
-  environment: [{ name: "DATABASE_URL", required: true, provenanceIds: ["human-1"] }],
-  agentAssets: [],
-  provenance: [
-    {
-      id: "human-1",
-      kind: "human",
-      path: ENVIRONMENT_DECLARATION_PATH,
-      confidence: "high",
-      explanation: "Written by hand."
-    }
-  ]
-};
-var MINIMAL_DECLARATION_EXAMPLE_JSON = JSON.stringify(MINIMAL_DECLARATION_EXAMPLE, null, 2);
 // packages/environment/src/system-package-capture.ts
 var MAX_PACKAGE_INVENTORY_BYTES = 256 * 1024;
 // packages/environment/src/environment-probe.ts
@@ -1394,7 +1750,21 @@ var OPEN_KEYWORDS = new Set(["if", "for", "while", "until", "case", "function"])
 var CLOSE_KEYWORDS = new Set(["fi", "done", "esac"]);
 var CONTROL_ONLY_KEYWORDS = new Set(["then", "else", "elif", "do", "test"]);
 var COMMAND_PREFIX_WORDS = new Set(["then", "else", "elif", "do", "!"]);
-var SECRET_EXACT_NAMES = new Set(["TOKEN", "KEY", "SECRET"]);
+var SECRET_EXACT_NAMES = new Set(["TOKEN", "KEY", "SECRET", "PAT"]);
+var KNOWN_CREDENTIAL_NAMES = new Set([
+  "AWS_ACCESS_KEY_ID",
+  "OTEL_EXPORTER_OTLP_HEADERS"
+]);
+// packages/environment/src/workspace-changes.ts
+var CHANGE_FIELDS = {
+  "upsert-asset": new Set(["op", "entry", "replaces"]),
+  "remove-asset": new Set(["op", "kind", "id"]),
+  "upsert-variable": new Set(["op", "variable"]),
+  "remove-variable": new Set(["op", "name"])
+};
+var CHANGE_OPS = Object.keys(CHANGE_FIELDS);
+var REPLACES_FIELDS = new Set(["kind", "id"]);
+var NO_PROVENANCE = new Set;
 // packages/settings/src/contract.ts
 class SettingsValidationError extends Error {
   path;
@@ -1541,6 +1911,25 @@ function stringArrayAt(record, key, path, maximum) {
     }
     return entry;
   });
+}
+
+// packages/settings/src/playbook-section.ts
+var PLAYBOOK_FIELDS = new Set(["id", "revision", "digest"]);
+var PLAYBOOK_ID_RE = /^[a-z][a-z0-9-]*$/;
+var PLAYBOOK_REVISION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+var PLAYBOOK_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+function playbookSectionFromToml(value, path = "playbook") {
+  const raw = closedTable(value, PLAYBOOK_FIELDS, path);
+  for (const field of PLAYBOOK_FIELDS) {
+    if (raw[field] === undefined) {
+      throw new SettingsValidationError(`${path}.${field}`, "missing_required", `${path}.${field} is required: a workflow declaration names an exact id, revision and digest`);
+    }
+  }
+  return {
+    id: boundedStringValue(raw.id, `${path}.id`, 64, PLAYBOOK_ID_RE, 'a workflow id: lowercase letters, digits and dashes, e.g. "staged-rpiv"'),
+    revision: boundedStringValue(raw.revision, `${path}.revision`, 128, PLAYBOOK_REVISION_RE, "a workflow revision: letters, digits, dots, dashes and underscores"),
+    digest: boundedStringValue(raw.digest, `${path}.digest`, 71, PLAYBOOK_DIGEST_RE, 'a content digest: "sha256:" and 64 lowercase hex characters')
+  };
 }
 
 // packages/settings/src/agents-section.ts
@@ -1724,6 +2113,7 @@ var ENVIRONMENT_SECTION_FIELDS = new Set([
   "mcp_servers",
   "skills",
   "clis",
+  "plugins",
   "start",
   "container",
   "files"
@@ -1736,7 +2126,9 @@ var SETUP_STEP_FIELDS = new Set([...STEP_FIELDS, RERUN_WHEN_CHANGED_KEY]);
 var SERVICE_FIELDS2 = new Set(["name", "image", "readiness"]);
 var SERVICE_READINESS_COMMAND_FIELDS2 = new Set(["kind", "run", "timeout_seconds"]);
 var SERVICE_READINESS_PORT_FIELDS2 = new Set(["kind", "port"]);
-var VARIABLE_FIELDS2 = new Set(["name", "required", "secret"]);
+var NOTE_FIELDS = ["description", "agent_prompt"];
+var ASSET_COMMON_FIELDS = ["required", ...NOTE_FIELDS];
+var VARIABLE_FIELDS2 = new Set(["name", "required", "secret", ...NOTE_FIELDS]);
 var MCP_FIELDS = new Set([
   "name",
   "transport",
@@ -1746,7 +2138,17 @@ var MCP_FIELDS = new Set([
   "args",
   "env",
   "required_env_names",
-  "harnesses"
+  "harnesses",
+  "allowed_tools",
+  "via",
+  ...ASSET_COMMON_FIELDS
+]);
+var MCP_PORTAL_FIELDS2 = new Set([
+  "name",
+  "transport",
+  "via",
+  "harnesses",
+  ...ASSET_COMMON_FIELDS
 ]);
 var MCP_HTTP_FIELDS2 = new Set([
   "name",
@@ -1754,7 +2156,9 @@ var MCP_HTTP_FIELDS2 = new Set([
   "url",
   "headers",
   "required_env_names",
-  "harnesses"
+  "harnesses",
+  "allowed_tools",
+  ...ASSET_COMMON_FIELDS
 ]);
 var MCP_STDIO_FIELDS2 = new Set([
   "name",
@@ -1763,12 +2167,56 @@ var MCP_STDIO_FIELDS2 = new Set([
   "args",
   "env",
   "required_env_names",
-  "harnesses"
+  "harnesses",
+  "allowed_tools",
+  ...ASSET_COMMON_FIELDS
 ]);
-var SKILL_FIELDS2 = new Set(["name", "tier", "reference", "digest", "required_env_names"]);
-var CLI_FIELDS2 = new Set(["name", "install"]);
+var ALLOWED_TOOLS_KEY = "allowed_tools";
+function withoutAllowedTools(fields2) {
+  return new Set([...fields2].filter((field) => field !== ALLOWED_TOOLS_KEY));
+}
+var MCP_FIELDS_BEFORE_ALLOW_LIST = withoutAllowedTools(MCP_FIELDS);
+var MCP_HTTP_FIELDS_BEFORE_ALLOW_LIST = withoutAllowedTools(MCP_HTTP_FIELDS2);
+var MCP_STDIO_FIELDS_BEFORE_ALLOW_LIST = withoutAllowedTools(MCP_STDIO_FIELDS2);
+var MAX_ALLOWED_TOOLS2 = 128;
+var ASSET_ARRAYS = ["mcp_servers", "skills", "clis", "plugins"];
+function refuseOptionalAssets(raw) {
+  for (const key of ASSET_ARRAYS) {
+    const entries = raw[key];
+    if (!Array.isArray(entries))
+      continue;
+    entries.forEach((entry, i) => {
+      if (!isSettingsRecord(entry) || !Object.hasOwn(entry, "required"))
+        return;
+      const path = `environment.${key}[${i}]`;
+      throw new SettingsValidationError(`${path}.required`, "invalid_shape", `unknown field "${path}.required"`);
+    });
+  }
+}
+var SKILL_FIELDS2 = new Set([
+  "name",
+  "tier",
+  "reference",
+  "digest",
+  "source",
+  "required_env_names",
+  ...ASSET_COMMON_FIELDS
+]);
+var SKILL_SOURCE_FIELDS2 = new Set(["repository", "path", "commit"]);
+var CLI_FIELDS2 = new Set(["name", "install", ...ASSET_COMMON_FIELDS]);
 var CLI_IMAGE_FIELDS2 = new Set(["source"]);
 var CLI_NPM_FIELDS2 = new Set(["source", "package", "version"]);
+var PLUGIN_FIELDS2 = new Set([
+  "name",
+  "plugin_name",
+  "version",
+  "marketplace_name",
+  "marketplace_url",
+  "marketplace_ref",
+  "harnesses",
+  "required_env_names",
+  ...ASSET_COMMON_FIELDS
+]);
 var STEP_ID_RE2 = /^[a-z][a-z0-9-]{0,63}$/;
 var IMAGE_RE2 = /^[\x21-\x7E]{1,256}$/;
 var RERUN_PATH_RE = /^[\x21-\x2E\x30-\x7E][\x21-\x7E]{0,255}$/;
@@ -1782,7 +2230,7 @@ var MAX_ARGV = 64;
 var MAX_ARGV_ITEM = 1024;
 var ARG_RE2 = /^[\x20-\x7E]{1,1024}$/;
 function contractFailure(err) {
-  const body = err.message.replace(/^invalid repo environment declaration: /, "");
+  const body = err.message.replace(/^invalid repo environment declaration: /, "").replace(/\.agentPrompt\b/g, ".agent_prompt");
   const token = body.split(/\s+/, 1)[0] ?? "";
   const reason = err.reason === "literal_secret" || /secret/.test(body) ? "literal_secret" : /duplicate/.test(body) ? "duplicate_entry" : "invalid_value";
   if (/[.[]/.test(token)) {
@@ -1793,6 +2241,16 @@ function contractFailure(err) {
 }
 function timeoutAt(value, path) {
   return integerBetween(value, path, MIN_TIMEOUT_SECONDS2, MAX_TIMEOUT_SECONDS2);
+}
+function notesFromToml(table, path) {
+  return {
+    ...table.description !== undefined ? { description: stringAt(table, "description", path) } : {},
+    ...table.agent_prompt !== undefined ? { agentPrompt: stringAt(table, "agent_prompt", path) } : {}
+  };
+}
+function assetCommonFromToml(table, path) {
+  const required = table.required === undefined ? true : booleanAt(table, "required", path);
+  return { ...required ? {} : { required: false }, ...notesFromToml(table, path) };
 }
 function contractValidated(run) {
   try {
@@ -1845,12 +2303,26 @@ function inferTransport(raw, path) {
   }
   return inferred;
 }
+function portalTransport(raw, path) {
+  if (raw.via !== "portal") {
+    throw new SettingsValidationError(`${path}.via`, "invalid_shape", `${path}.via must be "portal"`);
+  }
+  for (const key of Object.keys(raw)) {
+    if (!MCP_PORTAL_FIELDS2.has(key)) {
+      throw new SettingsValidationError(`${path}.${key}`, "invalid_shape", `${path}.${key} is not allowed with via = "portal": the portal supplies the address and the key`);
+    }
+  }
+  if (raw.transport !== undefined && raw.transport !== "http") {
+    throw new SettingsValidationError(`${path}.transport`, "invalid_shape", `${path}.transport is ${JSON.stringify(raw.transport)} but via = "portal" implies "http"`);
+  }
+  return "http";
+}
 function environmentStepsFromToml(value, arrayPath, opts) {
   const allowRerun = opts?.allowRerunWhenChanged === true;
-  const fields = allowRerun ? SETUP_STEP_FIELDS : STEP_FIELDS;
+  const fields2 = allowRerun ? SETUP_STEP_FIELDS : STEP_FIELDS;
   return optionalTableArray(value, arrayPath, 64).map((entry, i) => {
     const path = `${arrayPath}[${i}]`;
-    const table = closedTable(entry, fields, path);
+    const table = closedTable(entry, fields2, path);
     const id = boundedStringValue(stringAt(table, "name", path), `${path}.name`, 64, STEP_ID_RE2, "a lowercase kebab-case identifier of at most 64 characters");
     const command = validateArgv(table.run, `${path}.run`);
     const cwd = table.cwd === undefined ? undefined : boundedStringValue(table.cwd, `${path}.cwd`, 512, /^[\x21-\x7E ]+$/, "a printable path of at most 512 characters");
@@ -1883,8 +2355,26 @@ function environmentStepsFromToml(value, arrayPath, opts) {
     };
   });
 }
-function declarationFromEnvironmentSection(section) {
+function allowedToolsAt(table, path) {
+  const names = stringArrayAt(table, ALLOWED_TOOLS_KEY, path, MAX_ALLOWED_TOOLS2);
+  if (names === undefined)
+    return;
+  const at = `${path}.${ALLOWED_TOOLS_KEY}`;
+  if (names.length === 0) {
+    throw new SettingsValidationError(at, "invalid_value", `${at} must name at least one tool; omit it to allow every tool`);
+  }
+  names.forEach((name, i) => {
+    if (!MCP_TOOL_NAME_RE.test(name) || name.includes("__")) {
+      throw new SettingsValidationError(`${at}[${i}]`, "invalid_value", `${at}[${i}] must be a tool name matching ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ without "__"`);
+    }
+  });
+  return names;
+}
+function declarationFromEnvironmentSection(section, opts) {
+  const toolAllowList = opts?.toolAllowList === true;
   const raw = closedTable(section, ENVIRONMENT_SECTION_FIELDS, "environment");
+  if (opts?.optionalAssets === false)
+    refuseOptionalAssets(raw);
   const toolchains = optionalTableArray(raw.toolchains, "environment.toolchains", 32).map((entry, i) => {
     const path = `environment.toolchains[${i}]`;
     const table = closedTable(entry, TOOLCHAIN_FIELDS2, path);
@@ -1949,14 +2439,30 @@ function declarationFromEnvironmentSection(section) {
       name: table.name,
       required,
       ...table.secret !== undefined ? { secret } : {},
+      ...notesFromToml(table, path),
       provenanceIds: []
     }, path, new Set));
   });
   const mcpServers = optionalTableArray(raw.mcp_servers, "environment.mcp_servers", 64).map((entry, i) => {
     const path = `environment.mcp_servers[${i}]`;
-    const table = closedTable(entry, MCP_FIELDS, path);
+    const table = closedTable(entry, toolAllowList ? MCP_FIELDS : MCP_FIELDS_BEFORE_ALLOW_LIST, path);
+    if (table.via !== undefined) {
+      const transport2 = portalTransport(table, path);
+      const harnesses2 = stringArrayAt(table, "harnesses", path, 3);
+      const portal = {
+        kind: "mcp-server",
+        id: stringAt(table, "name", path),
+        transport: transport2,
+        via: "portal",
+        requiredEnvNames: [],
+        ...harnesses2 !== undefined ? { harnesses: harnesses2 } : {},
+        ...assetCommonFromToml(table, path),
+        provenanceIds: []
+      };
+      return contractValidated(() => validateAgentAssetEntry(portal, path, new Set));
+    }
     const transport = inferTransport(table, path);
-    closedTable(table, transport === "http" ? MCP_HTTP_FIELDS2 : MCP_STDIO_FIELDS2, path);
+    closedTable(table, transport === "http" ? toolAllowList ? MCP_HTTP_FIELDS2 : MCP_HTTP_FIELDS_BEFORE_ALLOW_LIST : toolAllowList ? MCP_STDIO_FIELDS2 : MCP_STDIO_FIELDS_BEFORE_ALLOW_LIST, path);
     const id = stringAt(table, "name", path);
     const url = optionalString(table, "url", path);
     const headers = stringMapAt(table, "headers", path);
@@ -1965,6 +2471,7 @@ function declarationFromEnvironmentSection(section) {
     const env = stringMapAt(table, "env", path);
     const requiredEnvNames = stringArrayAt(table, "required_env_names", path, 32) ?? [];
     const harnesses = stringArrayAt(table, "harnesses", path, 3);
+    const allowedTools = allowedToolsAt(table, path);
     const built = {
       kind: "mcp-server",
       id,
@@ -1976,6 +2483,8 @@ function declarationFromEnvironmentSection(section) {
       ...env !== undefined ? { env } : {},
       requiredEnvNames,
       ...harnesses !== undefined ? { harnesses } : {},
+      ...allowedTools !== undefined ? { allowedTools } : {},
+      ...assetCommonFromToml(table, path),
       provenanceIds: []
     };
     return contractValidated(() => validateAgentAssetEntry(built, path, new Set));
@@ -1992,7 +2501,18 @@ function declarationFromEnvironmentSection(section) {
       tier: table.tier,
       reference: table.reference,
       ...table.digest !== undefined ? { digest: table.digest } : {},
+      ...table.source !== undefined ? {
+        source: (() => {
+          const sourceTable = closedTable(table.source, SKILL_SOURCE_FIELDS2, `${path}.source`);
+          return {
+            repository: stringAt(sourceTable, "repository", `${path}.source`),
+            path: stringAt(sourceTable, "path", `${path}.source`),
+            commit: stringAt(sourceTable, "commit", `${path}.source`)
+          };
+        })()
+      } : {},
       requiredEnvNames: stringArrayAt(table, "required_env_names", path, 32) ?? [],
+      ...assetCommonFromToml(table, path),
       provenanceIds: []
     };
     return contractValidated(() => validateAgentAssetEntry(built, path, new Set));
@@ -2013,6 +2533,27 @@ function declarationFromEnvironmentSection(section) {
       kind: "cli",
       id: stringAt(table, "name", path),
       install,
+      ...assetCommonFromToml(table, path),
+      provenanceIds: []
+    };
+    return contractValidated(() => validateAgentAssetEntry(built, path, new Set));
+  });
+  const plugins = optionalTableArray(raw.plugins, "environment.plugins", 64).map((entry, i) => {
+    const path = `environment.plugins[${i}]`;
+    const table = closedTable(entry, PLUGIN_FIELDS2, path);
+    const built = {
+      kind: "plugin",
+      id: stringAt(table, "name", path),
+      name: stringAt(table, "plugin_name", path),
+      ...table.version !== undefined ? { version: stringAt(table, "version", path) } : {},
+      marketplace: {
+        name: stringAt(table, "marketplace_name", path),
+        url: stringAt(table, "marketplace_url", path),
+        ...table.marketplace_ref !== undefined ? { ref: stringAt(table, "marketplace_ref", path) } : {}
+      },
+      ...stringArrayAt(table, "harnesses", path, 3) !== undefined ? { harnesses: stringArrayAt(table, "harnesses", path, 3) } : {},
+      requiredEnvNames: stringArrayAt(table, "required_env_names", path, 32) ?? [],
+      ...assetCommonFromToml(table, path),
       provenanceIds: []
     };
     return contractValidated(() => validateAgentAssetEntry(built, path, new Set));
@@ -2023,6 +2564,7 @@ function declarationFromEnvironmentSection(section) {
   assertNoDuplicateIdentities(mcpServers, (a) => a.id, "environment.mcp_servers");
   assertNoDuplicateIdentities(skills, (a) => a.id, "environment.skills");
   assertNoDuplicateIdentities(clis, (a) => a.id, "environment.clis");
+  assertNoDuplicateIdentities(plugins, (a) => a.id, "environment.plugins");
   const declaration = {
     version: 1,
     toolchains,
@@ -2031,7 +2573,7 @@ function declarationFromEnvironmentSection(section) {
     verify,
     services,
     environment: variables,
-    agentAssets: [...mcpServers, ...skills, ...clis],
+    agentAssets: [...mcpServers, ...skills, ...clis, ...plugins],
     provenance: []
   };
   try {
@@ -2092,6 +2634,7 @@ var REVIEW_EVIDENCE_LEGS = new Set([
   "codex",
   "thread-ancestry"
 ]);
+var NON_FAILING_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
 var QUEUE_CONDITION_KEYS = new Set(["queue_conditions", "merge_conditions"]);
 
 // packages/settings/src/variable-refs.ts
@@ -2172,7 +2715,19 @@ var MERGE_FIELDS = new Set([
   "required_checks",
   "hand_merge_paths"
 ]);
-var REVIEW_FIELDS = new Set(["reviewers", "request", "max_requests"]);
+var REVIEW_FIELDS = new Set([
+  "reviewers",
+  "request",
+  "max_requests",
+  "max_total",
+  "limits",
+  "one_way_paths"
+]);
+var MAX_ONE_WAY_PATHS = 32;
+var MAX_ONE_WAY_PATH_LENGTH = 2048;
+var REVIEW_SERVICE_KEY_PATTERN = "^[a-z0-9][a-z0-9_-]{0,63}$";
+var REVIEW_SERVICE_KEY_RE = new RegExp(REVIEW_SERVICE_KEY_PATTERN);
+var MAX_REVIEW_SERVICE_LIMITS = 16;
 var PULL_REQUESTS_FIELDS = new Set([
   "draft_until_validated",
   "branch_pattern",
@@ -2183,12 +2738,10 @@ var MERGE_QUEUES = ["mergify", "github"];
 var COMMIT_CONVENTIONS = ["conventional", "free-form"];
 var HAND_MERGE_PATH_RE = /^[\x21-\x2E\x30-\x7E][\x21-\x7E]{0,255}$/;
 var PARENT_SEGMENT_RE2 = /(?:^|\/)\.\.(?:\/|$)/;
-var RUNNER_FIELDS = new Set(["concurrency", "context"]);
+var RUNNER_FIELDS = new Set(["concurrency", "disk_budget_gib", "context"]);
 var RUNNER_CONTEXT_FIELDS = new Set(["handoff_at", "native_compact_at", "phases"]);
 var RUNNER_CONTEXT_THRESHOLD_FIELDS = new Set(["handoff_at", "native_compact_at"]);
 var RUNNER_PHASE_FIELDS = new Set(PROJECT_ROUTING_STAGES);
-var DEFAULT_HANDOFF_AT = 250000;
-var DEFAULT_NATIVE_COMPACT_AT = 350000;
 var THOUGHTS_KEYS = [
   "repo_owner",
   "repo_name",
@@ -2199,7 +2752,7 @@ var THOUGHTS_KEYS = [
 var THOUGHTS_FIELDS = new Set(THOUGHTS_KEYS);
 var PRINTABLE_RE3 = /^[\x21-\x7E ]+$/;
 var ANY_TEXT_RE = /^[\s\S]+$/u;
-var hasControlCharacter = (text) => [...text].some((c) => c.charCodeAt(0) <= 31 || c.charCodeAt(0) === 127);
+var hasControlCharacter2 = (text) => [...text].some((c) => c.charCodeAt(0) <= 31 || c.charCodeAt(0) === 127);
 function mergeSectionFromToml(value) {
   const raw = closedTable(value, MERGE_FIELDS, "merge");
   const section = {};
@@ -2252,6 +2805,33 @@ function mergeSectionFromToml(value) {
   }
   return section;
 }
+function reviewLimitFieldsFromToml(raw, path) {
+  const out = {};
+  if (raw.max_requests !== undefined) {
+    out.max_requests = integerBetween(raw.max_requests, `${path}.max_requests`, 0, 20);
+  }
+  if (raw.max_total !== undefined) {
+    out.max_total = integerBetween(raw.max_total, `${path}.max_total`, 0, 40);
+  }
+  if (raw.limits !== undefined) {
+    if (!isSettingsRecord(raw.limits)) {
+      throw new SettingsValidationError(`${path}.limits`, "invalid_shape", `${path}.limits must be a table`);
+    }
+    const entries = Object.entries(raw.limits);
+    if (entries.length > MAX_REVIEW_SERVICE_LIMITS) {
+      throw new SettingsValidationError(`${path}.limits`, "invalid_value", `${path}.limits names at most ${MAX_REVIEW_SERVICE_LIMITS} services`);
+    }
+    const limits = {};
+    for (const [key, value] of entries) {
+      if (!REVIEW_SERVICE_KEY_RE.test(key)) {
+        throw new SettingsValidationError(`${path}.limits.${key}`, "invalid_value", `a ${path}.limits key is a lowercase review service key (letters, digits, - and _)`);
+      }
+      limits[key] = integerBetween(value, `${path}.limits.${key}`, 0, 20);
+    }
+    out.limits = limits;
+  }
+  return out;
+}
 function reviewSectionFromToml(value) {
   const raw = closedTable(value, REVIEW_FIELDS, "review");
   const section = {};
@@ -2271,8 +2851,23 @@ function reviewSectionFromToml(value) {
     }
     section.request = raw.request;
   }
-  if (raw.max_requests !== undefined) {
-    section.max_requests = integerBetween(raw.max_requests, "review.max_requests", 0, 20);
+  Object.assign(section, reviewLimitFieldsFromToml(raw, "review"));
+  if (raw.one_way_paths !== undefined) {
+    section.one_way_paths = stringList(raw.one_way_paths, "review.one_way_paths", {
+      minItems: 1,
+      maxItems: MAX_ONE_WAY_PATHS,
+      minLength: 1,
+      maxLength: MAX_ONE_WAY_PATH_LENGTH,
+      unique: true,
+      describe: `a regular expression of 1-${MAX_ONE_WAY_PATH_LENGTH} printable characters`
+    });
+    section.one_way_paths.forEach((source, i) => {
+      try {
+        new RegExp(source);
+      } catch {
+        throw new SettingsValidationError(`review.one_way_paths[${i}]`, "invalid_value", `review.one_way_paths[${i}] is not a valid JavaScript regular expression`);
+      }
+    });
   }
   return section;
 }
@@ -2284,7 +2879,7 @@ function pullRequestsSectionFromToml(value) {
   }
   const templated = (key, required) => {
     const text = boundedStringValue(raw[key], `pull_requests.${key}`, 128, key === "title_format" ? ANY_TEXT_RE : PRINTABLE_RE3, key === "title_format" ? "text of at most 128 characters without control characters" : "a printable string of at most 128 characters");
-    if (hasControlCharacter(text)) {
+    if (hasControlCharacter2(text)) {
       throw new SettingsValidationError(`pull_requests.${key}`, "invalid_value", `pull_requests.${key} must be text of at most 128 characters without control characters`);
     }
     const missing = required.filter((token) => !text.includes(token));
@@ -2313,13 +2908,17 @@ function runnerSectionFromToml(value) {
   if (raw.concurrency !== undefined) {
     section.concurrency = integerBetween(raw.concurrency, "runner.concurrency", 1, 100);
   }
+  if (raw.disk_budget_gib !== undefined) {
+    const diskBudget = raw.disk_budget_gib;
+    if (typeof diskBudget !== "number" || !Number.isSafeInteger(diskBudget) || diskBudget < 1 || diskBudget > MAX_PHASE_DISK_BUDGET_GIB) {
+      throw new SettingsValidationError("runner.disk_budget_gib", "invalid_value", `runner.disk_budget_gib must be a whole number of GiB from 1 to ${MAX_PHASE_DISK_BUDGET_GIB}`);
+    }
+    section.disk_budget_gib = diskBudget;
+  }
   if (raw.context !== undefined) {
     const context = closedTable(raw.context, RUNNER_CONTEXT_FIELDS, "runner.context");
-    const thresholds = contextThresholds(context, "runner.context");
-    const resolvedHandoff = thresholds.handoff_at ?? DEFAULT_HANDOFF_AT;
-    const resolvedNative = thresholds.native_compact_at ?? DEFAULT_NATIVE_COMPACT_AT;
-    checkContextOrder(thresholds, "runner.context", resolvedHandoff, resolvedNative);
-    const result = { ...thresholds };
+    const result = contextThresholds(context, "runner.context");
+    checkContextPair(result, result, undefined, "runner.context");
     if (context.phases !== undefined) {
       const phases = closedTable(context.phases, RUNNER_PHASE_FIELDS, "runner.context.phases");
       result.phases = {};
@@ -2328,9 +2927,12 @@ function runnerSectionFromToml(value) {
           continue;
         const path = `runner.context.phases.${phase}`;
         const phaseRaw = closedTable(phases[phase], RUNNER_CONTEXT_THRESHOLD_FIELDS, path);
-        const override = contextThresholds(phaseRaw, path);
-        checkContextOrder(override, path, override.handoff_at ?? thresholds.handoff_at ?? (phase === "intake" || phase === "pr" ? 200000 : DEFAULT_HANDOFF_AT), override.native_compact_at ?? resolvedNative);
-        result.phases[phase] = override;
+        result.phases[phase] = contextThresholds(phaseRaw, path);
+      }
+      for (const phase of PROJECT_ROUTING_STAGES) {
+        const row = result.phases[phase];
+        if (row !== undefined)
+          checkContextPair(result, row, phase, `runner.context.phases.${phase}`);
       }
     }
     section.context = result;
@@ -2340,17 +2942,23 @@ function runnerSectionFromToml(value) {
 function contextThresholds(raw, path) {
   const result = {};
   for (const key of ["handoff_at", "native_compact_at"]) {
-    if (raw[key] !== undefined) {
-      result[key] = integerBetween(raw[key], `${path}.${key}`, 1, Number.MAX_SAFE_INTEGER);
+    const value = raw[key];
+    if (value === undefined)
+      continue;
+    const issue = contextLimitDeclarationIssue(value);
+    if (issue !== null) {
+      throw new SettingsValidationError(`${path}.${key}`, "invalid_value", `${path}.${key} ${issue}`);
     }
+    result[key] = value;
   }
   return result;
 }
-function checkContextOrder(explicit, path, handoff, native) {
-  if (handoff < native)
+function checkContextPair(declaration, row, phase, path) {
+  const issue = contextDeclarationPairIssue(declaration, phase);
+  if (issue === null)
     return;
-  const key = explicit.handoff_at !== undefined ? "handoff_at" : "native_compact_at";
-  throw new SettingsValidationError(`${path}.${key}`, "invalid_value", `${path}.handoff_at must be less than ${path}.native_compact_at`);
+  const key = row.handoff_at !== undefined ? "handoff_at" : "native_compact_at";
+  throw new SettingsValidationError(`${path}.${key}`, "invalid_value", `${path}: when both limits are on, native_compact_at must be at least 50000 tokens above handoff_at (${issue})`);
 }
 function thoughtsSectionFromToml(value) {
   const raw = closedTable(value, THOUGHTS_FIELDS, "thoughts");
@@ -2419,7 +3027,7 @@ function containerFromToml(value) {
   }
   return out;
 }
-function declaredSecretNames(section) {
+function declaredSecretNames2(section) {
   const declared = new Set;
   const secret = new Set;
   if (Array.isArray(section.variables)) {
@@ -2434,7 +3042,7 @@ function declaredSecretNames(section) {
   return { declared, secret };
 }
 function filesFromToml(value, section) {
-  const { declared, secret } = declaredSecretNames(section);
+  const { declared, secret } = declaredSecretNames2(section);
   const seenPaths = new Set;
   return tableArray(value, "environment.files", 32).map((entry, i) => {
     const path = `environment.files[${i}]`;
@@ -2509,9 +3117,7 @@ var LABEL_OPTIONS = {
   unique: true,
   describe: "a label name of 1-64 printable characters"
 };
-var PROJECT_FIELDS = new Set([
-  "linear_team",
-  "linear_workspace",
+var PROJECT_SCOPED_SECTION_KEYS = [
   "linear",
   "routing",
   "ladder",
@@ -2520,8 +3126,16 @@ var PROJECT_FIELDS = new Set([
   "intake",
   "repositories",
   "runner",
-  "execution"
+  "execution",
+  "playbook",
+  "review"
+];
+var PROJECT_FIELDS = new Set([
+  "linear_team",
+  "linear_workspace",
+  ...PROJECT_SCOPED_SECTION_KEYS
 ]);
+var PROJECT_REVIEW_FIELDS = new Set(["max_requests", "max_total", "limits"]);
 var LINEAR_FIELDS = new Set(["states", "mode", "git_automation", "labels"]);
 var LINEAR_LABEL_FIELDS = new Set(["ask", "hold", "release"]);
 var ROUTING_ENTRY_FIELDS = new Set(["provider", "model", "effort"]);
@@ -2753,14 +3367,29 @@ function projectSectionFromToml(value) {
   }
   if (raw.execution !== undefined)
     section.execution = executionSection(raw.execution);
+  if (raw.playbook !== undefined)
+    section.playbook = playbookSectionFromToml(raw.playbook, "project.playbook");
+  if (raw.review !== undefined) {
+    section.review = reviewLimitFieldsFromToml(closedTable(raw.review, PROJECT_REVIEW_FIELDS, "project.review"), "project.review");
+  }
   return section;
 }
 
 // packages/settings/src/toml.ts
 import { parse, stringify, TomlError } from "smol-toml";
+function toPlainTables(value) {
+  if (Array.isArray(value))
+    return value.map(toPlainTables);
+  if (typeof value !== "object" || value === null)
+    return value;
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== null && proto !== Object.prototype)
+    return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, toPlainTables(entry)]));
+}
 function parseSettingsToml(text) {
   try {
-    return { ok: true, value: parse(text) };
+    return { ok: true, value: toPlainTables(parse(text)) };
   } catch (err) {
     if (err instanceof TomlError) {
       const message = err.message.split(`
@@ -2788,7 +3417,8 @@ var TOP_LEVEL_FIELDS3 = new Set([
   "thoughts",
   "pull_requests",
   "environment",
-  "agents"
+  "agents",
+  "playbook"
 ]);
 function issueFrom(err) {
   if (err instanceof SettingsValidationError) {
@@ -2810,7 +3440,7 @@ function declaredVariables(parsed) {
   }
   return out;
 }
-function validateSettingsValue(value) {
+function validateSettingsValue(value, opts) {
   if (!isSettingsRecord(value)) {
     return {
       ok: false,
@@ -2852,7 +3482,7 @@ function validateSettingsValue(value) {
   }
   if (value.environment !== undefined) {
     try {
-      environment = declarationFromEnvironmentSection(value.environment);
+      environment = declarationFromEnvironmentSection(value.environment, opts);
       settings.environment = value.environment;
     } catch (err) {
       issues.push(issueFrom(err));
@@ -2883,6 +3513,14 @@ function validateSettingsValue(value) {
       issues.push(issueFrom(err));
     }
   }
+  if (value.playbook !== undefined) {
+    try {
+      settings.playbook = playbookSectionFromToml(value.playbook);
+      scanNonEnvironmentSection(value.playbook, "playbook");
+    } catch (err) {
+      issues.push(issueFrom(err));
+    }
+  }
   if (value.agents !== undefined) {
     try {
       settings.agents = agentsSectionFromToml(value.agents, declaredVariables(value));
@@ -2905,11 +3543,11 @@ function validateSettingsValue(value) {
     ...runtime !== undefined ? { runtime } : {}
   } : { ok: false, issues };
 }
-function validateCatalystSettings(text) {
+function validateCatalystSettings(text, opts) {
   const parsed = parseSettingsToml(text);
   if (!parsed.ok)
     return { ok: false, issues: [parsed.issue] };
-  return validateSettingsValue(parsed.value);
+  return validateSettingsValue(parsed.value, opts);
 }
 
 // entry.ts
