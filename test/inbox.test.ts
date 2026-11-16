@@ -20,6 +20,12 @@ describe("inbox", () => {
     expect(error).toContain("ack --ticket CTC-N --agent NAME --session ID --message ID --turn N");
     expect(calls).toHaveLength(0);
   });
+  it("states the send limits in the send verb's help (CTC-10679)", async () => {
+    const {ctx} = fixture({});
+    expect(await main(["inbox", "--help"], ctx)).toBe(0);
+    const help = ctx.out.join("\n");
+    for (const limit of ["4,096 bytes of UTF-8", "bytes, not characters", "20 pending per ticket", "3 message turns per phase", "send the pointer"]) expect(help).toContain(limit);
+  });
   it("checks pending mail and prints its session without acknowledging", async () => {
     const {ctx, calls} = fixture({session: "ses_1", messages: [{id: "msg_1", body: "please rebase", from: {label: "Ryan"}}]});
     expect(await main(["inbox", "check", "--ticket", "ctc-900", "--agent", "seat-a"], ctx)).toBe(0);

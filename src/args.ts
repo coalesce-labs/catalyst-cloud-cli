@@ -550,7 +550,10 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     ticket: {value: true, help: "the ticket to receive from or send to"},
     agent: {value: true, help: "check/ack: the agent name holding your ticket lease"},
     session: {value: true, help: "check/ack: your inbox session; send: the destination session"},
-    body: {value: true, help: "send: the message text"},
+    body: {
+      value: true,
+      help: "send: the message text, at most 4,096 bytes of UTF-8 (bytes, not characters); a ticket holds 20 pending per ticket and a phase takes 3 message turns per phase, so write long content to a file or the ticket and send the pointer",
+    },
     kind: {value: true, help: "send: note, question or answer (default: note)"},
     re: {value: true, help: "send: the message being answered"},
     message: {value: true, help: "ack: the message you consumed"},
