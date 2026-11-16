@@ -1,3 +1,4 @@
+import { cmdInbox } from "./inbox.js";
 import { cmdHosts, type HostsDeps } from "./hosts.js";
 import { cmdRunner, type RunnerCommandDeps } from "./runner-command.js";
 import { cmdUpdate, type UpdateCommandDeps } from "./update-command.js";
@@ -26,7 +27,6 @@ import {
   defaultReplicaDbFor,
   defaultSkillsDirFor,
   formatMode,
-  INSTALL_COMMAND,
   loadConfig,
   modernCliPath,
   normalizeBaseUrl,
@@ -258,6 +258,7 @@ export function usageText(): string {
     "  catalyst codex-env --print [--codex-home <dir>] | --apply | --refresh   (the telemetry attributes naming the AI account and computer a Codex launch runs as)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
     "  catalyst identity linear <status|options|set> [<linearUserId>] [--json]",
+    "  catalyst inbox <check|send|ack> --ticket CTC-N [--agent NAME] [--session ID] [--json]",
     "  catalyst messages read --ticket CTC-N [--since SEQUENCE] [--json]   (messages sent to a ticket on your teams)",
     "  catalyst connections personal <linear|github> <start|status> [--wait <seconds>] [--json]",
     "",
@@ -792,6 +793,8 @@ export async function main(
         return await cmdCodexEnv(args, ctx, deps.codexEnv ?? {});
       case "identity":
         return await cmdIdentity(args, ctx, deps.identity ?? {});
+      case "inbox":
+        return await cmdInbox(args, ctx);
       case "messages":
         return await cmdMessages(args, ctx, deps.messages ?? {});
       case "hosts":
@@ -874,6 +877,7 @@ const VERB_HELP_KNOWN: Record<string, true> = Object.fromEntries(
     "connections",
     "identity",
     "messages",
+    "inbox",
     "mcp",
     "team",
     "capabilities",
