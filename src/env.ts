@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { flagBool, flagString, positionals, type ParsedArgs } from "./args.js";
 import type { Ctx } from "./config.js";
 import { cmdEnvImport, offerMachineImport, type EnvImportDeps, type ImportReport } from "./env-import.js";
+import { cmdEnvStatus, type EnvStatusDeps } from "./env-status.js";
 import { validateSettingsToml } from "./env/settings-toml.js";
 import { convertLegacyEnvironmentJson } from "./env/legacy.js";
 import { draftEnvironment } from "./env/draft.js";
@@ -29,6 +30,8 @@ export type EnvDeps = Partial<ScanDeps> & {
   /** `env import` and `env draft --write`'s offer to store values. */
   import?: EnvImportDeps;
   shell?: EnvShellDeps;
+  /** `env status`: which repository the checkout names (CTC-10325). */
+  status?: EnvStatusDeps;
 };
 
 const NEXT_IMPORT_LINE = "Next: catalyst env import stores this computer's values for these names. It signs in and asks first.";
@@ -40,7 +43,9 @@ export async function cmdEnv(
 ): Promise<number> {
   const [sub, ...rest] = positionals(args);
   if (sub === undefined)
-    throw new UsageError("env needs a subcommand: inventory | check | migrate | draft | import | shell");
+    throw new UsageError("env needs a subcommand: inventory | check | migrate | draft | import | shell | status");
+
+  if (sub === "status") return cmdEnvStatus(args, ctx, deps.status ?? {});
 
   if (sub === "import") return cmdEnvImport(args, ctx, deps.import ?? {});
 
@@ -216,7 +221,7 @@ export async function cmdEnv(
     return result.state === "invalid" ? 1 : 0;
   }
 
-  throw new UsageError(`unknown env subcommand "${sub}": inventory | check | migrate | draft | import | shell`);
+  throw new UsageError(`unknown env subcommand "${sub}": inventory | check | migrate | draft | import | shell | status`);
 }
 
 /** After a successful write: store now (`--import-values`), ask in a terminal, or name the next command. */
