@@ -166,7 +166,7 @@ describe("the env inventory CLI verb", () => {
 
   test("D-1: env and environment are told apart in usage text", () => {
     expect(VERB_USAGE.env).toMatch(/this repository|offline|no login/i);
-    expect(VERB_USAGE.environment).toMatch(/account/i);
+    expect(VERB_USAGE.environment).toMatch(/workspace/i);
     expect(verbHelp("env")).toContain("no login");
   });
 

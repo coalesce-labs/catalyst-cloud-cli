@@ -517,7 +517,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
     approve: {
       value: false,
-      help: "propose: approve exactly the revision the propose returned",
+      help: "propose: approve exactly the revision the propose returned (nothing to approve once the workspace has a config repository: merging the pull request is the approval)",
     },
     revision: {
       value: true,
@@ -714,7 +714,7 @@ export const VERB_USAGE: Record<string, string> = {
   team: "team <list|check <KEY>|check --all|map <KEY> [--stage role=StateName]... [--yes --plan-hash H]|adopt <KEY> [--undo] [--yes --plan-hash H]|migrate <KEY> [--choice sourceId=destinationId]... [--retire] [--yes --plan-hash H]|checklist <KEY>> [--json]",
   env: "env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write [--import-values]] | import [--root DIR] [--repo owner/name] [--yes] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (THIS repository; no login, except import and --import-values, which sign in and store values — shell needs Docker and downloads Catalyst's image once)",
   environment:
-    "environment [read] [--json] | environment propose --file <path>|--stdin [--expect-revision N] [--approve] [--json] | environment approve [--revision N --hash H] [--json]   (your ACCOUNT's declaration; needs login)",
+    "environment [read] [--json] | environment propose --file <path>|--stdin [--expect-revision N] [--json] | environment approve [--revision N --hash H] [--json]   (your workspace's declaration; needs login; it changes only through catalyst.toml in the config repository, so propose opens a pull request, merging it is the approval, and with no config repository both refuse and say how to choose one)",
   secret:
     "secret set <NAME> --repo <owner/name> [--command '<cmd>'] [--json]   (value from --command, stdin, or a hidden prompt) | secret import <file> --repo <owner/name> [--names NAME[,NAME...]] [--rotate NAME]... [--json]",
   var: "var <set NAME|import <file>> [--repo <owner/name>] [--names NAME[,NAME...]] [--json]   (plain environment variables; set reads stdin or a hidden prompt)",
