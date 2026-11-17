@@ -240,7 +240,7 @@ export function usageText(): string {
     "  catalyst write <comment|state|label|create|reaction|attachment|session> ...",
     "  catalyst ask <raise|accept|answer --proxy|proxy [status|on|off]|disown|list> ...",
     "  catalyst release <ticket> --because <what changed> [--retry-unchanged] [--dry-run] | release --class <c> --team <K> ...",
-    "  catalyst environment [read] | environment propose --file <path>|--stdin [--approve] | environment approve   (your workspace; needs login)",
+    "  catalyst environment [read] | environment propose --file <path>|--stdin | environment approve   (your workspace; changes only through catalyst.toml in its config repository; needs login)",
     "  catalyst env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (this repository; no login — shell needs Docker and downloads Catalyst's image once)",
     "  catalyst secret set <NAME> --repo <owner/name> [--command '<cmd>'] | secret import <file> --repo <owner/name> [--names NAME[,NAME...]]",
     "  catalyst var set <NAME> | var import <file> [--repo <owner/name>] [--names NAME[,NAME...]]   (plain environment variables)",

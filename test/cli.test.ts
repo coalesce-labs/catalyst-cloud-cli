@@ -36,7 +36,7 @@ describe("dispatcher", () => {
     expect(await main([], c2)).toBe(0);
     expect(c2.out.join("\n")).toContain("Usage:");
     expect(c2.out.join("\n")).toContain("telemetry attributes naming the AI account and computer");
-    expect(c2.out.join("\n")).toContain("environment approve   (your workspace; needs login)");
+    expect(c2.out.join("\n")).toContain("environment approve   (your workspace; changes only through catalyst.toml in its config repository; needs login)");
     const c3 = makeCtx(home);
     expect(await main(["--wat"], c3)).toBe(1);
     expect(c3.err[0]).toContain("unknown option");
