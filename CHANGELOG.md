@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.51
+
+`catalyst env status` says which revision of a repository's environment is in effect for new phases, and how it was approved. A merge or push to the default branch approves the settings file. The command names that commit in full, and the pull request when the commit came from one: "Approved automatically when pull request #N merged as commit <sha> into main." It also says when a newer revision is still being applied. It reads the repository from the checkout's origin remote, or from `--repo owner/name`. `--json` prints the answer as the cloud sent it. A cloud that does not offer this read yet gets a message saying so, and nothing is called.
+
+`catalyst environment propose` reports the pull request the cloud opens for the change. Merging that pull request is the approval, so the command sends no separate approve. The workspace declaration now changes only through `catalyst.toml` in a config repository. A workspace with no config repository is told how to get one, and so is an approve sent to a workspace that has one.
+
 ## 0.16.50
 
 Agents can now read, send and acknowledge their messages from the command line. `catalyst inbox check --ticket CTC-N --agent <name>` lists the messages waiting for the agent that holds the ticket's lease, `catalyst inbox send` sends a note, question or answer, and `catalyst inbox ack` marks a message consumed. The `--body` help gives the limits: 4,096 bytes of UTF-8 per message, 20 pending messages per ticket, and 3 message turns per phase. Send a pointer to anything longer.
