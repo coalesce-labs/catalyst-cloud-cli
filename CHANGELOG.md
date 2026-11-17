@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.16.50
+
+Agents can now read, send and acknowledge their messages from the command line. `catalyst inbox check --ticket CTC-N --agent <name>` lists the messages waiting for the agent that holds the ticket's lease, `catalyst inbox send` sends a note, question or answer, and `catalyst inbox ack` marks a message consumed. The `--body` help gives the limits: 4,096 bytes of UTF-8 per message, 20 pending messages per ticket, and 3 message turns per phase. Send a pointer to anything longer.
+
+A self-hosted machine's update now waits only for phases that are running. A container that was created and never started, or one that had exited, used to hold the update open with no work running.
+
+When a self-hosted machine's update has waited 2 hours and your workspace counts no live work on that machine, the update now says so once, naming the machine and both counts. The update keeps waiting and never stops a phase.
+
+A `catalyst.toml` whose variable or asset carries `description`, `agent_prompt` or `required = false` is now accepted by `catalyst onboard` and the other commands that check the settings file. It used to be refused.
+
 ## 0.16.49
 
 `catalyst lease show` no longer says a ticket is free while a phase is running on it. It now names the phase and when its hold ends, so you can see why `catalyst lease take` would refuse before you try it. Nothing changes for a ticket with a live lease.
