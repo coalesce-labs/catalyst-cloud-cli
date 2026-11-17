@@ -323,6 +323,8 @@ Your personal key reads everything the skills need — tickets, pull requests, t
 
 `catalyst env shell` opens this repository's environment on your computer: the image Catalyst's agents work in, the toolchain your `.catalyst/catalyst.toml` declares, and the variables it names, with values taken from your terminal or an `--env-file`. It needs Docker (Docker Desktop, OrbStack or Docker Engine) and no sign-in. The first run downloads the image, about 2.3 GB, with no credential. `catalyst env shell --check` prepares the same environment and reports each toolchain and variable without opening a shell.
 
+`catalyst env status` says which revision of a repository's environment is in effect for new phases, and how it was approved. A merge or push to the default branch approves the settings file, so the line names the commit that reached the branch, and the pull request when that commit is a pull request's merge commit. It also says when a newer revision is still being applied. It reads the repository from the checkout's origin remote, or from `--repo owner/name`, and needs a sign-in. `--json` prints the cloud's answer as it came.
+
 ## Versions and origins
 
 The package pins the contract range `1.x || 2.x`, recorded in `package.json` under `catalystCloud.tenantContractRange`, and reports it in `--version`, `status` and `login`. An account whose contract version falls outside that range is refused with one line naming both versions; update the bundle. Every skill carries a `vendored-from:` line naming this package as its origin, and that line now also carries the version it was vendored at; all of them are written in this repository for customer accounts.
