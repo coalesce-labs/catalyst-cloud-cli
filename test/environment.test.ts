@@ -163,6 +163,30 @@ describe("environment propose", () => {
     expect(out).toContain("now at revision 7");
   });
 
+  test("CTC-10761 — a pull-request answer is reported as a pull request, exits 0, and approves nothing even with --approve", async () => {
+    server.environmentForced = {
+      propose: {
+        status: 202,
+        body: { status: "pull_request", pullRequest: { number: 14, url: "https://github.com/acme/ws/pull/14" }, repository: "acme/ws", path: "catalyst.toml", changes: 2 },
+      },
+    };
+    expect(await main(["environment", "propose", "--file", declarationFile(DECLARATION), "--approve"], ctx)).toBe(0);
+    const out = text();
+    expect(out).toContain("opened pull request #14 on acme/ws");
+    expect(out).toContain("nothing to approve in Catalyst");
+    expect(envWrites("approve")).toEqual([]);
+  });
+
+  test("CTC-10761 — no config repository: the cloud's refusal is printed with how to get one, and exits 1", async () => {
+    server.environmentForced = {
+      propose: { status: 409, body: { error: "no_config_repository", message: "this workspace has no config repository" } },
+    };
+    expect(await main(["environment", "propose", "--file", declarationFile(DECLARATION)], ctx)).toBe(1);
+    const out = text();
+    expect(out).toContain("this workspace has no config repository");
+    expect(out).toContain("Settings, Environment");
+  });
+
   test("an unchanged re-proposal is reported as unchanged, not as a new revision", async () => {
     server.accountEnvironment.current = { revision: 3, canonicalHash: "sha-3", declaration: DECLARATION, proposedBy: "d1-user-tony" };
     expect(await main(["environment", "propose", "--file", declarationFile(DECLARATION)], ctx)).toBe(0);
@@ -201,6 +225,15 @@ describe("environment approve", () => {
     expect(server.accountEnvironment.approved).toBeNull();
   });
 
+  test("CTC-10761 — approve refused by the cloud names merging the pull request as the way, and exits 1", async () => {
+    server.accountEnvironment.current = { revision: 5, canonicalHash: "sha-5", declaration: DECLARATION, proposedBy: "d1-user-tony" };
+    server.environmentForced = {
+      approve: { status: 409, body: { error: "declaration_comes_from_workspace_file", message: "this workspace takes its settings from catalyst.toml in acme/ws" } },
+    };
+    expect(await main(["environment", "approve"], ctx)).toBe(1);
+    expect(text()).toContain("nothing is approved in Catalyst");
+  });
+
   test("--revision without --hash is a usage error, so half a compare-and-set never reaches the cloud", async () => {
     expect(await main(["environment", "approve", "--revision", "2"], ctx)).toBe(1);
     expect(ctx.err.join("\n")).toContain("--revision and --hash together");
@@ -210,6 +243,15 @@ describe("environment approve", () => {
   test("nothing to approve says so and exits 1 rather than posting", async () => {
     expect(await main(["environment", "approve"], ctx)).toBe(1);
     expect(text()).toContain("there is no declaration to approve");
+    expect(envWrites("approve")).toEqual([]);
+  });
+
+  test("CTC-10761 — nothing to approve and no config repository gives the config-repository guidance, not 'propose again'", async () => {
+    expect(await main(["environment", "approve"], ctx)).toBe(1);
+    const out = text();
+    expect(out).toContain("config repository");
+    expect(out).toContain("Settings, Environment");
+    expect(out).not.toContain("propose one first");
     expect(envWrites("approve")).toEqual([]);
   });
 });

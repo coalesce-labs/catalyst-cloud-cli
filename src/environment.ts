@@ -43,8 +43,13 @@ export interface EnvironmentRead {
 }
 
 export interface ProposeResult {
-  status?: "created" | "updated" | "unchanged";
+  status?: "created" | "updated" | "unchanged" | "pull_request";
   state?: EnvironmentState;
+  /** A workspace with a config repository answers 202 with the pull request that now carries the change. */
+  pullRequest?: { number?: number; url?: string };
+  repository?: string;
+  path?: string;
+  changes?: number;
   error?: string;
   reason?: string;
   message?: string;
@@ -195,11 +200,26 @@ export async function cmdEnvironment(args: ParsedArgs, ctx: Ctx, deps: Environme
       else {
         ctx.stdout(`refused (${res.status}): ${body.message ?? body.error ?? "no reason given"}`);
         if (body.reason) ctx.stdout(`  reason: ${body.reason}`);
+        if (body.error === "no_config_repository") {
+          ctx.stdout("  a workspace changes its settings only through catalyst.toml in a config repository: an owner or admin chooses one in Settings, Environment, then run this again");
+        }
         if (body.currentRevision !== undefined) {
           ctx.stdout(`  the declaration is now at revision ${body.currentRevision} — run \`catalyst environment read\` and propose again from that`);
         }
       }
       return 1;
+    }
+    // A workspace with a config repository takes the change as a pull request against its settings
+    // file. Merging it is the approval, so nothing is approved here, with or without --approve.
+    if (res.status === 202 && body.status === "pull_request") {
+      if (args.json) ctx.stdout(JSON.stringify(body));
+      else {
+        const pr = body.pullRequest?.number === undefined ? "a pull request" : `pull request #${body.pullRequest.number}`;
+        ctx.stdout(`opened ${pr} on ${body.repository ?? "the config repository"} (${body.path ?? "catalyst.toml"}): ${body.changes ?? 0} changes`);
+        if (body.pullRequest?.url) ctx.stdout(`  ${body.pullRequest.url}`);
+        ctx.stdout("it takes effect when the pull request merges; there is nothing to approve in Catalyst");
+      }
+      return 0;
     }
     const approveToo = flagBool(args, "approve");
     if (!args.json) for (const line of renderState(body.state, body.status === "unchanged" ? "unchanged" : `${body.status ?? "proposed"}`)) ctx.stdout(line);
@@ -234,7 +254,8 @@ export async function cmdEnvironment(args: ParsedArgs, ctx: Ctx, deps: Environme
   if (revision === undefined || hash === undefined) {
     const current = (await readState(api, routes)).current;
     if (current === null || current === undefined) {
-      ctx.stdout("there is no declaration to approve — propose one first: catalyst environment propose --file <path>");
+      ctx.stdout("there is no declaration to approve");
+      ctx.stdout("  nothing is approved in Catalyst: a workspace changes its settings only through catalyst.toml in a config repository. An owner or admin chooses one in Settings, Environment; then `catalyst environment propose --file <path>` opens a pull request there, and merging it is the approval");
       return 1;
     }
     revision = current.revision;
@@ -256,6 +277,9 @@ function renderApprove(ctx: Ctx, approved: { body: ApproveResult; status: number
     return 0;
   }
   ctx.stdout(`refused (${status}): ${body.message ?? body.error ?? "no reason given"}`);
+  if (body.error === "no_config_repository" || body.error === "declaration_comes_from_workspace_file") {
+    ctx.stdout("  nothing is approved in Catalyst: merge the pull request against catalyst.toml in the config repository, or choose one in Settings, Environment");
+  }
   if (body.currentRevision !== undefined) {
     ctx.stdout(`  it is now at revision ${body.currentRevision}${body.currentHash ? ` (${body.currentHash})` : ""} — read it again before approving`);
   }

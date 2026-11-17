@@ -396,7 +396,7 @@ if (!connected) {
       );
     } else if (envDoc.current === null || envDoc.current === undefined) {
       envLines.push(
-        "environment: nothing declared yet — declare it with `catalyst environment propose --file <path> --approve`",
+        "environment: nothing declared yet — declare it with `catalyst environment propose --file <path>` (it opens a pull request against catalyst.toml in the config repository; merging it is the approval)",
       );
     } else {
       envLines.push(
