@@ -427,7 +427,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
   env: {
     root: {
       value: true,
-      help: "draft, import, shell: repository directory (default: current directory; shell: the current repository's top level)",
+      help: "draft, import, shell, status: repository directory (default: current directory; shell: the current repository's top level)",
     },
     write: {
       value: false,
@@ -443,7 +443,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
     repo: {
       value: true,
-      help: "draft --import-values, import: the repository (owner/name); default: this checkout's GitHub origin",
+      help: "draft --import-values, import, status: the repository (owner/name); default: this checkout's GitHub origin",
     },
     yes: {
       value: false,

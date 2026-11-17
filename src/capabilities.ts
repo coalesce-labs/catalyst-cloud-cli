@@ -82,6 +82,7 @@ export const CAPABILITIES: readonly Capability[] = [
   { verb: "environment approve", does: "approve the workspace-wide environment declaration", needs: "admin", routes: [agent("POST", "account-environment/approve")], since: "0.8.0" },
   { verb: "secret set|import", does: "enter a repository secret's value from this terminal, never echoed", needs: "admin", routes: [], since: "0.8.0" },
   { verb: "var set|import", does: "enter plain environment variable values from this terminal, never echoed", needs: "admin", routes: [], since: "0.13.2" },
+  { verb: "env status", does: "say which revision of a repository's environment is in effect, and the default-branch commit or merged pull request that approved it", needs: "member", routes: [agent("GET", "repo-environments")], since: "0.16.51" },
   { verb: "env import", does: "store this computer's values for the names .catalyst/catalyst.toml declares, never printed", needs: "admin", routes: [], since: "0.16.20" },
   { verb: "accounts", does: "read the workspace's AI accounts and which can take work", needs: "member", routes: [], since: "0.5.0" },
   { verb: "codex-env", does: "name the AI account and the computer on every Codex launch's telemetry: print the attributes, set them for apps on macOS, or refresh the AI account cache", needs: "member", routes: [], since: "0.16.33" },
