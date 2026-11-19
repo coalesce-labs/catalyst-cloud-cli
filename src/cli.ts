@@ -118,6 +118,7 @@ import {
 } from "./codex-attribution.js";
 import { cmdIdentity, type IdentityDeps } from "./identity.js";
 import { cmdFlow, type FlowDeps } from "./flow.js";
+import { cmdSmoke, type SmokeDeps } from "./smoke.js";
 import { cmdMessages, type MessagesDeps } from "./messages.js";
 import { cmdConnections, type ConnectionsDeps } from "./connections.js";
 import {
@@ -255,6 +256,7 @@ export function usageText(): string {
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
     "  catalyst lease <take <ticket> --agent <seat> [--ttl <minutes>] [--holder-kind <kind>] [--name <name>] [--external-id <id>] [--link <url>] [--contact <url>]|renew <ticket> --commit|--artifact|--finding|--pr <ref> [--note <text>] [--name|--external-id|--link|--contact <value>]|release <ticket>|show <ticket>|list --team <key>> [--json]   (a seat's ticket lease; needs login)",
     "  catalyst work available [--team K] [--json]   (tickets nobody holds and open pull requests no lease covers)",
+    "  catalyst smoke readme --team <KEY> --repo <owner/name> [--deadline stage=min]... [--json]   (one README ticket through the pipeline; exit 0 only for a verified merge)",
     "  catalyst codex-env --print [--codex-home <dir>] | --apply | --refresh   (the telemetry attributes naming the AI account and computer a Codex launch runs as)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
     "  catalyst identity linear <status|options|set> [<linearUserId>] [--json]",
@@ -301,6 +303,7 @@ export interface MainDeps {
   update?: UpdateCommandDeps;
   identity?: IdentityDeps;
   flow?: FlowDeps;
+  smoke?: SmokeDeps;
   messages?: MessagesDeps;
   team?: TeamDeps;
   legacy?: LegacyDeps;
@@ -807,6 +810,8 @@ export async function main(
         return await cmdConnections(args, ctx, deps.connections ?? {});
       case "flow":
         return await cmdFlow(args, ctx, deps.flow ?? {});
+      case "smoke":
+        return await cmdSmoke(args, ctx, deps.smoke ?? {});
       default:
         ctx.stderr(`unknown command: ${args.command}`);
         ctx.stderr(usageText());
@@ -884,6 +889,7 @@ const VERB_HELP_KNOWN: Record<string, true> = Object.fromEntries(
     "project",
     "repo",
     "flow",
+    "smoke",
     "lease",
     "work",
     "legacy",
