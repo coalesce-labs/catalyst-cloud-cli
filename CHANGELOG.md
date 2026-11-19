@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.16.52
+
+`catalyst smoke readme --team <KEY> --repo <owner/name>` checks that a team's pipeline can carry one real ticket all the way to a merge. It files a ticket that asks for the line `Catalyst Cloud enabled` in the repository's README.md, then watches the ticket through each stage.
+
+It ends with one status and exit code:
+- `merged` (0) only when the ticket's own pull request merged into the default branch, the commit it landed as is on that branch, and README.md there has the line.
+- `refused` (3) when nothing was created, for example because the line is already there or the repository is not connected to the team.
+- `waiting_on_owner` (4) when the pull request is ready and a person keeps merge control.
+- `blocked` (5) when something holds the ticket until a person acts. The output names what releases it.
+- `deadline_missed` (6) when a stage made no progress in time. `--deadline` changes the limits.
+- `merged_unverified` (7) when it merged but could not be confirmed, with the reason.
+
+A rerun picks up the open check instead of filing a second ticket. If your workspace's cloud does not offer the README check yet, the command says so and creates nothing. `--json` prints the result.
+
 ## 0.16.51
 
 `catalyst env status` says which revision of a repository's environment is in effect for new phases, and how it was approved. A merge or push to the default branch approves the settings file. The command names that commit in full, and the pull request when the commit came from one: "Approved automatically when pull request #N merged as commit <sha> into main." It also says when a newer revision is still being applied. It reads the repository from the checkout's origin remote, or from `--repo owner/name`. `--json` prints the answer as the cloud sent it. A cloud that does not offer this read yet gets a message saying so, and nothing is called.
