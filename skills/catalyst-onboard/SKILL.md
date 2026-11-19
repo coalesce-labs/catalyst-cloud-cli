@@ -18,6 +18,7 @@ Guide setup through the same `catalyst onboard` flow that the installer runs. Th
 4. In a terminal, the command shows the verified person, workspace and plan before approval. Without terminal input, or with `--json`, use `--yes` only when the person has accepted the displayed defaults; otherwise setup waits with exit 11 and keeps the saved connection and receipt. JSON keeps progress, identity and the plan on stderr and returns one result on stdout. A supplied key needs `catalyst login` before onboarding; browser sign-in does not replace it.
 5. For the current onboarding checks, run `catalyst ready --onboarding --json`. A failed check needs attention. An unknown check needs evidence. Report observed project work separately from incomplete setup; an unknown setup check does not prove work stopped.
 6. Exit 0 completes the requested scope. For a full run, exit 0 means work can start. If the receipt's `complete` is false, a repository value or the first ticket is still open, and the command lists it under "Next, when you want". The daily update never keeps `complete` false, and neither do repository settings this computer cannot review (no checkout here, or not yet approved); a settings review that timed out or could not keep its draft does. Only a person at a terminal picks the first ticket; `--yes`, `--json` and headless runs leave it waiting with an action. Exit 10 means a failed step, 11 means waiting, and 12 means a guard refused the action. A successful `--only` step does not mean onboarding is complete. Keep the command's safe fix and supported resume command in your reply.
+7. After a full run exits 0, offer one end-to-end check as the last step, once, default no: `catalyst smoke readme --team <KEY> --repo <owner/name>` files one real README ticket and watches it to a merge. Read `references/proving-one-ticket.md` first. Only `merged` (exit 0) is a pass, and the trial's pull request is never yours to merge, close or revert.
 
 Use cloud reads for ordinary workstation setup checks. Offer local sync for local SQL or sustained local reads inside the plan review. Local sync does not promise offline browsing. It is optional; do not make an absent replica a setup failure. Browser approval belongs to the person. Missing bearer capabilities stay unfinished; never call a session-only route from the CLI or invent a command.
 
@@ -62,6 +63,7 @@ Scripts are run, never read; each prints `--help`.
 | the replica or event cache | `references/local-sync.md` |
 | local SQL, only when `catalyst replica status --json` reports `configured: true` | `references/local-replica.md` |
 | installing, updating, or migrating Catalyst skills | `references/skill-sources.md` |
+| proving one real ticket merges end to end, or reading a `catalyst smoke readme` result | `references/proving-one-ticket.md` |
 | what Catalyst is, or why the first ticket did not start | the `whats-happening` skill, then `unstick` if something holds it |
 
 ## Rules
