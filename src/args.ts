@@ -479,6 +479,17 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     period: { value: true, help: "24h | 2d | 3d | 1w | 2w | 4w | 12w | 26w (default: 2w)" },
     granularity: { value: true, help: "hour | day (default: the period picks it: 1h for 24h, 2h for 2d, 3h for 3d, a day for weeks)" },
   },
+  smoke: {
+    team: { value: true, help: "readme: the Linear team key whose pipeline runs the trial" },
+    repo: { value: true, help: "readme: the repository (owner/name) registered to that team" },
+    deadline: {
+      value: true,
+      repeat: true,
+      placeholder: "stage=minutes",
+      help: "readme: how long a stage may go without progress: launch (default 15), phase (45), merge (60) (repeatable)",
+    },
+    interval: { value: true, placeholder: "seconds", help: "readme: seconds between reads, 5 to 600 (default 30)" },
+  },
   team: {
     all: { value: false, help: "check every team, one request at a time" },
     stage: {
@@ -722,6 +733,7 @@ export const VERB_USAGE: Record<string, string> = {
   inbox: "inbox <check --ticket CTC-N --agent NAME [--session ID] | send --ticket CTC-N --body TEXT [--session ID] [--kind note|question|answer] [--re ID] | ack --ticket CTC-N --agent NAME --session ID --message ID --turn N> [--json]",
   messages: "messages read --ticket CTC-N [--since SEQUENCE] [--json]",
   capabilities: "capabilities [--json]",
+  smoke: "smoke readme --team <KEY> --repo <owner/name> [--deadline launch|phase|merge=<minutes>]... [--interval <seconds>] [--json]   (run one README ticket through the team's pipeline and verify its merge; exit 0 only for a verified merge; needs login)",
   flow: "flow [--repo <owner/name>] [--period 24h|2d|3d|1w|2w|4w|12w|26w] [--granularity hour|day] [--json]   (a repository's open pull requests over time, one row per hour or day; needs login)",
   project:
     "project <list [--json] | wip-limit <get|set <n>|set default> [--team K] [--json]>",
