@@ -29,7 +29,7 @@ const AFTER = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 function contract(opts: { repos?: { default: string | null; registered: string[] } | null; markerRoute?: boolean } = {}): TenantContract {
   const doc = buildFixtureContract();
   if (opts.markerRoute !== false) {
-    doc.routes.push({ method: "GET", path: `${FIXTURE_ROUTE_PREFIX}/repo-readme-marker`, takesWriteBudgetUnit: false, since: "2.79.0" });
+    doc.routes = [...doc.routes, { method: "GET", path: `${FIXTURE_ROUTE_PREFIX}/repo-readme-marker`, takesWriteBudgetUnit: false, since: "2.79.0" }];
   }
   const team = doc.teams.find((t) => t.key === "ENG")!;
   if (opts.repos !== null) team.repositories = opts.repos ?? { default: REPO, registered: [REPO] };
