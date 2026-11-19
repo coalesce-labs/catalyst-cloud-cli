@@ -266,6 +266,27 @@ Without `--repo`, the command reads this checkout's GitHub origin and uses it wh
 
 `--json` prints one JSON array with one entry per bucket, exactly as the SDK's `flow.series()` returns them in `series.columns`: `startMs` and `endMs` in epoch milliseconds, `label`, `partial`, and `pr` with `open` and the bucket's other pull request counts.
 
+## Check a repository end to end
+
+Run one real ticket through a team's pipeline and watch it to a merge:
+
+```sh
+catalyst smoke readme --team ENG --repo acme/app
+```
+
+The ticket asks Catalyst to add the line `Catalyst Cloud enabled` as the last line of the repository's README.md. The command creates it in the team's dispatch stage, prints each stage change with the time it took, and stops at one of these results:
+
+| result | exit | meaning |
+| --- | --- | --- |
+| `merged` | 0 | the trial's pull request merged into the default branch, the commit it landed as is on that branch, and README.md there has the line |
+| `refused` | 3 | nothing was created: the README already has the line, has no README.md, cannot be read, or the repository is not registered to the team |
+| `waiting_on_owner` | 4 | the pull request is ready and its owner keeps merge control, or a hold label sits on the ticket |
+| `blocked` | 5 | something holds the ticket until a person acts; the output names what releases it |
+| `deadline_missed` | 6 | a stage went without progress for longer than its deadline |
+| `merged_unverified` | 7 | the pull request merged, but the merge could not be confirmed on the default branch; the reason is named |
+
+The README is read by Catalyst Cloud, never from this computer or a local GitHub login. One trial runs per team and repository: running the command again resumes the same ticket. The command never merges, closes or reverts anything. `--deadline launch=15`, `--deadline phase=45` and `--deadline merge=60` set how many minutes each stage may go without progress (these are the defaults). `--json` prints the result as one JSON object and the progress on stderr.
+
 ## What has to be running
 
 Nothing, by default. After `login`, every read, write, ask and explanation goes to the cloud's origin-fresh API with the config file and the cached contract on disk. Two optional processes exist for people who want them:
