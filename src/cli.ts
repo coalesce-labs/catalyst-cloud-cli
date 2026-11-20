@@ -1,3 +1,4 @@
+import { cmdInbox } from "./inbox.js";
 import { cmdHosts, type HostsDeps } from "./hosts.js";
 import { cmdRunner, type RunnerCommandDeps } from "./runner-command.js";
 import { cmdUpdate, type UpdateCommandDeps } from "./update-command.js";
@@ -26,7 +27,6 @@ import {
   defaultReplicaDbFor,
   defaultSkillsDirFor,
   formatMode,
-  INSTALL_COMMAND,
   loadConfig,
   modernCliPath,
   normalizeBaseUrl,
@@ -118,6 +118,7 @@ import {
 } from "./codex-attribution.js";
 import { cmdIdentity, type IdentityDeps } from "./identity.js";
 import { cmdFlow, type FlowDeps } from "./flow.js";
+import { cmdSmoke, type SmokeDeps } from "./smoke.js";
 import { cmdMessages, type MessagesDeps } from "./messages.js";
 import { cmdConnections, type ConnectionsDeps } from "./connections.js";
 import {
@@ -240,7 +241,7 @@ export function usageText(): string {
     "  catalyst write <comment|state|label|create|reaction|attachment|session> ...",
     "  catalyst ask <raise|accept|answer --proxy|proxy [status|on|off]|disown|list> ...",
     "  catalyst release <ticket> --because <what changed> [--retry-unchanged] [--dry-run] | release --class <c> --team <K> ...",
-    "  catalyst environment [read] | environment propose --file <path>|--stdin [--approve] | environment approve   (your workspace; needs login)",
+    "  catalyst environment [read] | environment propose --file <path>|--stdin | environment approve   (your workspace; changes only through catalyst.toml in its config repository; needs login)",
     "  catalyst env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (this repository; no login — shell needs Docker and downloads Catalyst's image once)",
     "  catalyst secret set <NAME> --repo <owner/name> [--command '<cmd>'] | secret import <file> --repo <owner/name> [--names NAME[,NAME...]]",
     "  catalyst var set <NAME> | var import <file> [--repo <owner/name>] [--names NAME[,NAME...]]   (plain environment variables)",
@@ -255,9 +256,11 @@ export function usageText(): string {
     "  catalyst repo <agents-block <path> [--write]|agent-setup <path> [--apply] [--with-check]>   (a checkout's AGENTS.md block and portable agent layout; working tree only)",
     "  catalyst lease <take <ticket> --agent <seat> [--ttl <minutes>] [--holder-kind <kind>] [--name <name>] [--external-id <id>] [--link <url>] [--contact <url>]|renew <ticket> --commit|--artifact|--finding|--pr <ref> [--note <text>] [--name|--external-id|--link|--contact <value>]|release <ticket>|show <ticket>|list --team <key>> [--json]   (a seat's ticket lease; needs login)",
     "  catalyst work available [--team K] [--json]   (tickets nobody holds and open pull requests no lease covers)",
+    "  catalyst smoke readme --team <KEY> --repo <owner/name> [--deadline stage=min]... [--json]   (one README ticket through the pipeline; exit 0 only for a verified merge)",
     "  catalyst codex-env --print [--codex-home <dir>] | --apply | --refresh   (the telemetry attributes naming the AI account and computer a Codex launch runs as)",
     "  catalyst legacy [--remove [--data] [--yes]]   (leftovers of the old local Catalyst runtime: list them; remove them only on a yes)",
     "  catalyst identity linear <status|options|set> [<linearUserId>] [--json]",
+    "  catalyst inbox <check|send|ack> --ticket CTC-N [--agent NAME] [--session ID] [--json]",
     "  catalyst messages read --ticket CTC-N [--since SEQUENCE] [--json]   (messages sent to a ticket on your teams)",
     "  catalyst connections personal <linear|github> <start|status> [--wait <seconds>] [--json]",
     "",
@@ -300,6 +303,7 @@ export interface MainDeps {
   update?: UpdateCommandDeps;
   identity?: IdentityDeps;
   flow?: FlowDeps;
+  smoke?: SmokeDeps;
   messages?: MessagesDeps;
   team?: TeamDeps;
   legacy?: LegacyDeps;
@@ -792,6 +796,8 @@ export async function main(
         return await cmdCodexEnv(args, ctx, deps.codexEnv ?? {});
       case "identity":
         return await cmdIdentity(args, ctx, deps.identity ?? {});
+      case "inbox":
+        return await cmdInbox(args, ctx);
       case "messages":
         return await cmdMessages(args, ctx, deps.messages ?? {});
       case "hosts":
@@ -804,6 +810,8 @@ export async function main(
         return await cmdConnections(args, ctx, deps.connections ?? {});
       case "flow":
         return await cmdFlow(args, ctx, deps.flow ?? {});
+      case "smoke":
+        return await cmdSmoke(args, ctx, deps.smoke ?? {});
       default:
         ctx.stderr(`unknown command: ${args.command}`);
         ctx.stderr(usageText());
@@ -874,12 +882,14 @@ const VERB_HELP_KNOWN: Record<string, true> = Object.fromEntries(
     "connections",
     "identity",
     "messages",
+    "inbox",
     "mcp",
     "team",
     "capabilities",
     "project",
     "repo",
     "flow",
+    "smoke",
     "lease",
     "work",
     "legacy",

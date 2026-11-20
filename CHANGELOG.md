@@ -1,10 +1,34 @@
 # Changelog
 
+## 0.16.52
+
+`catalyst smoke readme --team <KEY> --repo <owner/name>` checks that a team's pipeline can carry one real ticket all the way to a merge. It files a ticket that asks for the line `Catalyst Cloud enabled` in the repository's README.md, then watches the ticket through each stage.
+
+It ends with one status and exit code:
+- `merged` (0) only when the ticket's own pull request merged into the default branch, the commit it landed as is on that branch, and README.md there has the line.
+- `refused` (3) when nothing was created, for example because the line is already there or the repository is not connected to the team.
+- `waiting_on_owner` (4) when the pull request is ready and a person keeps merge control.
+- `blocked` (5) when something holds the ticket until a person acts. The output names what releases it.
+- `deadline_missed` (6) when a stage made no progress in time. `--deadline` changes the limits.
+- `merged_unverified` (7) when it merged but could not be confirmed, with the reason.
+
+A rerun picks up the open check instead of filing a second ticket. If your workspace's cloud does not offer the README check yet, the command says so and creates nothing. `--json` prints the result.
+
+## 0.16.51
+
+`catalyst env status` says which revision of a repository's environment is in effect for new phases, and how it was approved. A merge or push to the default branch approves the settings file. The command names that commit in full, and the pull request when the commit came from one: "Approved automatically when pull request #N merged as commit <sha> into main." It also says when a newer revision is still being applied. It reads the repository from the checkout's origin remote, or from `--repo owner/name`. `--json` prints the answer as the cloud sent it. A cloud that does not offer this read yet gets a message saying so, and nothing is called.
+
+`catalyst environment propose` reports the pull request the cloud opens for the change. Merging that pull request is the approval, so the command sends no separate approve. The workspace declaration now changes only through `catalyst.toml` in a config repository. A workspace with no config repository is told how to get one, and so is an approve sent to a workspace that has one.
+
 ## 0.16.50
 
-`catalyst ask list` now reads only your own asks when you are connected as yourself with a matched Linear identity, so a status bar or prompt that runs it every few minutes no longer reads every ticket in your workspace. The asks, their order and the `--json` output (`scope`, and each ask's `identifier`, `title`, `state`, `blocks`, `score` and `assigneeId`) are the same as before. `--anyone`, an unmatched identity and the workspace's shared key still read every ticket, and so does a Catalyst Cloud that does not offer the narrower read. A server error on the narrower read, or a refusal of it (a 400, 403, 409 or 422), is reported with its status, not retried with the full read.
+Agents can now read, send and acknowledge their messages from the command line. `catalyst inbox check --ticket CTC-N --agent <name>` lists the messages waiting for the agent that holds the ticket's lease, `catalyst inbox send` sends a note, question or answer, and `catalyst inbox ack` marks a message consumed. The `--body` help gives the limits: 4,096 bytes of UTF-8 per message, 20 pending messages per ticket, and 3 message turns per phase. Send a pointer to anything longer.
 
-When none of your asks are open, the line now reads `no open asks assigned to <you> (add --anyone to see every open ask in your cloud account)`. It no longer counts everyone's open asks, because that count needs the full read this release avoids. If Catalyst has a different Linear identity for you than the one this machine recorded when you logged in, `ask list` reads every ticket as before and says to run `catalyst login`, on stderr as well when you pass `--json`, so what you parse from stdout does not change.
+A self-hosted machine's update now waits only for phases that are running. A container that was created and never started, or one that had exited, used to hold the update open with no work running.
+
+When a self-hosted machine's update has waited 2 hours and your workspace counts no live work on that machine, the update now says so once, naming the machine and both counts. The update keeps waiting and never stops a phase.
+
+A `catalyst.toml` whose variable or asset carries `description`, `agent_prompt` or `required = false` is now accepted by `catalyst onboard` and the other commands that check the settings file. It used to be refused.
 
 ## 0.16.49
 

@@ -55,6 +55,33 @@ describe("whole-file settings authority", () => {
     },
   );
 
+  it("accepts description, agent_prompt and an optional asset (CTC-10715)", () => {
+    const text =
+      project +
+      `
+[[environment.variables]]
+name = "PUBLIC_URL"
+description = "Where the app is served"
+agent_prompt = "Ask the operator for the staging URL"
+[[environment.clis]]
+name = "gh"
+required = false
+description = "GitHub CLI"
+agent_prompt = "Use it to read pull requests"
+[environment.clis.install]
+source = "npm"
+package = "gh"
+version = "1.0.0"
+`;
+    expect(validateFullSettings(text)).toEqual({
+      ok: true,
+      errors: [],
+      linearTeam: "CTC",
+      variableNames: ["PUBLIC_URL"],
+      secretNames: [],
+    });
+  });
+
   it("bounds oversized source without leaking a literal", () => {
     expect(validateFullSettings(project + "#".repeat(1_048_577))).toEqual({
       ok: false,

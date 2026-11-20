@@ -285,7 +285,7 @@ describe("keepInstalledCliPath", () => {
   test("with no installed command on PATH the record is left alone", () => {
     const f = fixture();
     const ctx = makeCtx(f.home, {
-      env: { PATH: "/usr/bin:/bin", CATALYST_INSTALL_TEMP_CLI: f.temporary },
+      env: { PATH: f.home, CATALYST_INSTALL_TEMP_CLI: f.temporary },
     });
     keepInstalledCliPath(ctx, f.running);
     expect(loadConfig(f.home)?.cliPath).toBe(f.running);

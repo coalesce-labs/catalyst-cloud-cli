@@ -44,7 +44,7 @@ The person's own logins, so work done for them is attributed to them and their a
 
 ## 8. The repository's settings file
 
-Inspect and draft the repository settings file yourself from its build and test files; follow `references/declaring-a-repository.md`. Show the summary and get approval before writing or opening the PR. Mention the declaration approval after merge as context, not a second task. A workspace-wide declaration goes through `catalyst environment` (read, propose, `--approve`).
+Inspect and draft the repository settings file yourself from its build and test files; follow `references/declaring-a-repository.md`. Show the summary and get approval before writing or opening the PR. Mention the declaration approval after merge as context, not a second task. A workspace-wide declaration goes through `catalyst environment` (read, propose); `propose` opens a pull request against `catalyst.toml` in the config repository, and merging it is the approval.
 
 Once you know the checkout path, rerun `node scripts/where-am-i.mjs --next --repo <path>` (a read) and follow `references/repository-agent-setup.md` for the offers it notes.
 

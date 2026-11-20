@@ -111,15 +111,55 @@ describe("updateDrain runs one supervisor container with the body as one environ
 
 describe("attemptContainers counts this host's phase containers", () => {
   it("counts listed ids, filtered by this host's label", async () => {
-    const { exec, calls } = scripted((args) => (has(args, "ps", "--all") ? { code: 0, stdout: "abc\ndef\n\n" } : undefined));
+    const { exec, calls } = scripted((args) => (has(args, "ps") ? { code: 0, stdout: "abc\ndef\n\n" } : undefined));
     expect(await dockerRunnerUpdateEngine({ exec, env: {} }).attemptContainers(install(), HOST)).toBe(2);
     expect(calls[0]).toContain(`label=dev.catalystcloud.attempt.host-id=${HOST}`);
     expect(calls[0]).toContain("--format");
   });
 
   it("counts each phase attempt once even with more than one container", async () => {
-    const { exec } = scripted((args) => (has(args, "ps", "--all") ? { code: 0, stdout: "abc\tatt-1\ndef\tatt-1\nghi\t\n" } : undefined));
+    const { exec } = scripted((args) => (has(args, "ps") ? { code: 0, stdout: "abc\tatt-1\ndef\tatt-1\nghi\t\n" } : undefined));
     expect(await dockerRunnerUpdateEngine({ exec, env: {} }).attemptContainers(install(), HOST)).toBe(2);
+  });
+
+  // CTC-10408 — a `ps` answered the way the Docker CLI answers it: without `--all` it lists running
+  // containers (paused and restarting included), with `--all` every container. A customer machine's
+  // drain stayed open about 78 minutes on a never-started and an exited attempt container.
+  type State = "created" | "running" | "paused" | "restarting" | "exited";
+  const dockerPs = (containers: ReadonlyArray<{ id: string; attempt: string; state: State }>) =>
+    scripted((args) => {
+      if (!has(args, "ps")) return undefined;
+      const all = args.includes("--all");
+      const shown = containers.filter((c) => all || c.state === "running" || c.state === "paused" || c.state === "restarting");
+      return { code: 0, stdout: shown.map((c) => `${c.id}\t${c.attempt}\n`).join("") };
+    });
+
+  it("⭐ CTC-10408 a created and an exited attempt container count as zero running phases", async () => {
+    const { exec, calls } = dockerPs([
+      { id: "c1", attempt: "att-created", state: "created" },
+      { id: "c2", attempt: "att-exited", state: "exited" },
+    ]);
+    expect(await dockerRunnerUpdateEngine({ exec, env: {} }).attemptContainers(install(), HOST)).toBe(0);
+    expect(calls[0]).not.toContain("--all");
+  });
+
+  it("CTC-10408 CONTROL — a running phase container still counts, and so do paused and restarting ones", async () => {
+    const one = dockerPs([
+      { id: "r1", attempt: "att-running", state: "running" },
+      { id: "c1", attempt: "att-created", state: "created" },
+    ]);
+    expect(await dockerRunnerUpdateEngine({ exec: one.exec, env: {} }).attemptContainers(install(), HOST)).toBe(1);
+    const held = dockerPs([
+      { id: "p1", attempt: "att-paused", state: "paused" },
+      { id: "s1", attempt: "att-restarting", state: "restarting" },
+    ]);
+    expect(await dockerRunnerUpdateEngine({ exec: held.exec, env: {} }).attemptContainers(install(), HOST)).toBe(2);
+  });
+
+  it("CTC-10408 six running phases and one exited an hour ago count six on a six-slot machine", async () => {
+    const running = Array.from({ length: 6 }, (_, i) => ({ id: `r${i}`, attempt: `att-${i}`, state: "running" as const }));
+    const { exec } = dockerPs([...running, { id: "x1", attempt: "att-old", state: "exited" }]);
+    expect(await dockerRunnerUpdateEngine({ exec, env: {} }).attemptContainers(install(), HOST)).toBe(6);
   });
 
   it("an unreadable listing or a malformed host id is null, never zero", async () => {

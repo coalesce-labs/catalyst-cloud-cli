@@ -93,6 +93,9 @@ export interface ContractTeam {
     workflowRev: number | null;
   };
   dispatchGate?: ContractDispatchGate;
+  /** CTC-2374 — the repositories this project registers. Optional here so an older cached contract
+   *  still parses; only `default` and `registered` are read (`catalyst smoke readme`). */
+  repositories?: { default: string | null; registered: string[] };
 }
 
 export interface ContractRoute {

@@ -427,7 +427,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
   env: {
     root: {
       value: true,
-      help: "draft, import, shell: repository directory (default: current directory; shell: the current repository's top level)",
+      help: "draft, import, shell, status: repository directory (default: current directory; shell: the current repository's top level)",
     },
     write: {
       value: false,
@@ -443,7 +443,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
     repo: {
       value: true,
-      help: "draft --import-values, import: the repository (owner/name); default: this checkout's GitHub origin",
+      help: "draft --import-values, import, status: the repository (owner/name); default: this checkout's GitHub origin",
     },
     yes: {
       value: false,
@@ -478,6 +478,17 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     repo: { value: true, help: "the repository (owner/name); default: this checkout's GitHub origin, when it is a repository of your workspace" },
     period: { value: true, help: "24h | 2d | 3d | 1w | 2w | 4w | 12w | 26w (default: 2w)" },
     granularity: { value: true, help: "hour | day (default: the period picks it: 1h for 24h, 2h for 2d, 3h for 3d, a day for weeks)" },
+  },
+  smoke: {
+    team: { value: true, help: "readme: the Linear team key whose pipeline runs the trial" },
+    repo: { value: true, help: "readme: the repository (owner/name) registered to that team" },
+    deadline: {
+      value: true,
+      repeat: true,
+      placeholder: "stage=minutes",
+      help: "readme: how long a stage may go without progress: launch (default 15), phase (45), merge (60) (repeatable)",
+    },
+    interval: { value: true, placeholder: "seconds", help: "readme: seconds between reads, 5 to 600 (default 30)" },
   },
   team: {
     all: { value: false, help: "check every team, one request at a time" },
@@ -517,7 +528,7 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
     approve: {
       value: false,
-      help: "propose: approve exactly the revision the propose returned",
+      help: "propose: approve exactly the revision the propose returned (nothing to approve once the workspace has a config repository: merging the pull request is the approval)",
     },
     revision: {
       value: true,
@@ -546,6 +557,19 @@ export const FLAG_TABLES: Record<string, FlagTable> = {
     },
   },
   identity: {},
+  inbox: {
+    ticket: {value: true, help: "the ticket to receive from or send to"},
+    agent: {value: true, help: "check/ack: the agent name holding your ticket lease"},
+    session: {value: true, help: "check/ack: your inbox session; send: the destination session"},
+    body: {
+      value: true,
+      help: "send: the message text, at most 4,096 bytes of UTF-8 (bytes, not characters); a ticket holds 20 pending per ticket and a phase takes 3 message turns per phase, so write long content to a file or the ticket and send the pointer",
+    },
+    kind: {value: true, help: "send: note, question or answer (default: note)"},
+    re: {value: true, help: "send: the message being answered"},
+    message: {value: true, help: "ack: the message you consumed"},
+    turn: {value: true, help: "ack: the positive turn number that consumed it"},
+  },
   messages: {
     ticket: { value: true, help: "read: the ticket whose messages to read" },
     since: { value: true, help: "read: the first message sequence to read (inclusive)" },
@@ -701,13 +725,15 @@ export const VERB_USAGE: Record<string, string> = {
   team: "team <list|check <KEY>|check --all|map <KEY> [--stage role=StateName]... [--yes --plan-hash H]|adopt <KEY> [--undo] [--yes --plan-hash H]|migrate <KEY> [--choice sourceId=destinationId]... [--retire] [--yes --plan-hash H]|checklist <KEY>> [--json]",
   env: "env <inventory [path] | check <file> | migrate [catalyst.env.json] | draft [--root DIR] [--diff] [--write [--import-values]] | import [--root DIR] [--repo owner/name] [--yes] | shell [--root DIR] [--env-file FILE]... [--image REF] [--check]> [--json]   (THIS repository; no login, except import and --import-values, which sign in and store values — shell needs Docker and downloads Catalyst's image once)",
   environment:
-    "environment [read] [--json] | environment propose --file <path>|--stdin [--expect-revision N] [--approve] [--json] | environment approve [--revision N --hash H] [--json]   (your ACCOUNT's declaration; needs login)",
+    "environment [read] [--json] | environment propose --file <path>|--stdin [--expect-revision N] [--json] | environment approve [--revision N --hash H] [--json]   (your workspace's declaration; needs login; it changes only through catalyst.toml in the config repository, so propose opens a pull request, merging it is the approval, and with no config repository both refuse and say how to choose one)",
   secret:
     "secret set <NAME> --repo <owner/name> [--command '<cmd>'] [--json]   (value from --command, stdin, or a hidden prompt) | secret import <file> --repo <owner/name> [--names NAME[,NAME...]] [--rotate NAME]... [--json]",
   var: "var <set NAME|import <file>> [--repo <owner/name>] [--names NAME[,NAME...]] [--json]   (plain environment variables; set reads stdin or a hidden prompt)",
   identity: "identity linear <status|options|set> [<linearUserId>] [--json]",
+  inbox: "inbox <check --ticket CTC-N --agent NAME [--session ID] | send --ticket CTC-N --body TEXT [--session ID] [--kind note|question|answer] [--re ID] | ack --ticket CTC-N --agent NAME --session ID --message ID --turn N> [--json]",
   messages: "messages read --ticket CTC-N [--since SEQUENCE] [--json]",
   capabilities: "capabilities [--json]",
+  smoke: "smoke readme --team <KEY> --repo <owner/name> [--deadline launch|phase|merge=<minutes>]... [--interval <seconds>] [--json]   (run one README ticket through the team's pipeline and verify its merge; exit 0 only for a verified merge; needs login)",
   flow: "flow [--repo <owner/name>] [--period 24h|2d|3d|1w|2w|4w|12w|26w] [--granularity hour|day] [--json]   (a repository's open pull requests over time, one row per hour or day; needs login)",
   project:
     "project <list [--json] | wip-limit <get|set <n>|set default> [--team K] [--json]>",

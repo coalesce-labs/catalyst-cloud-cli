@@ -244,7 +244,11 @@ export async function cmdRunner(args: ParsedArgs, ctx: Ctx, deps: RunnerCommandD
       : await runRunnerUpdate(engine, {
         dir: dir(), check,
         ...(ownerWindows ? { window: windowBounds(ctx.now().getTime(), ownerWindows) } : {}),
-        ...(auto && !check ? { scheduled: true, drain: true, held: () => imageHold(ctx), ...(args.json ? {} : { onPass: (pass: UpdateResult) => ctx.stdout(autoLine(pass, ctx.now())) }) } : {}),
+        ...(auto && !check ? { scheduled: true, drain: true, held: () => imageHold(ctx), ...(args.json ? {} : { onPass: (pass: UpdateResult) => {
+          ctx.stdout(autoLine(pass, ctx.now()));
+          // CTC-10412: the owner's line for a drain the cloud calls idle follows the pass that carries its token.
+          for (const line of pass.notices ?? []) ctx.stdout(line);
+        } }) } : {}),
       });
     // `runner update --check` also lists every installed component against the approved release, as
     // `catalyst update --check` does. The image fields stay where scripts already read them.
