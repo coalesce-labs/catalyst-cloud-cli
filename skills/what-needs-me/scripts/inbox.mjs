@@ -18,7 +18,7 @@ const { help, flags } = parseFlags(process.argv.slice(2), SPEC);
 if (help) {
   printHelp("node scripts/inbox.mjs [--json] [--team K] [--all] [--anyone] [--help]", SPEC, [
     "Rank: most open tickets blocked first, then the oldest ask; priority is not a weight.",
-    "An ask that holds nothing is real but will not appear in the Waiting-on-me view; it is",
+    "An ask that holds nothing is real and still shows in your Waiting-on-me view; it is",
     "listed last with a marker so you can attach the work it should block (references/reading-the-inbox.md).",
   ]);
   process.exit(0);
@@ -53,7 +53,7 @@ for (const r of holding) {
   process.stdout.write(`${n}. ${r.identifier}  holds ${r.blocks.length}: ${r.blocks.join(", ")}\n   ${r.title}\n`);
 }
 if (idle.length && (flags.all || holding.length === 0)) {
-  process.stdout.write(`${holding.length ? "\n" : ""}asks that hold nothing (not shown in Waiting on me until they block something):\n`);
+  process.stdout.write(`${holding.length ? "\n" : ""}asks that hold nothing yet:\n`);
   for (const r of idle) process.stdout.write(`   ${r.identifier}  ${r.title}\n`);
 } else if (idle.length) {
   process.stdout.write(`\n(${idle.length} more ask${idle.length === 1 ? "" : "s"} hold nothing; --all lists them)\n`);

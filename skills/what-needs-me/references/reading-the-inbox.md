@@ -11,7 +11,7 @@ The account's own Waiting-on-me view lists a ticket for a person when all four h
 
 A ticket that carries the ask marker label and is assigned to the person shows even with zero blocks. That is the **declared** ask. The four-part rule above is the **inferred** one, and the view offers both modes: asks only (the default) and everything the person is holding up, minus items an open unblock ask already covers.
 
-So an ask that holds nothing is real, but the person may never see it in their own view. `inbox.mjs` lists such asks last and marked, so you can attach the work they should block.
+So an ask that holds nothing is real, and as a declared ask it still shows in the person's own view and in `catalyst ask list`. `inbox.mjs` lists such asks last and marked, so you can attach the work they should block.
 
 ## What the script reads
 
@@ -24,7 +24,7 @@ When asks are not reaching someone, check the identity first, then the grant. Th
 ## Presenting the queue
 
 - In the script's order, one line per ask: rank, identifier, what it holds (identifiers), the question.
-- Asks that hold nothing come after a break, marked as not visible in Waiting on me until they block something.
+- Asks that hold nothing come after a break, marked as holding nothing yet.
 - When the list is empty, say "nothing needs you" and stop. Do not pad it with suspected asks.
 - A ticket `explain` flagged as `ask_shape_suspected` (its text reads as a decision but it carries no ask label) is mentioned separately with a question mark: it is either an ask the human should label, or a false positive they release with the release label the contract names.
 
