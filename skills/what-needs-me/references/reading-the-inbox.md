@@ -11,11 +11,11 @@ The account's own Waiting-on-me view lists a ticket for a person when all four h
 
 A ticket that carries the ask marker label and is assigned to the person shows even with zero blocks. That is the **declared** ask. The four-part rule above is the **inferred** one, and the view offers both modes: asks only (the default) and everything the person is holding up, minus items an open unblock ask already covers.
 
-So an ask that holds nothing is real, but the person may never see it in their own view. `inbox.mjs` lists such asks last and marked, so you can attach the work they should block.
+So an ask that holds nothing is real, and as a declared ask it still shows in the person's own view and in `catalyst ask list`. `inbox.mjs` lists such asks last and marked, so you can attach the work they should block.
 
 ## What the script reads
 
-`catalyst ask list` reads every page, so an empty list is real. It follows each open ask's blocking relations, drops held tickets already terminal, and ranks by the count of open tickets each ask holds (its `score`), then the oldest ask, then the identifier: the cloud's own Waiting-on-me order. Priority is not a weight; age only breaks a tie. It keeps the connected person's asks by default (`--anyone` for everyone's) and reports a `scope`: `mine`, `anyone`, `unmatched` (the Linear identity is not matched, so everyone's list is shown with a stderr line), or `no-person` (connected with the account key, which names nobody). Say which scope you got, and give the wider count beside an empty `mine` list so it never reads as "nothing needs anyone".
+`catalyst ask list` reads only your asks when you are connected as yourself with a matched Linear identity: it asks the workspace's Waiting-on-me view for them, page by page, so an empty list is real. With `--anyone`, an unmatched identity or the account key, it reads every ticket in the workspace instead, with the same result for your asks. It does the same when the view is not offered (a 404, 405 or 410), when the view says your Linear identity differs from the one recorded at login (a 409 `no_linear_identity`), or when the view's reply cannot be proven complete and well formed. Any other refusal of the view (a 400, 403, 422 or other 409) or a server error is reported with its status, not answered by reading every ticket. Either way it follows each open ask's blocking relations, drops held tickets already terminal, and ranks by the count of open tickets each ask holds (its `score`), then the oldest ask, then the identifier. Priority is not a weight; age only breaks a tie. It keeps the connected person's asks by default (`--anyone` for everyone's) and reports a `scope`: `mine`, `anyone`, `unmatched` (the Linear identity is not matched, so everyone's list is shown with a stderr line), or `no-person` (connected with the account key, which names nobody). Say which scope you got, and beside an empty `mine` list offer `--anyone`, so it never reads as "nothing needs anyone".
 
 ## The identity is not the same as the personal Linear grant
 
@@ -24,7 +24,7 @@ When asks are not reaching someone, check the identity first, then the grant. Th
 ## Presenting the queue
 
 - In the script's order, one line per ask: rank, identifier, what it holds (identifiers), the question.
-- Asks that hold nothing come after a break, marked as not visible in Waiting on me until they block something.
+- Asks that hold nothing come after a break, marked as holding nothing yet.
 - When the list is empty, say "nothing needs you" and stop. Do not pad it with suspected asks.
 - A ticket `explain` flagged as `ask_shape_suspected` (its text reads as a decision but it carries no ask label) is mentioned separately with a question mark: it is either an ask the human should label, or a false positive they release with the release label the contract names.
 

@@ -69,3 +69,39 @@ test("/api/v1/pulls pages the same way", async () => {
   expect(last.headers.get("x-mirror-next-cursor")).toBeNull();
   expect(last.headers.get("x-mirror-total")).toBe("120");
 });
+
+test("the fake Waiting-on-me view pages, refuses by class, and hydrates related_state (CTC-5644)", async () => {
+  const { FIXTURE_USER_KEY, fixtureIssue, FIXTURE_ME_USER, waitingOnMeFixture } = await import("./fixture");
+  const person = { authorization: `Bearer ${FIXTURE_USER_KEY}` };
+  server.issues = [
+    ...waitingOnMeFixture(),
+    ...Array.from({ length: 6 }, (_, i) => fixtureIssue({ identifier: `MINE-${i}`, assignee_id: FIXTURE_ME_USER.linearUserId, labels: [{ id: "l", name: "ask/x" }] })),
+  ];
+  server.pageCap = 5;
+  try {
+    // The view's own page size is 100: a limit outside 1 to 100 is a 400, as on the mirror.
+    for (const bad of ["500", "101", "0", "1.5"])
+      expect((await fetch(`${server.url}/api/v1/views/waiting-on-me?limit=${bad}`, { headers: person })).status).toBe(400);
+    const first = await fetch(`${server.url}/api/v1/views/waiting-on-me`, { headers: person });
+    expect(first.status).toBe(200);
+    const cursor = first.headers.get("x-mirror-next-cursor");
+    expect(cursor).not.toBeNull();
+    const body = (await first.json()) as { rows: { identifier: string; relations: { related_state: string | null }[] }[] };
+    expect(body.rows).toHaveLength(5);
+    expect(body.rows[0]).toMatchObject({ identifier: "ENG-52" });
+    expect(body.rows[0]!.relations.map((r) => r.related_state)).toEqual(["Todo", "In Progress", null]);
+    const second = await fetch(`${server.url}/api/v1/views/waiting-on-me?limit=100&after=${cursor}`, { headers: person });
+    expect(second.headers.get("x-mirror-next-cursor")).toBeNull();
+    expect((await fetch(`${server.url}/api/v1/views/waiting-on-me`, { headers: auth })).status).toBe(403);
+    server.meUser = { id: "u", label: "N", email: null, role: "admin", linearUserId: null };
+    expect((await fetch(`${server.url}/api/v1/views/waiting-on-me`, { headers: person })).status).toBe(409);
+    server.meUser = null;
+    expect((await fetch(`${server.url}/api/v1/views/waiting-on-me`, { headers: person })).status).toBe(403);
+    server.meUser = undefined;
+    expect((await fetch(`${server.url}/api/v1/views/waiting-on-me?after=bad`, { headers: person })).status).toBe(400);
+  } finally {
+    server.pageCap = undefined;
+    server.meUser = undefined;
+    server.issues = (await import("./fixture")).fixtureIssues();
+  }
+});

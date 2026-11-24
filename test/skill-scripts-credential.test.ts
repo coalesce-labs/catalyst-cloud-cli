@@ -342,6 +342,24 @@ describe("the credential check lives in one vendored file", () => {
     }
   });
 
+  test("inbox.mjs passes on a successful ask list's stderr, so the login hint is not lost", () => {
+    const { home } = connectedHome({ auth: OAUTH });
+    writeFileSync(
+      join(home, "fake-cli.mjs"),
+      [
+        'process.stderr.write("run catalyst login to refresh your Linear identity\\n");',
+        'process.stdout.write(JSON.stringify({ scope: { kind: "unmatched" }, asks: [] }) + "\\n");',
+      ].join("\n"),
+    );
+    const r = spawnSync(process.execPath, [join(skillsRoot, "what-needs-me", "scripts", "inbox.mjs"), "--json"], {
+      encoding: "utf8",
+      timeout: 20_000,
+      env: { ...process.env, CATALYST_SKILLS_HOME: home, HOME: home, PATH: `${join(home, "bin")}${delimiter}${process.env.PATH ?? ""}` },
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toContain("run catalyst login to refresh your Linear identity");
+    expect(JSON.parse(r.stdout)).toMatchObject({ scope: { kind: "unmatched" }, asks: [] });
+  });
   test("the sync script's --check agrees with the gate", () => {
     expect(existsSync(join(pkgRoot, "scripts", "sync-skill-lib.mjs"))).toBe(
       true,
