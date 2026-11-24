@@ -90,13 +90,23 @@ describe("ask list reads a matched person's view", () => {
       }),
     );
     server.issues = [...manyIssues(10000), ...asks];
+    // Count only what the `ask list` run itself sends, not the login seeding before it.
+    server.requests.length = 0;
     expect(await main(["ask", "list", "--json"], ctx)).toBe(0);
     const out = parse();
     expect(out.scope).toEqual({ kind: "mine", linearUserId: ME, label: "Tony" });
     expect(out.asks).toHaveLength(12);
     expect(viewReqs()).toHaveLength(1);
-    expect(Number(new URL(`http://x${viewReqs()[0]!.path}`).searchParams.get("limit"))).toBeLessThanOrEqual(500);
+    // The view takes no `limit` above its own page size (a 400 on the real route), so none is sent.
+    expect(new URL(`http://x${viewReqs()[0]!.path}`).searchParams.has("limit")).toBe(false);
     expect(walkReqs()).toHaveLength(0);
+    // The run's data reads are the view and the workflow stages, once each, and nothing else. The
+    // contract and the signed-in member (/api/v1/me) are login bookkeeping, not data reads, so they
+    // are left out; this run makes neither today.
+    const dataPaths = server.requests
+      .map((r) => new URL(`http://x${r.path}`).pathname)
+      .filter((p) => p !== "/api/v1/agent/contract" && !p.startsWith("/api/v1/me"));
+    expect(dataPaths.sort()).toEqual(["/api/v1/views/waiting-on-me", "/api/v1/workflow-stages"]);
     expect(ctx.err).toEqual([]);
   });
 
