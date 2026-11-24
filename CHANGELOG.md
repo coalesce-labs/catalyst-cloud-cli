@@ -8,6 +8,8 @@ When none of your asks are open, the line now reads `no open asks assigned to <y
 
 The catalyst-linear ticket reader (`node scripts/read-ticket.mjs <ticket>`) now prints a `blocked by` block that names every ticket holding the one you read, with each blocker's state and whether it is an ask. Before, the plain output listed only the tickets this one points to, so a held ticket looked free and its blockers were easy to file twice. Each line under `relations` now ends with the other ticket's state too. `--json` output is unchanged.
 
+The catalyst-onboard skill now ends by offering one real check of your pipeline. After a full `catalyst onboard` run succeeds, the agent offers once to run `catalyst smoke readme --team <KEY> --repo <owner/name>`, and nothing runs unless you say yes. Only a `merged` result counts as a pass. The agent never merges, closes or reverts the pull request the check opens; your team's own merge rules decide that.
+
 ## 0.16.52
 
 `catalyst smoke readme --team <KEY> --repo <owner/name>` checks that a team's pipeline can carry one real ticket all the way to a merge. It files a ticket that asks for the line `Catalyst Cloud enabled` in the repository's README.md, then watches the ticket through each stage.
