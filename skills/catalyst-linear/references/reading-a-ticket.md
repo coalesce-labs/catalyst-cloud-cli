@@ -14,7 +14,7 @@ Quote the source when a fact's freshness matters ("as of the replica at cursor N
 
 ## Then the row
 
-One read returns the whole record inline: fields, description, `labels[]`, `relations[]`, `linked_pulls[]`, `comments[]`, `activity[]` and `agent_sessions[]`, plus project, cycle, team, delegate and parent. `--comments` prints every comment with its id, author, time and bot flag; a comment with a `reply-to` marker is threaded, so reply under the same parent.
+One read returns the whole record inline: fields, description, `labels[]`, `relations[]`, `linked_pulls[]`, `comments[]`, `activity[]` and `agent_sessions[]`, plus project, cycle, team, delegate and parent. `relations[]` holds only the edges the ticket points out along. The tickets that hold it arrive in `blocked_by[]`, each with its state, and the plain output prints them in their own `blocked by` block, so read that block before filing a blocker. `--comments` prints every comment with its id, author, time and bot flag; a comment with a `reply-to` marker is threaded, so reply under the same parent.
 
 ## Reading Catalyst's own writes
 
