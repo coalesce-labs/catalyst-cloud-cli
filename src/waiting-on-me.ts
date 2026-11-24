@@ -2,7 +2,7 @@
 // is not defined anywhere this repository can read, so every reply is checked and anything unproven is
 // a fallback reason: the caller walks /api/v1/issues instead, and the answer stays today's.
 import { CliError, MeError } from "./errors.js";
-import { NEXT_CURSOR_HEADER, readTotal, SERVER_PAGE_CAP } from "./pagination.js";
+import { NEXT_CURSOR_HEADER, readTotal } from "./pagination.js";
 import type { ApiClient } from "./transport.js";
 
 export const WAITING_ON_ME_PATH = "/api/v1/views/waiting-on-me";
@@ -87,7 +87,9 @@ export async function readWaitingOnMe(api: ApiClient, linearUserId: string): Pro
   for (let pages = 1; pages <= VIEW_MAX_PAGES; pages++) {
     let res;
     try {
-      res = await api.getJson<unknown>(WAITING_ON_ME_PATH, { query: { limit: SERVER_PAGE_CAP, after }, accept: FALLBACK_STATUSES, parseAccepted: true });
+      // No `limit`: the view refuses one above its own page size (100 on staging, a 400 that is not a
+      // fallback), while /api/v1/issues takes 500. Omitted, the server pages at its own size (CTC-5644).
+      res = await api.getJson<unknown>(WAITING_ON_ME_PATH, { query: { after }, accept: FALLBACK_STATUSES, parseAccepted: true });
     } catch (e) {
       if (e instanceof MeError && e.kind === "shape") return { ok: false, reason: "shape" };
       throw e;

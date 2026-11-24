@@ -1177,6 +1177,12 @@ export async function startMeFixture(
         (r.relations as Record<string, unknown>[]).filter((rel) => rel.type === "blocks" && rel.issue_identifier === r.identifier && !closed.includes(String(rel.related_state ?? "").toLowerCase())).length;
       hydrated.sort((a, b) => open(b) - open(a) || Number(a.updated_at) - Number(b.updated_at) || String(a.id).localeCompare(String(b.id)));
       if (state.waitingOnMeOrder === "reversed") hydrated.reverse();
+      // The mirror's cloud views take a `limit` from 1 to the view's page size (100) and answer 400 to
+      // anything else (catalyst-cloud apps/mirror/src/cloud-views/list.ts), unlike /api/v1/issues.
+      const viewLimit = url.searchParams.get("limit");
+      if (viewLimit !== null && (!Number.isInteger(Number(viewLimit)) || Number(viewLimit) < 1 || Number(viewLimit) > 100)) {
+        return send(400, { error: "limit must be an integer from 1 to 100" });
+      }
       const p = keysetPage(hydrated, url, state, "/api/v1/views/waiting-on-me");
       if (p.bad) return send(400, { error: p.bad });
       return send(200, state.waitingOnMeEnvelope === "bare" ? p.rows : { rows: p.rows, total: p.total }, p.headers);

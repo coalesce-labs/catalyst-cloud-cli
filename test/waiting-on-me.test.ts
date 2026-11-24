@@ -54,6 +54,17 @@ describe("readWaitingOnMe", () => {
     expect(viewRequests()[1]!.path).toContain("after=");
     expect(viewRequests()[2]!.path).toContain("after=");
   });
+  test("sends no limit, so the view's own page size applies (a limit over 100 is a 400 on the real view)", async () => {
+    // Positive control: the fake view refuses the limit the walk uses, as staging did for limit=500.
+    const refused = await fetch(`${server.url}${WAITING_ON_ME_PATH}?limit=500`, { headers: { authorization: "Bearer fixture-user-key" } });
+    expect(refused.status).toBe(400);
+    server.requests.length = 0;
+    server.issues = manyAsks(150);
+    const r = await readWaitingOnMe(client(), ME);
+    expect(r.ok && r.rows.length).toBe(150);
+    expect(viewRequests()).toHaveLength(2);
+    for (const req of viewRequests()) expect(new URL(req.path, server.url).searchParams.has("limit")).toBe(false);
+  });
   test("a bare array and an empty list are fine", async () => {
     server.waitingOnMeEnvelope = "bare";
     expect(await readWaitingOnMe(client(), ME)).toMatchObject({ ok: true });
