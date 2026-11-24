@@ -82,12 +82,27 @@ line("parent", row.parent_identifier);
 line("labels", names(row.labels, "name").join(", "));
 line("url", row.url);
 line("updated", row.updated_at);
+// `relations` holds only the edges this ticket points out along. Each line ends with the other
+// ticket's state when the record carries it.
 if (Array.isArray(row.relations) && row.relations.length) {
   console.log(`relations (${row.relations.length}):`);
   for (const rel of row.relations)
     console.log(
-      `  ${rel.type ?? "?"}: ${rel.issue_identifier ?? ""} -> ${rel.related_identifier ?? JSON.stringify(rel)}`,
+      `  ${rel.type ?? "?"}: ${rel.issue_identifier ?? ""} -> ${rel.related_identifier ?? JSON.stringify(rel)}${rel.related_state ? ` [${rel.related_state}]` : ""}`,
     );
+}
+// The tickets holding this one arrive in `blocked_by`, never in `relations`: a reader shown only
+// the block above sees a held ticket as free and files its blockers again.
+if (Array.isArray(row.blocked_by) && row.blocked_by.length) {
+  console.log(`blocked by (${row.blocked_by.length}):`);
+  for (const blocker of row.blocked_by) {
+    const marks = ["is_ask", "is_approval", "is_decided", "unresolved"]
+      .filter((flag) => blocker?.[flag] === true)
+      .map((flag) => flag.replace(/^is_/, ""));
+    console.log(
+      `  ${blocker?.identifier ?? "?"} [${blocker?.state ?? "?"}]${marks.length ? ` (${marks.join(", ")})` : ""} ${blocker?.title ?? ""}`.trimEnd(),
+    );
+  }
 }
 if (Array.isArray(row.linked_pulls) && row.linked_pulls.length) {
   console.log(`linked pull requests (${row.linked_pulls.length}):`);

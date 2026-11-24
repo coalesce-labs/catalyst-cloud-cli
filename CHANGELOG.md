@@ -6,6 +6,8 @@
 
 When none of your asks are open, the line now reads `no open asks assigned to <you> (add --anyone to see every open ask in your cloud account)`. It no longer counts everyone's open asks, because that count needs the full read this release avoids. If Catalyst has a different Linear identity for you than the one this machine recorded when you logged in, `ask list` reads every ticket as before and says to run `catalyst login`, on stderr as well when you pass `--json`, so what you parse from stdout does not change.
 
+The catalyst-linear ticket reader (`node scripts/read-ticket.mjs <ticket>`) now prints a `blocked by` block that names every ticket holding the one you read, with each blocker's state and whether it is an ask. Before, the plain output listed only the tickets this one points to, so a held ticket looked free and its blockers were easy to file twice. Each line under `relations` now ends with the other ticket's state too. `--json` output is unchanged.
+
 ## 0.16.52
 
 `catalyst smoke readme --team <KEY> --repo <owner/name>` checks that a team's pipeline can carry one real ticket all the way to a merge. It files a ticket that asks for the line `Catalyst Cloud enabled` in the repository's README.md, then watches the ticket through each stage.
