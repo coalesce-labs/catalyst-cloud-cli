@@ -24,7 +24,11 @@ if (help) {
   process.exit(0);
 }
 
-const answer = parseJson(mustRun(["ask", "list", "--json", ...(flags.anyone ? ["--anyone"] : [])], { quiet: true }).stdout, "ask list");
+// A successful `ask list` can still write to stderr (the `catalyst login` hint on a stale identity), and
+// mustRun forwards stderr only on failure, so pass it on here before parsing stdout.
+const listed = mustRun(["ask", "list", "--json", ...(flags.anyone ? ["--anyone"] : [])], { quiet: true });
+if (listed.stderr) process.stderr.write(listed.stderr.endsWith("\n") ? listed.stderr : `${listed.stderr}\n`);
+const answer = parseJson(listed.stdout, "ask list");
 const rows = answer.asks;
 const scope = answer.scope;
 const wanted = flags.team ? rows.filter((r) => String(r.identifier).toUpperCase().startsWith(`${flags.team.toUpperCase()}-`)) : rows;

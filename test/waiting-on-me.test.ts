@@ -141,6 +141,23 @@ describe("readWaitingOnMe", () => {
     test("a bare array reply with a header total is checked too", async () => {
       expect(await read([row], { "x-mirror-total": "3" })).toEqual({ ok: false, reason: "unpaged" });
     });
+    // Two pages: the first states a total and a cursor, the last states neither. The reader keeps the first
+    // page's total, as the walk keeps its last non-null total, so a short list is not accepted as complete.
+    const twoPages = (firstTotal: string) =>
+      (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+        if (u.pathname !== WAITING_ON_ME_PATH) return fetch(input, init);
+        const json = { "content-type": "application/json" };
+        if (!u.searchParams.get("after"))
+          return new Response(JSON.stringify({ rows: [row] }), { status: 200, headers: { ...json, "x-mirror-total": firstTotal, "x-mirror-next-cursor": "c1" } });
+        return new Response(JSON.stringify({ rows: [{ ...row, identifier: "A-2" }] }), { status: 200, headers: json });
+      }) as typeof fetch;
+    test("a total stated only on an earlier page still has to be reached", async () => {
+      expect(await readWaitingOnMe(client(twoPages("3")), ME)).toEqual({ ok: false, reason: "unpaged" });
+    });
+    test("an earlier page's total the rows reach is complete", async () => {
+      expect(await readWaitingOnMe(client(twoPages("2")), ME)).toMatchObject({ ok: true, pages: 2 });
+    });
   });
   test("a network error surfaces", async () => {
     const boom = (async () => {
@@ -170,6 +187,15 @@ describe("viewRowsOf and checkViewRows", () => {
     expect(checkViewRows([blocks({ related_identifier: "A-2" })], ME)).toBeNull();
     expect(checkViewRows([blocks({})], ME)).toBe("shape");
     expect(checkViewRows([blocks({ related_identifier: 7 })], ME)).toBe("shape");
+  });
+  test("a null or non-object label, and a relation without its type or issue_identifier, are shape fallbacks", () => {
+    const row = (over: Record<string, unknown>) => ({ identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", title: "T", updated_at: 1, relations: [], ...over });
+    expect(checkViewRows([row({ labels: [{ id: "l", name: "catalyst-ask" }] })], ME)).toBeNull();
+    expect(checkViewRows([row({ labels: [null] })], ME)).toBe("shape");
+    expect(checkViewRows([row({ labels: ["catalyst-ask"] })], ME)).toBe("shape");
+    expect(checkViewRows([row({ relations: [{ issue_identifier: "A-1", related_identifier: "A-2", related_state: null }] })], ME)).toBe("shape");
+    expect(checkViewRows([row({ relations: [{ type: "blocks", related_identifier: "A-2", related_state: null }] })], ME)).toBe("shape");
+    expect(checkViewRows([row({ relations: [{ type: "related", issue_identifier: "B-9" }] })], ME)).toBeNull();
   });
   test.each(["labels", "state", "title", "relations", "updated_at"])("a view row without %s is a shape fallback", async (field) => {
     const row: Record<string, unknown> = { identifier: "A-1", assignee_id: ME, labels: [], state: "Todo", title: "T", updated_at: 1, relations: [] };

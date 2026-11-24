@@ -44,9 +44,13 @@ export function checkViewRows(rows: Row[], linearUserId: string): ViewFallback |
     if (!r || typeof r !== "object" || typeof r.identifier !== "string") return "shape";
     if (r.assignee_id !== linearUserId) return "other-person";
     if (!Array.isArray(r.labels) || typeof r.state !== "string" || typeof r.title !== "string" || !Array.isArray(r.relations)) return "shape";
+    // `rankAsks` reads `l.id` and `l.name` on every label, so a null or non-object label would throw there.
+    if ((r.labels as unknown[]).some((l) => !l || typeof l !== "object")) return "shape";
     if (!validAge(r.updated_at) || (r.created_at != null && !validAge(r.created_at))) return "shape";
     for (const rel of r.relations as Row[]) {
       if (!rel || typeof rel !== "object") return "shape";
+      // Without both discriminators `rankAsks` would silently drop the relation and print a wrong score.
+      if (typeof rel.type !== "string" || typeof rel.issue_identifier !== "string") return "shape";
       if (rel.type !== "blocks" || rel.issue_identifier !== r.identifier) continue;
       if (typeof rel.related_identifier !== "string") return "shape";
       if (!("related_state" in rel) || (rel.related_state !== null && typeof rel.related_state !== "string")) return "shape";
@@ -62,9 +66,9 @@ function bodyHasMore(body: unknown): boolean {
   return (typeof cursor === "string" && cursor !== "") || b.hasMore === true;
 }
 
-/** The row count a reply says it has in all: the `x-mirror-total` header, else a body `total`. Read on the
- *  last page only, where the accumulated rows must reach it. Absent or not a whole number is "unknown",
- *  never a fallback, as on the walk. */
+/** The row count a reply says it has in all: the `x-mirror-total` header, else a body `total`. The last
+ *  page that states one is kept, as the walk keeps its last non-null total, and the accumulated rows must
+ *  reach it on the final page. Absent or not a whole number is "unknown", never a fallback, as on the walk. */
 function claimedTotals(headers: Headers, body: unknown): number[] {
   const out: number[] = [];
   const h = readTotal(headers);
@@ -79,6 +83,7 @@ export async function readWaitingOnMe(api: ApiClient, linearUserId: string): Pro
   const rows: Row[] = [];
   const seen = new Set<string>();
   let after: string | undefined;
+  let claimed: number[] = [];
   for (let pages = 1; pages <= VIEW_MAX_PAGES; pages++) {
     let res;
     try {
@@ -99,9 +104,11 @@ export async function readWaitingOnMe(api: ApiClient, linearUserId: string): Pro
     const bad = checkViewRows(page, linearUserId);
     if (bad) return { ok: false, reason: bad };
     rows.push(...page);
+    const pageTotals = claimedTotals(res.headers, res.body);
+    if (pageTotals.length > 0) claimed = pageTotals;
     const next = res.headers.get(NEXT_CURSOR_HEADER);
     if (next === null || next === "") {
-      if (bodyHasMore(res.body) || claimedTotals(res.headers, res.body).some((n) => rows.length < n)) return { ok: false, reason: "unpaged" };
+      if (bodyHasMore(res.body) || claimed.some((n) => rows.length < n)) return { ok: false, reason: "unpaged" };
       return { ok: true, rows, pages };
     }
     if (seen.has(next)) return { ok: false, reason: "stalled" };
