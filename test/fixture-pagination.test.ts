@@ -79,7 +79,10 @@ test("the fake Waiting-on-me view pages, refuses by class, and hydrates related_
   ];
   server.pageCap = 5;
   try {
-    const first = await fetch(`${server.url}/api/v1/views/waiting-on-me?limit=500`, { headers: person });
+    // The view's own page size is 100: a limit outside 1 to 100 is a 400, as on the mirror.
+    for (const bad of ["500", "101", "0", "1.5"])
+      expect((await fetch(`${server.url}/api/v1/views/waiting-on-me?limit=${bad}`, { headers: person })).status).toBe(400);
+    const first = await fetch(`${server.url}/api/v1/views/waiting-on-me`, { headers: person });
     expect(first.status).toBe(200);
     const cursor = first.headers.get("x-mirror-next-cursor");
     expect(cursor).not.toBeNull();
@@ -87,7 +90,7 @@ test("the fake Waiting-on-me view pages, refuses by class, and hydrates related_
     expect(body.rows).toHaveLength(5);
     expect(body.rows[0]).toMatchObject({ identifier: "ENG-52" });
     expect(body.rows[0]!.relations.map((r) => r.related_state)).toEqual(["Todo", "In Progress", null]);
-    const second = await fetch(`${server.url}/api/v1/views/waiting-on-me?limit=500&after=${cursor}`, { headers: person });
+    const second = await fetch(`${server.url}/api/v1/views/waiting-on-me?limit=100&after=${cursor}`, { headers: person });
     expect(second.headers.get("x-mirror-next-cursor")).toBeNull();
     expect((await fetch(`${server.url}/api/v1/views/waiting-on-me`, { headers: auth })).status).toBe(403);
     server.meUser = { id: "u", label: "N", email: null, role: "admin", linearUserId: null };
