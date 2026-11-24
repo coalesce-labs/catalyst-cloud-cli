@@ -47,7 +47,7 @@ function readScope(headers: Headers): string[] | null {
   return raw.split(",").map((p) => p.trim()).filter(Boolean);
 }
 
-function readTotal(headers: Headers): number | null {
+export function readTotal(headers: Headers): number | null {
   const raw = headers.get(TOTAL_HEADER);
   if (raw === null) return null;
   const n = Number(raw);

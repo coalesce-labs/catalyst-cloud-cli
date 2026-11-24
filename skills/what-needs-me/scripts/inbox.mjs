@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // inbox.mjs — "what needs me?": the open asks in this cloud account, ranked by what each answer releases.
-// A thin wrapper over `catalyst ask list`, which reads the open tickets carrying the team's
-// ask label (from the contract), follows each one's blocking relations, and ranks by the count of
-// open tickets held, then the oldest ask. By default the CLI keeps only the asks assigned to the
-// connected person; --anyone widens to the whole account. Prints the ranked list; --json prints the
+// A thin wrapper over `catalyst ask list`, which reads the connected person's asks from the workspace's
+// Waiting-on-me view (every ticket for --anyone), follows each one's blocking relations, and ranks by
+// the count of open tickets held, then the oldest ask. By default the CLI keeps only the asks assigned
+// to the connected person; --anyone widens to the whole account. Prints the ranked list; --json prints the
 // CLI's {scope, asks} unchanged.
 import { mustRun, parseFlags, parseJson, printHelp } from "./lib/cli.mjs";
 
@@ -18,13 +18,17 @@ const { help, flags } = parseFlags(process.argv.slice(2), SPEC);
 if (help) {
   printHelp("node scripts/inbox.mjs [--json] [--team K] [--all] [--anyone] [--help]", SPEC, [
     "Rank: most open tickets blocked first, then the oldest ask; priority is not a weight.",
-    "An ask that holds nothing is real but will not appear in the Waiting-on-me view; it is",
+    "An ask that holds nothing is real and still shows in your Waiting-on-me view; it is",
     "listed last with a marker so you can attach the work it should block (references/reading-the-inbox.md).",
   ]);
   process.exit(0);
 }
 
-const answer = parseJson(mustRun(["ask", "list", "--json", ...(flags.anyone ? ["--anyone"] : [])], { quiet: true }).stdout, "ask list");
+// A successful `ask list` can still write to stderr (the `catalyst login` hint on a stale identity), and
+// mustRun forwards stderr only on failure, so pass it on here before parsing stdout.
+const listed = mustRun(["ask", "list", "--json", ...(flags.anyone ? ["--anyone"] : [])], { quiet: true });
+if (listed.stderr) process.stderr.write(listed.stderr.endsWith("\n") ? listed.stderr : `${listed.stderr}\n`);
+const answer = parseJson(listed.stdout, "ask list");
 const rows = answer.asks;
 const scope = answer.scope;
 const wanted = flags.team ? rows.filter((r) => String(r.identifier).toUpperCase().startsWith(`${flags.team.toUpperCase()}-`)) : rows;
@@ -49,7 +53,7 @@ for (const r of holding) {
   process.stdout.write(`${n}. ${r.identifier}  holds ${r.blocks.length}: ${r.blocks.join(", ")}\n   ${r.title}\n`);
 }
 if (idle.length && (flags.all || holding.length === 0)) {
-  process.stdout.write(`${holding.length ? "\n" : ""}asks that hold nothing (not shown in Waiting on me until they block something):\n`);
+  process.stdout.write(`${holding.length ? "\n" : ""}asks that hold nothing yet:\n`);
   for (const r of idle) process.stdout.write(`   ${r.identifier}  ${r.title}\n`);
 } else if (idle.length) {
   process.stdout.write(`\n(${idle.length} more ask${idle.length === 1 ? "" : "s"} hold nothing; --all lists them)\n`);
